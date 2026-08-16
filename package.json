@@ -1,0 +1,19 @@
+{
+  "name": "serialize",
+  "version": "0.0.0",
+  "description": "A bitpacking serialization library for JavaScript. Wire compatible with the C++, C, C#, Go and Rust serialize libraries.",
+  "type": "module",
+  "private": true,
+  "license": "BSD-3-Clause",
+  "exports": "./src/index.js",
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mas-bandwidth/serialize.js.git"
+  }
+}
