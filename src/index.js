@@ -9,4 +9,4 @@
 //
 // Under construction, chunk by chunk. This module is the package entry point.
 
-export { BitWriter } from './bitpacker.js';
+export { BitWriter, BitReader } from './bitpacker.js';
