@@ -25,6 +25,10 @@ const BITS_RANGE_MESSAGE = 'bits must be an integer in [1,32]';
 const VALUE_TYPE_MESSAGE = 'value must be a number';
 const WRITE_OVERFLOW_MESSAGE = 'write past the end of the buffer';
 const READ_OVERFLOW_MESSAGE = 'read past the end of the buffer';
+const DATA_TYPE_MESSAGE = 'data must be a Uint8Array';
+const BYTES_COUNT_MESSAGE = 'bytes must be a non-negative integer';
+const WRITE_UNALIGNED_MESSAGE = 'writeBytes requires a byte-aligned bit index';
+const READ_UNALIGNED_MESSAGE = 'readBytes requires a byte-aligned bit index';
 
 /**
  * Bitpacks unsigned integer values to a buffer.
@@ -146,6 +150,62 @@ export class BitWriter {
     const remainderBits = this.#bitsWritten % 8;
     if (remainderBits !== 0) {
       this.writeBits(0, 8 - remainderBits);
+    }
+  }
+
+  /**
+   * Writes an array of bytes to the bit stream: the aligned bulk copy under
+   * serialize_bytes. The bit index must be byte aligned (write an align
+   * first) and the write must fit the buffer -- both are caller contracts
+   * and violating them throws, like every writer contract in this class.
+   *
+   * Faster than writing each byte via writeBits(value, 8): single bytes go
+   * through the scratch only until the write cursor reaches a 64-bit word
+   * boundary -- where the scratch is empty by the writer's invariant -- then
+   * whole words bulk copy directly into the buffer, and the final partial
+   * word of bytes goes through the scratch again. The wire is identical to
+   * writing every byte with writeBits(value, 8).
+   * @param {Uint8Array} data the bytes to write, in order.
+   */
+  writeBytes(data) {
+    if (!(data instanceof Uint8Array)) {
+      throw new TypeError(DATA_TYPE_MESSAGE);
+    }
+    if (this.#bitsWritten % 8 !== 0) {
+      throw new RangeError(WRITE_UNALIGNED_MESSAGE);
+    }
+    const bytes = data.length;
+    if (this.#bitsWritten + bytes * 8 > this.#numBits) {
+      throw new RangeError(WRITE_OVERFLOW_MESSAGE);
+    }
+
+    // head: single bytes through the scratch until the cursor reaches a word
+    // boundary, or the data runs out first
+    let headBytes = (8 - ((this.#bitsWritten % 64) / 8)) % 8;
+    if (headBytes > bytes) {
+      headBytes = bytes;
+    }
+    for (let i = 0; i < headBytes; i++) {
+      this.writeBits(data[i], 8);
+    }
+    if (headBytes === bytes) {
+      return;
+    }
+
+    // at the word boundary the scratch is empty (scratchBits tracks
+    // bitsWritten % 64, and the write that filled bit 64 flushed it with a
+    // zero spill): whole words bulk copy straight into the buffer
+    const numWords = Math.floor((bytes - headBytes) / 8);
+    if (numWords > 0) {
+      this.#data.set(data.subarray(headBytes, headBytes + numWords * 8), this.#wordIndex * 8);
+      this.#bitsWritten += numWords * 64;
+      this.#wordIndex += numWords;
+    }
+
+    // tail: the remaining bytes, fewer than 8, through the scratch
+    const tailStart = headBytes + numWords * 8;
+    for (let i = tailStart; i < bytes; i++) {
+      this.writeBits(data[i], 8);
     }
   }
 
@@ -392,6 +452,35 @@ export class BitReader {
       }
     }
     return true;
+  }
+
+  /**
+   * Reads bytes from the bitpacked data: the aligned bulk read under
+   * serialize_bytes, corresponding to a writeBytes call when the buffer was
+   * written. Returns a subarray VIEW of the reader's data (not a copy),
+   * valid as long as the underlying data is: copy it if you need it past
+   * the next reset. The bit index must be byte aligned (read an align
+   * first), bytes must be a non-negative integer, and the read must not
+   * pass the end of the data -- caller contracts, and violating them throws:
+   * this is the trusted-caller form, like readBits. The stream layer bounds
+   * checks first and refuses as a value.
+   * @param {number} bytes the number of bytes to read.
+   * @returns {Uint8Array} a view of the bytes read.
+   */
+  readBytes(bytes) {
+    if (!Number.isInteger(bytes) || bytes < 0) {
+      throw new RangeError(BYTES_COUNT_MESSAGE);
+    }
+    if (this.#bitsRead % 8 !== 0) {
+      throw new RangeError(READ_UNALIGNED_MESSAGE);
+    }
+    if (this.#bitsRead + bytes * 8 > this.#numBits) {
+      throw new RangeError(READ_OVERFLOW_MESSAGE);
+    }
+    // the bit index is byte aligned, so this is a straight view of the data
+    const byteIndex = this.#bitsRead / 8;
+    this.#bitsRead += bytes * 8;
+    return this.#data.subarray(byteIndex, byteIndex + bytes);
   }
 
   /**
