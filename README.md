@@ -38,8 +38,19 @@ any other.
   `serializeUint16`, `serializeUint32`, and `serializeBool`. Reads refuse
   values smuggled into the bit headroom of a range; writes and measures
   refuse out-of-range values as latched errors, never throws.
-- `bitsRequired(min, max)` — the serialize.h range-costing arithmetic, for
-  pricing fields when designing a message format.
+- The wide integers, in the BigInt value domain (the bitpacker underneath
+  stays in 32-bit arithmetic): `serializeBits64` and its alias
+  `serializeUint64` (low 32-bit dword first, then the high remainder),
+  `serializeInt64` and `serializeInt128` (the ranged operations at 64 and
+  128 bits — offsets computed in the unsigned domain, so ranges wider than
+  2^63 and 2^127 are exact; up to four 32-bit groups, least significant
+  first; wire identical to each other wherever the range fits 64 bits), and
+  `serializeUint128` (not ranged — always 128 bits, the low 64-bit half
+  first). Wide refusals are checked against the total width up front, so a
+  refused operation consumes and writes nothing.
+- `bitsRequired(min, max)`, `bitsRequired64` and `bitsRequired128` — the
+  serialize.h range-costing arithmetic, for pricing fields when designing a
+  message format.
 
 ## Design
 
