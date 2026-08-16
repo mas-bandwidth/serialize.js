@@ -37,6 +37,7 @@ const INT128_RANGE_MESSAGE = 'min and max must be BigInts in [-2^127,2^127-1]';
 const MIN_MAX_MESSAGE = 'min must not exceed max';
 const VALUE_TYPE_MESSAGE = 'value must be a number';
 const BIGINT_VALUE_MESSAGE = 'value must be a BigInt';
+const BYTES_TYPE_MESSAGE = 'data must be a Uint8Array';
 
 const FLOAT_PARAMS_MESSAGE = 'min must be less than max and resolution must be positive, as float32 values';
 const FLOAT_DECLARATION_MESSAGE = 'compressed float declaration is not finite in float32: delta and delta / resolution must not overflow';
@@ -735,6 +736,34 @@ export class WriteStream {
   }
 
   /**
+   * Writes an array of bytes: an align to the byte boundary first -- the
+   * alignment is part of the format (STANDARD.md, "bytes") -- then
+   * data.length raw bytes as a bulk copy. The count is NOT written; both
+   * sides must already agree on it, which in this API means the reader
+   * passes an array of the same length. A zero-length array still aligns
+   * and writes nothing else (ratified 2026-08-15). data must be a
+   * Uint8Array (misuse throws). Returns false and latches Overflow if the
+   * bytes would pass the end of the buffer; the align padding, written
+   * before the check, is part of the latched stream's dead wire.
+   * @param {Uint8Array} data the bytes to write, in order.
+   * @returns {boolean} true on success.
+   */
+  serializeBytes(data) {
+    if (!(data instanceof Uint8Array)) {
+      throw new TypeError(BYTES_TYPE_MESSAGE);
+    }
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    this.#writer.writeAlign();
+    if (data.length * 8 > this.#writer.bitsAvailable()) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    this.#writer.writeBytes(data);
+    return true;
+  }
+
+  /**
    * Pads the stream with zero bits to the next byte boundary; if it is
    * already byte aligned, writes nothing. This can never pass the end of the
    * buffer: the buffer size is a multiple of 8 bytes, so an unaligned bit
@@ -1267,6 +1296,37 @@ export class ReadStream {
   }
 
   /**
+   * Reads an array of bytes: an align to the byte boundary first -- the
+   * alignment is part of the format (STANDARD.md, "bytes"), and its padding
+   * is verified zero -- then data.length raw bytes copied into data. The
+   * count is not on the wire; passing an array of the agreed length IS the
+   * agreement. A zero-length array still performs and verifies the align.
+   * data must be a Uint8Array (misuse throws). Nonzero align padding latches
+   * SerializeError.Align; bytes past the end of the data latch Overflow. On
+   * refusal data is untouched. Hostile data never throws.
+   * @param {Uint8Array} data destination; its length is the byte count.
+   * @returns {boolean} true on success.
+   */
+  serializeBytes(data) {
+    if (!(data instanceof Uint8Array)) {
+      throw new TypeError(BYTES_TYPE_MESSAGE);
+    }
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    if (!this.#reader.readAlign()) {
+      return this.#fail(SerializeError.Align);
+    }
+    // compare in bytes rather than bits, consistent with the family's
+    // 64-bit bookkeeping
+    if (data.length > this.#reader.bitsRemaining() / 8) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    data.set(this.#reader.readBytes(data.length));
+    return true;
+  }
+
+  /**
    * Skips ahead to the next byte boundary, verifying that the padding bits
    * are zero. Nonzero padding latches SerializeError.Align, which typically
    * means the read and write serialize functions don't match. This can never
@@ -1581,6 +1641,25 @@ export class MeasureStream {
       return this.#fail(SerializeError.ValueOutOfRange);
     }
     return this.#measure(params.bits);
+  }
+
+  /**
+   * Measures an array of bytes: a worst case 7-bit align plus the data
+   * bytes -- the bytes operation aligns, and a measure charges every
+   * alignment its conservative worst case. data must be a Uint8Array
+   * (misuse throws); its contents are ignored.
+   * @param {Uint8Array} data the bytes that would be written.
+   * @returns {boolean} true on success.
+   */
+  serializeBytes(data) {
+    if (!(data instanceof Uint8Array)) {
+      throw new TypeError(BYTES_TYPE_MESSAGE);
+    }
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    this.serializeAlign();
+    return this.#measure(data.length * 8);
   }
 
   /**
