@@ -60,6 +60,24 @@ any other.
   values outside the declaration clamp; writing a non-finite value latches
   `ValueOutOfRange`; reads refuse integers smuggled above
   `max_integer_value`.
+- `serializeBytes` — an align to the byte boundary (part of the format,
+  verified on read) then a raw bulk byte copy whose count is never
+  transmitted: both sides agree on it by passing arrays of the same length.
+  A zero-length array still aligns. The family's conformance pins for the
+  zero-count and unaligned paths hold byte-for-byte.
+- `serializeString` — **UTF-8 on the wire**: the byte length as
+  `serializeInt(length, 0, bufferSize - 1)`, then the payload as
+  `serializeBytes`, which aligns. `bufferSize` is part of the message
+  format — the same string against different buffer sizes produces
+  different bytes. Writes refuse strings of `bufferSize` or more UTF-8
+  bytes; reads validate the payload in every build and latch
+  `InvalidString` on malformed UTF-8 (the fatal `TextDecoder` refuses
+  overlongs, surrogates, values above U+10FFFF, truncated sequences, stray
+  continuations) or on an **interior NUL** — valid UTF-8, refused by an
+  explicit scan as the two-lengths smuggling primitive. A leading U+FEFF is
+  a code point, not a BOM: it survives the round trip. A lone surrogate in
+  a written string — ill-formed UTF-16, the writer's contract violated —
+  encodes as U+FFFD, the contract surfacing JavaScript's way.
 - `bitsRequired(min, max)`, `bitsRequired64` and `bitsRequired128` — the
   serialize.h range-costing arithmetic, for pricing fields when designing a
   message format.
