@@ -212,6 +212,49 @@ export class WriteStream {
   }
 
   /**
+   * Writes the low 8 bits of ref.value: the fixed-width uint8 helper, an
+   * alias for serializeBits(ref, 8) carrying no range information of its
+   * own (STANDARD.md). Higher bits are ignored, as the uint8 parameter type
+   * of the other ports converts at the call site.
+   * @param {{value: number}} ref holder of the value to write.
+   * @returns {boolean} true on success.
+   */
+  serializeUint8(ref) {
+    return this.#writeBits(ref.value, 8);
+  }
+
+  /**
+   * Writes the low 16 bits of ref.value: the fixed-width uint16 helper, an
+   * alias for serializeBits(ref, 16). Higher bits are ignored.
+   * @param {{value: number}} ref holder of the value to write.
+   * @returns {boolean} true on success.
+   */
+  serializeUint16(ref) {
+    return this.#writeBits(ref.value, 16);
+  }
+
+  /**
+   * Writes the low 32 bits of ref.value: the fixed-width uint32 helper, an
+   * alias for serializeBits(ref, 32). Higher bits are ignored.
+   * @param {{value: number}} ref holder of the value to write.
+   * @returns {boolean} true on success.
+   */
+  serializeUint32(ref) {
+    return this.#writeBits(ref.value, 32);
+  }
+
+  /**
+   * Writes one bit: 1 if ref.value is truthy, 0 otherwise (STANDARD.md's
+   * bool). Truthiness is JavaScript's boolean conversion, standing in for
+   * the bool parameter type of the other ports.
+   * @param {{value: boolean}} ref holder of the value to write.
+   * @returns {boolean} true on success.
+   */
+  serializeBool(ref) {
+    return this.#writeBits(ref.value ? 1 : 0, 1);
+  }
+
+  /**
    * Pads the stream with zero bits to the next byte boundary; if it is
    * already byte aligned, writes nothing. This can never pass the end of the
    * buffer: the buffer size is a multiple of 8 bytes, so an unaligned bit
@@ -411,6 +454,59 @@ export class ReadStream {
   }
 
   /**
+   * Reads 8 bits into ref.value: the fixed-width uint8 helper, an alias for
+   * serializeBits(ref, 8) carrying no range information of its own
+   * (STANDARD.md). On success ref.value is in [0,255]; on failure it is
+   * left unmodified.
+   * @param {{value: number}} ref holder the value read is assigned to.
+   * @returns {boolean} true on success.
+   */
+  serializeUint8(ref) {
+    return this.#readBits(ref, 8);
+  }
+
+  /**
+   * Reads 16 bits into ref.value: the fixed-width uint16 helper, an alias
+   * for serializeBits(ref, 16). On success ref.value is in [0,65535]; on
+   * failure it is left unmodified.
+   * @param {{value: number}} ref holder the value read is assigned to.
+   * @returns {boolean} true on success.
+   */
+  serializeUint16(ref) {
+    return this.#readBits(ref, 16);
+  }
+
+  /**
+   * Reads 32 bits into ref.value: the fixed-width uint32 helper, an alias
+   * for serializeBits(ref, 32). On success ref.value is in [0,2^32-1]; on
+   * failure it is left unmodified.
+   * @param {{value: number}} ref holder the value read is assigned to.
+   * @returns {boolean} true on success.
+   */
+  serializeUint32(ref) {
+    return this.#readBits(ref, 32);
+  }
+
+  /**
+   * Reads one bit into ref.value as a real boolean: true for 1, false for
+   * 0 (STANDARD.md's bool). A single bit cannot be out of range, so the
+   * only refusal is a read past the end of the data; on failure ref.value
+   * is left unmodified.
+   * @param {{value: boolean}} ref holder the value read is assigned to.
+   * @returns {boolean} true on success.
+   */
+  serializeBool(ref) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    if (this.#reader.wouldReadPastEnd(1)) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    ref.value = this.#reader.readBits(1) !== 0;
+    return true;
+  }
+
+  /**
    * Skips ahead to the next byte boundary, verifying that the padding bits
    * are zero. Nonzero padding latches SerializeError.Align, which typically
    * means the read and write serialize functions don't match. This can never
@@ -558,6 +654,42 @@ export class MeasureStream {
       return this.#fail(SerializeError.ValueOutOfRange);
     }
     return this.#measure(bitsRequired(min >>> 0, max >>> 0));
+  }
+
+  /**
+   * Measures the fixed-width uint8 helper: 8 bits. ref is ignored.
+   * @param {{value: number}} ref ignored.
+   * @returns {boolean} true on success.
+   */
+  serializeUint8(ref) {
+    return this.#measure(8);
+  }
+
+  /**
+   * Measures the fixed-width uint16 helper: 16 bits. ref is ignored.
+   * @param {{value: number}} ref ignored.
+   * @returns {boolean} true on success.
+   */
+  serializeUint16(ref) {
+    return this.#measure(16);
+  }
+
+  /**
+   * Measures the fixed-width uint32 helper: 32 bits. ref is ignored.
+   * @param {{value: number}} ref ignored.
+   * @returns {boolean} true on success.
+   */
+  serializeUint32(ref) {
+    return this.#measure(32);
+  }
+
+  /**
+   * Measures a bool: 1 bit. ref is ignored.
+   * @param {{value: boolean}} ref ignored.
+   * @returns {boolean} true on success.
+   */
+  serializeBool(ref) {
+    return this.#measure(1);
   }
 
   /**
