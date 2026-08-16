@@ -26,12 +26,20 @@ any other.
   32-bit arithmetic. The reader prices its windows **inside** the buffer —
   any data length is supported and no slack past the data is required.
 - The streams: `WriteStream`, `ReadStream` and `MeasureStream` share one
-  bool-returning serialize surface (`serializeBits`, `serializeAlign` so
-  far), so a single serialize function writes, reads and measures. Refs are
-  `{ value }` holders — the JavaScript translation of the family's ref
-  parameters. The first failure latches on `stream.error` and sticks;
-  `measure` is a conservative bound, charging 7 bits per
-  alignment-performing operation, never exact.
+  bool-returning serialize surface, so a single serialize function writes,
+  reads and measures. Refs are `{ value }` holders — the JavaScript
+  translation of the family's ref parameters. The first failure latches on
+  `stream.error` and sticks; `measure` is a conservative bound, charging
+  7 bits per alignment-performing operation, never exact.
+- The integer primitives up to 32 bits: `serializeBits`, `serializeAlign`,
+  `serializeInt` (the format's defining ranged operation — offset from min
+  in exactly `bitsRequired(min, max)` bits, zero bits for a degenerate
+  `min === max` range), the fixed-width helpers `serializeUint8`,
+  `serializeUint16`, `serializeUint32`, and `serializeBool`. Reads refuse
+  values smuggled into the bit headroom of a range; writes and measures
+  refuse out-of-range values as latched errors, never throws.
+- `bitsRequired(min, max)` — the serialize.h range-costing arithmetic, for
+  pricing fields when designing a message format.
 
 ## Design
 
