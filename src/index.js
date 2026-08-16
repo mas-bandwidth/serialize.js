@@ -10,3 +10,4 @@
 // Under construction, chunk by chunk. This module is the package entry point.
 
 export { BitWriter, BitReader } from './bitpacker.js';
+export { SerializeError, WriteStream, ReadStream, MeasureStream } from './streams.js';
