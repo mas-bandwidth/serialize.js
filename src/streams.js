@@ -38,11 +38,22 @@ const MIN_MAX_MESSAGE = 'min must not exceed max';
 const VALUE_TYPE_MESSAGE = 'value must be a number';
 const BIGINT_VALUE_MESSAGE = 'value must be a BigInt';
 
+const FLOAT_PARAMS_MESSAGE = 'min must be less than max and resolution must be positive, as float32 values';
+const FLOAT_DECLARATION_MESSAGE = 'compressed float declaration is not finite in float32: delta and delta / resolution must not overflow';
+
 const INT64_MIN = -(2n ** 63n);
 const INT64_MAX = 2n ** 63n - 1n;
 const INT128_MIN = -(2n ** 127n);
 const INT128_MAX = 2n ** 127n - 1n;
 const MASK32 = 0xffffffffn;
+
+// Scratch for float <-> bits reinterpretation: 8 bytes, reused by every
+// stream in this module. JavaScript is single threaded per realm and the
+// scratch is always consumed in the same call that fills it, so sharing is
+// safe; each worker thread gets its own module instance. Endianness is
+// explicit (little endian) on every access, so the scratch behaves the same
+// on any host.
+const FLOAT_SCRATCH = new DataView(new ArrayBuffer(8));
 
 /**
  * The first error latched on a stream. A healthy stream's error is
@@ -147,6 +158,114 @@ function validateInt128Range(min, max) {
   if (min > max) {
     throw new RangeError(MIN_MAX_MESSAGE);
   }
+}
+
+/**
+ * Returns the 32 bits of the IEEE-754 single-precision representation of a
+ * number, as a uint32: the write half of serializeFloat's bit transparency.
+ *
+ * Non-NaN values go through the hardware conversion (DataView.setFloat32,
+ * exactly Math.fround's rounding -- the JS translation of the float
+ * parameter type of the other ports, which converts at the call site).
+ * NaN takes a SOFTWARE path: the hardware double->float32 conversion sets
+ * the quiet bit, so a signaling NaN read off the wire would re-encode with
+ * different bytes. Narrowing the payload by hand -- sign kept, the top 23
+ * mantissa bits kept, the quiet bit NOT forced -- keeps the round trip
+ * byte-exact for every NaN pattern serializeFloat's read half can produce
+ * (STANDARD.md, "Bit transparency -- both directions"). A NaN whose payload
+ * lives entirely in the low 29 mantissa bits would narrow to all-zero
+ * mantissa -- the bit pattern of infinity -- so the quiet bit is forced for
+ * exactly that case, matching what the hardware conversion produces there.
+ */
+function float32BitsFromNumber(value) {
+  if (!Number.isNaN(value)) {
+    FLOAT_SCRATCH.setFloat32(0, value, true);
+    return FLOAT_SCRATCH.getUint32(0, true);
+  }
+  FLOAT_SCRATCH.setFloat64(0, value, true);
+  const bits64 = FLOAT_SCRATCH.getBigUint64(0, true);
+  const sign = Number(bits64 >> 63n) << 31;
+  let mantissa = Number((bits64 >> 29n) & 0x7fffffn);
+  if (mantissa === 0) {
+    mantissa = 0x400000; // payload entirely in the low 29 bits: never infinity
+  }
+  return (sign | 0x7f800000 | mantissa) >>> 0;
+}
+
+/**
+ * Returns the number whose IEEE-754 single-precision representation is the
+ * given 32 bits: the read half of serializeFloat's bit transparency.
+ *
+ * Non-NaN patterns go through the hardware conversion (DataView.getFloat32,
+ * exact for every value: float32 is a subset of float64). NaN patterns are
+ * widened in SOFTWARE -- sign kept, the 23 mantissa bits shifted into the
+ * top of the float64 mantissa, the quiet bit NOT forced -- because the
+ * hardware float32->float64 conversion quiets a signaling NaN, and the
+ * reader must reproduce the transmitted pattern exactly (STANDARD.md). The
+ * payload rides the float64 bits of the returned number, which V8 carries
+ * verbatim; an engine that canonicalizes NaN cannot preserve it, which is an
+ * engine limitation, not reader latitude taken by this library.
+ */
+function numberFromFloat32Bits(bits) {
+  if ((bits & 0x7f800000) === 0x7f800000 && (bits & 0x007fffff) !== 0) {
+    const sign = BigInt(bits >>> 31) << 63n;
+    const mantissa = BigInt(bits & 0x007fffff) << 29n;
+    FLOAT_SCRATCH.setBigUint64(0, sign | 0x7ff0000000000000n | mantissa, true);
+    return FLOAT_SCRATCH.getFloat64(0, true);
+  }
+  FLOAT_SCRATCH.setUint32(0, bits, true);
+  return FLOAT_SCRATCH.getFloat32(0, true);
+}
+
+// The quantization parameters shared by the write, read and measure
+// implementations of serializeCompressedFloat, computed into a reused
+// module-level holder (filled and consumed within a single call, no user
+// code in between, so sharing is safe and allocation-free).
+const floatParams = { min: 0, delta: 0, maxIntegerValue: 0, bits: 0 };
+
+/**
+ * Validates a compressed float declaration and computes its quantization
+ * parameters: delta = max - min, values = delta / res clamped to
+ * [1, 4294967040] (the largest float32 below 2^32),
+ * maxIntegerValue = ceil(values), bits = bitsRequired(0, maxIntegerValue).
+ * Every step is float32 (Math.fround), including the parameters themselves:
+ * min, max and resolution are float parameters in the other ports, so they
+ * round to float32 at this boundary.
+ *
+ * The declaration is part of the message format, never data, so violating
+ * it is caller misuse and throws on every stream in every state: min must be
+ * less than max and resolution positive (the !(<) forms also reject NaN),
+ * and a declaration whose delta or values overflows float32 to infinity is
+ * non-conforming (STANDARD.md, adopted 2026-08-15) -- the checked runtime
+ * throws where the debug-build family asserts.
+ */
+function compressedFloatParams(min, max, resolution) {
+  if (typeof min !== 'number' || typeof max !== 'number' || typeof resolution !== 'number') {
+    throw new TypeError(FLOAT_PARAMS_MESSAGE);
+  }
+  min = Math.fround(min);
+  max = Math.fround(max);
+  resolution = Math.fround(resolution);
+  if (!(min < max) || !(resolution > 0)) {
+    throw new RangeError(FLOAT_PARAMS_MESSAGE);
+  }
+  const delta = Math.fround(max - min);
+  let values = Math.fround(delta / resolution);
+  // finite min < max cannot produce NaN, only an infinite overflow
+  if (!Number.isFinite(delta) || !Number.isFinite(values)) {
+    throw new RangeError(FLOAT_DECLARATION_MESSAGE);
+  }
+  if (!(values >= 1.0)) {
+    values = 1.0;
+  } else if (values > 4294967040.0) { // largest float32 below 2^32
+    values = 4294967040.0;
+  }
+  const maxIntegerValue = Math.ceil(values);
+  floatParams.min = min;
+  floatParams.delta = delta;
+  floatParams.maxIntegerValue = maxIntegerValue;
+  floatParams.bits = bitsRequired(0, maxIntegerValue);
+  return floatParams;
 }
 
 /**
@@ -505,6 +624,114 @@ export class WriteStream {
    */
   serializeBool(ref) {
     return this.#writeBits(ref.value ? 1 : 0, 1);
+  }
+
+  /**
+   * Writes ref.value as the 32 bits of its IEEE-754 single-precision
+   * representation, one 32-bit group: no conversion beyond the float32
+   * rounding of the number itself (the float parameter type of the other
+   * ports, converting at the call site), no compression (STANDARD.md,
+   * "float"). Bit transparent: every pattern is legal on the wire -- NaNs
+   * with any payload, signaling NaNs, infinities, negative zero, denormals
+   * -- and NaN payloads ride byte-for-byte via a software narrowing that
+   * never sets the quiet bit. ref.value must be a number (misuse throws).
+   * Returns false and latches Overflow if the write would pass the end of
+   * the buffer.
+   * @param {{value: number}} ref holder of the value to write.
+   * @returns {boolean} true on success.
+   */
+  serializeFloat(ref) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const value = ref.value;
+    if (typeof value !== 'number') {
+      throw new TypeError(VALUE_TYPE_MESSAGE);
+    }
+    return this.#writeBits(float32BitsFromNumber(value), 32);
+  }
+
+  /**
+   * Writes ref.value as the 64 bits of its IEEE-754 double-precision
+   * representation -- exactly the bits of the JavaScript number, which IS a
+   * float64 -- as one 64-bit group: the low 32-bit dword first, then the
+   * high dword (STANDARD.md, "double"). Bit transparent: every pattern is
+   * legal on the wire and NaN payloads ride byte-for-byte -- no conversion
+   * is involved at all. ref.value must be a number (misuse throws). Returns
+   * false and latches Overflow if the write would pass the end of the
+   * buffer, checked against the full 64 bits up front so nothing is written
+   * on refusal.
+   * @param {{value: number}} ref holder of the value to write.
+   * @returns {boolean} true on success.
+   */
+  serializeDouble(ref) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const value = ref.value;
+    if (typeof value !== 'number') {
+      throw new TypeError(VALUE_TYPE_MESSAGE);
+    }
+    if (this.#writer.bitsAvailable() < 64) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    FLOAT_SCRATCH.setFloat64(0, value, true);
+    // low dword first, then the high dword: the 64-bit group rule
+    this.#writer.writeBits(FLOAT_SCRATCH.getUint32(0, true), 32);
+    this.#writer.writeBits(FLOAT_SCRATCH.getUint32(4, true), 32);
+    return true;
+  }
+
+  /**
+   * Writes ref.value quantized to a resolution: the compressed float
+   * (STANDARD.md, "compressed_float"). The declaration min, max, resolution
+   * -- float32 values with min < max and resolution > 0, part of the message
+   * format, misuse throws -- prices the wire at
+   * bitsRequired(0, ceil((max - min) / resolution)) bits. The value is
+   * clamped into [min,max] before quantization; the quantization arithmetic
+   * is float32 with TWO roundings -- the product rounds via Math.fround
+   * BEFORE 0.5 is added, which is part of the format and changes the bytes
+   * (STANDARD.md pins vectors that discriminate). Writing a non-finite
+   * value (NaN, +/-Infinity in float32) is non-conforming and latches
+   * SerializeError.ValueOutOfRange -- the checked runtime's always-on form
+   * of the family's debug assert (ruled 2026-08-15). Lossy by construction:
+   * the reader recovers the nearest quantum, not the original value.
+   * @param {{value: number}} ref holder of the value to write.
+   * @param {number} min the minimum value, a float32.
+   * @param {number} max the maximum value, a float32, greater than min.
+   * @param {number} resolution the quantum size, a positive float32.
+   * @returns {boolean} true on success.
+   */
+  serializeCompressedFloat(ref, min, max, resolution) {
+    const params = compressedFloatParams(min, max, resolution);
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const value = ref.value;
+    if (typeof value !== 'number') {
+      throw new TypeError(VALUE_TYPE_MESSAGE);
+    }
+    const value32 = Math.fround(value); // the float parameter type of the other ports
+    if (!Number.isFinite(value32)) {
+      return this.#fail(SerializeError.ValueOutOfRange);
+    }
+    if (params.bits > this.#writer.bitsAvailable()) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    let normalized = Math.fround(Math.fround(value32 - params.min) / params.delta);
+    if (!(normalized >= 0.0)) {
+      normalized = 0.0;
+    } else if (!(normalized <= 1.0)) {
+      normalized = 1.0;
+    }
+    // STANDARD.md pins this to float32 with TWO roundings: the product
+    // rounds BEFORE 0.5 is added. The Math.fround around the product is
+    // load bearing -- fused or widened arithmetic changes the wire (0.005
+    // over [0,10] at resolution 0.01 must quantize to 1; an FMA writes 0,
+    // double arithmetic writes 0).
+    const scaled = Math.fround(normalized * Math.fround(params.maxIntegerValue));
+    this.#writer.writeBits(Math.floor(Math.fround(scaled + 0.5)), params.bits);
+    return true;
   }
 
   /**
@@ -945,6 +1172,101 @@ export class ReadStream {
   }
 
   /**
+   * Reads 32 bits into ref.value as the number whose IEEE-754
+   * single-precision representation they are (STANDARD.md, "float"). Bit
+   * transparent: every pattern on the wire is legal -- NaNs with any
+   * payload, signaling NaNs, infinities, negative zero, denormals -- and
+   * the transmitted pattern is reproduced exactly, never canonicalized,
+   * quieted, flushed or refused; NaN patterns are widened in software so
+   * the signaling bit survives, and writing the value back produces the
+   * identical bytes. The only refusal is a read past the end of the data,
+   * which latches Overflow; on failure ref.value is left unmodified.
+   * Hostile data never throws.
+   * @param {{value: number}} ref holder the value read is assigned to.
+   * @returns {boolean} true on success.
+   */
+  serializeFloat(ref) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    if (this.#reader.wouldReadPastEnd(32)) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    ref.value = numberFromFloat32Bits(this.#reader.readBits(32));
+    return true;
+  }
+
+  /**
+   * Reads 64 bits into ref.value as the number whose IEEE-754
+   * double-precision representation they are -- exactly the bits of the
+   * JavaScript number, which IS a float64 -- the low 32-bit dword first,
+   * then the high dword (STANDARD.md, "double"). Bit transparent: every
+   * pattern is legal and reproduced exactly, NaN payloads included -- no
+   * conversion is involved at all. The only refusal is a read past the end
+   * of the data, which latches Overflow, checked against the full 64 bits
+   * up front so nothing is consumed; on failure ref.value is left
+   * unmodified. Hostile data never throws.
+   * @param {{value: number}} ref holder the value read is assigned to.
+   * @returns {boolean} true on success.
+   */
+  serializeDouble(ref) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    if (this.#reader.wouldReadPastEnd(64)) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    // low dword first, then the high dword: the 64-bit group rule
+    FLOAT_SCRATCH.setUint32(0, this.#reader.readBits(32), true);
+    FLOAT_SCRATCH.setUint32(4, this.#reader.readBits(32), true);
+    ref.value = FLOAT_SCRATCH.getFloat64(0, true);
+    return true;
+  }
+
+  /**
+   * Reads a compressed float: exactly the declaration's bit count, decoded
+   * as quantum index * quantum size + min (STANDARD.md,
+   * "compressed_float"). The declaration min, max, resolution -- float32
+   * values with min < max and resolution > 0, identical to what the writer
+   * used, part of the message format, misuse throws -- prices the wire; the
+   * decode arithmetic is float32 with every step rounding via Math.fround:
+   * the quotient rounds, the product rounds BEFORE min is added -- fused or
+   * widened arithmetic decodes a value one ulp away wherever min is
+   * non-zero, and the conformance vectors pin the decoded bit patterns
+   * exactly. A decoded integer above ceil((max - min) / resolution) -- a
+   * value smuggled into the bit headroom of the encoding -- latches
+   * SerializeError.ValueOutOfRange, and a read past the end of the data
+   * latches Overflow. On failure ref.value is left unmodified, and hostile
+   * data never throws.
+   * @param {{value: number}} ref holder the value read is assigned to.
+   * @param {number} min the minimum value, a float32.
+   * @param {number} max the maximum value, a float32, greater than min.
+   * @param {number} resolution the quantum size, a positive float32.
+   * @returns {boolean} true on success.
+   */
+  serializeCompressedFloat(ref, min, max, resolution) {
+    const params = compressedFloatParams(min, max, resolution);
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    if (this.#reader.wouldReadPastEnd(params.bits)) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    const integerValue = this.#reader.readBits(params.bits);
+    if (integerValue > params.maxIntegerValue) {
+      return this.#fail(SerializeError.ValueOutOfRange);
+    }
+    // STANDARD.md pins the decode to float32 with every step rounding: the
+    // Math.fround around the product, BEFORE min is added, is load bearing
+    // -- a fused decode is one ulp off whenever min is non-zero, and a
+    // re-encode of that value produces different wire.
+    const normalized = Math.fround(Math.fround(integerValue) / Math.fround(params.maxIntegerValue));
+    const scaled = Math.fround(normalized * params.delta);
+    ref.value = Math.fround(scaled + params.min);
+    return true;
+  }
+
+  /**
    * Skips ahead to the next byte boundary, verifying that the padding bits
    * are zero. Nonzero padding latches SerializeError.Align, which typically
    * means the read and write serialize functions don't match. This can never
@@ -1212,6 +1534,53 @@ export class MeasureStream {
    */
   serializeBool(ref) {
     return this.#measure(1);
+  }
+
+  /**
+   * Measures a float: 32 bits. ref is ignored.
+   * @param {{value: number}} ref ignored.
+   * @returns {boolean} true on success.
+   */
+  serializeFloat(ref) {
+    return this.#measure(32);
+  }
+
+  /**
+   * Measures a double: 64 bits. ref is ignored.
+   * @param {{value: number}} ref ignored.
+   * @returns {boolean} true on success.
+   */
+  serializeDouble(ref) {
+    return this.#measure(64);
+  }
+
+  /**
+   * Measures a compressed float: exactly the declaration's bit count,
+   * bitsRequired(0, ceil((max - min) / resolution)) in float32 arithmetic.
+   * The declaration must be valid -- float32 min < max, resolution > 0,
+   * delta and delta / resolution finite -- or the measure throws, exactly
+   * as the write would (misuse). Like a write, a non-finite ref.value
+   * latches SerializeError.ValueOutOfRange: a message that cannot be
+   * written cannot be measured either.
+   * @param {{value: number}} ref holder of the value that would be written.
+   * @param {number} min the minimum value, a float32.
+   * @param {number} max the maximum value, a float32, greater than min.
+   * @param {number} resolution the quantum size, a positive float32.
+   * @returns {boolean} true on success.
+   */
+  serializeCompressedFloat(ref, min, max, resolution) {
+    const params = compressedFloatParams(min, max, resolution);
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const value = ref.value;
+    if (typeof value !== 'number') {
+      throw new TypeError(VALUE_TYPE_MESSAGE);
+    }
+    if (!Number.isFinite(Math.fround(value))) {
+      return this.#fail(SerializeError.ValueOutOfRange);
+    }
+    return this.#measure(params.bits);
   }
 
   /**
