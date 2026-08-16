@@ -78,6 +78,22 @@ any other.
   a code point, not a BOM: it survives the round trip. A lone surrogate in
   a written string — ill-formed UTF-16, the writer's contract violated —
   encodes as U+FFFD, the contract surfacing JavaScript's way.
+- `serializeWideString` — each 32-bit group is **one UTF-16 code unit**,
+  never a code point: the unit count as
+  `serializeInt(length, 0, bufferSize - 1)` (`bufferSize` counts wide
+  characters), then the groups with **no alignment anywhere** — the one
+  place the wide path deliberately differs from its narrow counterpart. A
+  JavaScript string *is* a sequence of UTF-16 code units, so `charCodeAt`
+  units transmit as they are and well-formed surrogate pairs pass through
+  natively — an astral character is two groups on the wire. Writes refuse
+  strings of `bufferSize` or more units (`ValueOutOfRange`) and lone
+  surrogates (`InvalidString` — the wide wire cannot launder ill-formed
+  UTF-16 the way the narrow encoder's U+FFFD replacement does); reads
+  refuse groups above 0xFFFF (`ValueOutOfRange`: not a code unit — fail
+  rather than truncate), interior NUL groups, and unpaired, misordered or
+  dangling surrogates (`InvalidString`). The family's conformance pin —
+  U+1F600 then U+0041 at `bufferSize` 8 is exactly 13 bytes, 99 bits — and
+  the STANDARD.md worked example both hold byte-for-byte.
 - `bitsRequired(min, max)`, `bitsRequired64` and `bitsRequired128` — the
   serialize.h range-costing arithmetic, for pricing fields when designing a
   message format.
