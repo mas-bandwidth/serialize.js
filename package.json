@@ -7,7 +7,7 @@
   "license": "BSD-3-Clause",
   "exports": "./src/index.js",
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test"
   },
   "engines": {
     "node": ">=20"

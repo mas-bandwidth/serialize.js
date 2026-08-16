@@ -39,7 +39,9 @@ throws.
 npm test
 ```
 
-which is nothing more than `node --test test/`.
+which is nothing more than `node --test` — the runner's default matcher picks
+up every `*.test.js` under `test/`. (A bare directory argument stopped being
+accepted by Node 22's runner, so the invocation stays argument-free.)
 
 ## License
 

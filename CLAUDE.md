@@ -21,8 +21,9 @@ STANDARD.md wins.
 - **Zero third-party dependencies**, including test frameworks. Node's
   built-in `node:test` and `node:assert` are the entire harness.
 - ESM (`"type": "module"`), **no build step**, Node 20+.
-- `npm test` = `node --test test/`. That command must be green before every
-  commit. Never push red.
+- `npm test` = `node --test` (argument-free: Node 22's runner rejects a bare
+  directory positional, and the default matcher finds every `*.test.js`).
+  That command must be green before every commit. Never push red.
 
 ## Checked-runtime shape (the Go/C#/Rust side of the family)
 
@@ -74,7 +75,7 @@ Document it wherever the read API is described.
   subjects stating what now works.
 - Commit as Rowan:
   `git -c user.name="Rowan" -c user.email="rowan@mas-bandwidth.com" commit ...`
-- Run `node --test test/` before every commit.
+- Run `node --test` before every commit.
 - Reference implementations (READ-ONLY): the C++ repo's `serialize.h` is
   canonical and its tests hold the pinned vectors; serialize.go and
   serialize.cs show the checked-runtime family shape.

@@ -26,7 +26,7 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - name: Test
-        run: node --test test/
+        run: node --test
 
   # STANDARD.md here is a VERBATIM VENDORED COPY of the specification in
   # mas-bandwidth/serialize. A duplicated normative document is the same
