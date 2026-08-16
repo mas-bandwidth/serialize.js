@@ -109,12 +109,17 @@ export const SerializeError = Object.freeze({
   Align: 'align',
 
   /**
-   * A string payload read from the stream is malformed: bytes that are not
-   * valid UTF-8, or an interior NUL among the transmitted bytes -- the wire
-   * length and the C-string length a downstream consumer perceives would
-   * disagree, the two-lengths smuggling primitive. Readers refuse malformed
-   * string content in every build mode (STANDARD.md, adopted 2026-08-15);
-   * the write side is the writer's contract.
+   * A string payload is malformed. On read: bytes that are not valid UTF-8,
+   * or an interior NUL among the transmitted bytes -- the wire length and
+   * the C-string length a downstream consumer perceives would disagree, the
+   * two-lengths smuggling primitive -- and, on the wide-string path, an
+   * unpaired, misordered or dangling surrogate or an interior NUL group.
+   * Readers refuse malformed string content in every build mode
+   * (STANDARD.md, adopted 2026-08-15). On write and measure: a wide string
+   * holding a lone surrogate -- ill-formed UTF-16, the writer's contract
+   * violated -- which the wide path cannot launder the way the narrow
+   * encoder's U+FFFD replacement does, so the checked runtime latches it,
+   * its always-on form of the family's debug assert.
    */
   InvalidString: 'invalid_string',
 });
@@ -845,6 +850,62 @@ export class WriteStream {
   }
 
   /**
+   * Writes a wide string: each 32-bit group is ONE UTF-16 CODE UNIT, never
+   * a code point (STANDARD.md, "wstring", adopted 2026-08-15). A JavaScript
+   * string IS a sequence of UTF-16 code units, so the split a 4-byte
+   * wchar_t port performs at this boundary -- astral code point to
+   * surrogate pair -- has already happened in the string itself: charCodeAt
+   * units transmit as they are, and the length field counts units
+   * (value.length exactly). The length rides first as
+   * serializeInt(length, 0, bufferSize - 1), where bufferSize counts WIDE
+   * CHARACTERS, not bytes; then the groups follow with NO ALIGNMENT
+   * anywhere -- deliberately unlike the narrow path, which aligns via
+   * serializeBytes (STANDARD.md: an implementation that mirrors the narrow
+   * path here produces the wrong bytes). ref.value must be a string and
+   * bufferSize an integer in [2,2^31-1] (misuse throws). A lone surrogate
+   * -- ill-formed UTF-16, the writer's contract violated, which the wide
+   * wire cannot carry because conforming readers refuse it -- latches
+   * SerializeError.InvalidString and writes nothing: the checked runtime's
+   * always-on form of the family's debug assert. A string of bufferSize or
+   * more units latches SerializeError.ValueOutOfRange and writes nothing.
+   * Returns false and latches Overflow if the groups would pass the end of
+   * the buffer, checked against the total width up front so a refused
+   * payload writes nothing after the length.
+   * @param {{value: string}} ref holder of the string to write.
+   * @param {number} bufferSize the agreed buffer size in wide characters;
+   *   the string must fit in bufferSize - 1 UTF-16 code units.
+   * @returns {boolean} true on success.
+   */
+  serializeWideString(ref, bufferSize) {
+    validateBufferSize(bufferSize);
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const value = ref.value;
+    if (typeof value !== 'string') {
+      throw new TypeError(STRING_VALUE_MESSAGE);
+    }
+    if (!value.isWellFormed()) {
+      return this.#fail(SerializeError.InvalidString);
+    }
+    const length = value.length;
+    if (length >= bufferSize) {
+      return this.#fail(SerializeError.ValueOutOfRange);
+    }
+    if (!this.serializeInt({ value: length }, 0, bufferSize - 1)) {
+      return false;
+    }
+    // NO align here -- deliberately unlike the narrow path (STANDARD.md)
+    if (length * 32 > this.#writer.bitsAvailable()) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    for (let i = 0; i < length; i++) {
+      this.#writer.writeBits(value.charCodeAt(i), 32);
+    }
+    return true;
+  }
+
+  /**
    * Pads the stream with zero bits to the next byte boundary; if it is
    * already byte aligned, writes nothing. This can never pass the end of the
    * buffer: the buffer size is a multiple of 8 bytes, so an unaligned bit
@@ -1466,6 +1527,84 @@ export class ReadStream {
   }
 
   /**
+   * Reads a wide string: the length in UTF-16 CODE UNITS as serializeInt in
+   * [0,bufferSize-1] -- bufferSize counts wide characters and is part of
+   * the message format -- then length 32-bit groups with NO ALIGNMENT
+   * anywhere in the operation, each group one code unit (STANDARD.md,
+   * "wstring", adopted 2026-08-15). A JavaScript string holds exactly these
+   * units, so a well-formed surrogate pair "recombines" by adjacency:
+   * storing the two units next to each other IS the astral character -- no
+   * recombination arithmetic. Malformed payloads are refused in every build
+   * mode (STANDARD.md, "Readers must refuse malformed wstring payloads"): a
+   * group above 0xFFFF is not a UTF-16 code unit and latches
+   * SerializeError.ValueOutOfRange -- fail rather than truncate, the family
+   * rule for a value the local wide character cannot hold; an interior NUL
+   * group -- the two-lengths smuggling primitive, wire length versus the
+   * shorter wcslen a downstream consumer perceives -- latches
+   * SerializeError.InvalidString, and so does every unpaired surrogate: a
+   * high not immediately followed by a low, a low with no high before it,
+   * and a dangling high as the final group. A length that overruns the data
+   * latches Overflow, checked against the total width up front. On success
+   * ref.value is the decoded string; on any refusal ref.value is left
+   * unmodified, and hostile data never throws. bufferSize must be an
+   * integer in [2,2^31-1] (misuse throws).
+   * @param {{value: string}} ref holder the string read is assigned to.
+   * @param {number} bufferSize the agreed buffer size in wide characters;
+   *   the payload is at most bufferSize - 1 UTF-16 code units.
+   * @returns {boolean} true on success.
+   */
+  serializeWideString(ref, bufferSize) {
+    validateBufferSize(bufferSize);
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const lengthRef = { value: 0 };
+    if (!this.serializeInt(lengthRef, 0, bufferSize - 1)) {
+      return false;
+    }
+    // NO align here -- deliberately unlike the narrow path (STANDARD.md)
+    const length = lengthRef.value;
+    if (length * 32 > this.#reader.bitsRemaining()) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    const units = new Array(length);
+    let pendingHigh = false; // a high surrogate awaiting its low half
+    for (let i = 0; i < length; i++) {
+      const unit = this.#reader.readBits(32);
+      if (unit > 0xffff) {
+        // not a UTF-16 code unit: no conforming writer emits one, and a
+        // string cannot hold it -- fail rather than truncate
+        return this.#fail(SerializeError.ValueOutOfRange);
+      }
+      if (unit === 0) {
+        return this.#fail(SerializeError.InvalidString); // interior NUL
+      }
+      if (pendingHigh) {
+        if (unit < 0xdc00 || unit > 0xdfff) {
+          return this.#fail(SerializeError.InvalidString); // high surrogate without its low half
+        }
+        pendingHigh = false;
+      } else if (unit >= 0xd800 && unit <= 0xdbff) {
+        pendingHigh = true;
+      } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+        return this.#fail(SerializeError.InvalidString); // low surrogate with no high before it
+      }
+      units[i] = unit;
+    }
+    if (pendingHigh) {
+      return this.#fail(SerializeError.InvalidString); // the payload ends inside a surrogate pair
+    }
+    // build in bounded chunks: fromCharCode takes the units as arguments,
+    // and argument lists have engine limits a length field must not reach
+    let decoded = '';
+    for (let i = 0; i < length; i += 1024) {
+      decoded += String.fromCharCode(...units.slice(i, Math.min(i + 1024, length)));
+    }
+    ref.value = decoded;
+    return true;
+  }
+
+  /**
    * Skips ahead to the next byte boundary, verifying that the padding bits
    * are zero. Nonzero padding latches SerializeError.Align, which typically
    * means the read and write serialize functions don't match. This can never
@@ -1831,6 +1970,45 @@ export class MeasureStream {
     }
     this.serializeAlign();
     return this.#measure(byteLength * 8);
+  }
+
+  /**
+   * Measures a wide string: the length prefix
+   * (bitsRequired(0, bufferSize - 1) bits) plus 32 bits per UTF-16 code
+   * unit -- value.length exactly, the group count the write transmits
+   * (STANDARD.md, "wstring", adopted 2026-08-15) -- and NO alignment
+   * anywhere in the operation, so unlike the narrow path this measure
+   * carries no 7-bit align bound: measure and write agree bit for bit.
+   * ref.value must be a string and bufferSize an integer in [2,2^31-1]
+   * (misuse throws). Like a write, a lone surrogate latches
+   * SerializeError.InvalidString and a string of bufferSize or more units
+   * latches SerializeError.ValueOutOfRange: a message that cannot be
+   * written cannot be measured either.
+   * @param {{value: string}} ref holder of the string that would be written.
+   * @param {number} bufferSize the agreed buffer size in wide characters;
+   *   the string must fit in bufferSize - 1 UTF-16 code units.
+   * @returns {boolean} true on success.
+   */
+  serializeWideString(ref, bufferSize) {
+    validateBufferSize(bufferSize);
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const value = ref.value;
+    if (typeof value !== 'string') {
+      throw new TypeError(STRING_VALUE_MESSAGE);
+    }
+    if (!value.isWellFormed()) {
+      return this.#fail(SerializeError.InvalidString);
+    }
+    const length = value.length;
+    if (length >= bufferSize) {
+      return this.#fail(SerializeError.ValueOutOfRange);
+    }
+    if (!this.serializeInt({ value: length }, 0, bufferSize - 1)) {
+      return false;
+    }
+    return this.#measure(length * 32);
   }
 
   /**
