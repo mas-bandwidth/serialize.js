@@ -316,6 +316,47 @@ export class WriteStream {
   }
 
   /**
+   * Writes a ranged 64-bit integer: ref.value, a BigInt in [min,max], costs
+   * exactly bitsRequired64 bits as the offset from min, computed in the
+   * unsigned 64-bit domain so ranges wider than 2^63 are exact. min and max
+   * must be BigInts representable in int64 with min <= max: the range is
+   * part of the message format, so violating that is caller misuse and
+   * throws, as is a non-BigInt value. A value outside [min,max] latches
+   * SerializeError.ValueOutOfRange and writes nothing. Where the offset
+   * needs more than 32 bits it is written low 32-bit dword first, then the
+   * high remainder -- serializeBits64's convention -- checked against the
+   * TOTAL width up front, so a refused write puts nothing on the wire. A
+   * degenerate range where min === max costs ZERO bits.
+   * @param {{value: bigint}} ref holder of the integer to write.
+   * @param {bigint} min the minimum value, an int64 BigInt.
+   * @param {bigint} max the maximum value, an int64 BigInt, at least min.
+   * @returns {boolean} true on success.
+   */
+  serializeInt64(ref, min, max) {
+    validateInt64Range(min, max);
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const value = ref.value;
+    if (typeof value !== 'bigint') {
+      throw new TypeError(BIGINT_VALUE_MESSAGE);
+    }
+    if (value < min || value > max) {
+      return this.#fail(SerializeError.ValueOutOfRange);
+    }
+    const bits = bitsRequired64(BigInt.asUintN(64, min), BigInt.asUintN(64, max));
+    if (bits === 0) {
+      return true; // degenerate range: the value IS the range, nothing to send
+    }
+    if (bits > this.#writer.bitsAvailable()) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    // subtract in the unsigned domain: the range may be wider than 2^63
+    this.#writeWide64(BigInt.asUintN(64, value - min), bits);
+    return true;
+  }
+
+  /**
    * Writes the low 8 bits of ref.value: the fixed-width uint8 helper, an
    * alias for serializeBits(ref, 8) carrying no range information of its
    * own (STANDARD.md). Higher bits are ignored, as the uint8 parameter type
@@ -613,6 +654,47 @@ export class ReadStream {
   }
 
   /**
+   * Reads a ranged 64-bit integer: exactly bitsRequired64 bits, decoded as
+   * the offset from min in the unsigned 64-bit domain -- low 32-bit dword
+   * first, then the high remainder, where the offset needs more than 32
+   * bits. min and max must be BigInts representable in int64 with
+   * min <= max, identical to the range the writer used: violating that is
+   * caller misuse and throws. On success ref.value is a BigInt GUARANTEED
+   * to be in [min,max]; a decoded offset above max - min -- a value
+   * smuggled into the bit headroom of the encoding -- latches
+   * SerializeError.ValueOutOfRange, and a read past the end of the data
+   * latches Overflow, checked against the TOTAL width up front so a refused
+   * read consumes nothing. On failure ref.value is left unmodified, and
+   * hostile data never throws. A degenerate range where min === max reads
+   * ZERO bits: ref.value = min from the range alone.
+   * @param {{value: bigint}} ref holder the integer read is assigned to.
+   * @param {bigint} min the minimum value, an int64 BigInt.
+   * @param {bigint} max the maximum value, an int64 BigInt, at least min.
+   * @returns {boolean} true on success.
+   */
+  serializeInt64(ref, min, max) {
+    validateInt64Range(min, max);
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const bits = bitsRequired64(BigInt.asUintN(64, min), BigInt.asUintN(64, max));
+    if (bits === 0) {
+      ref.value = min; // degenerate range: the value IS the range
+      return true;
+    }
+    if (this.#reader.wouldReadPastEnd(bits)) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    const unsigned = this.#readWide64(bits);
+    // compare and add in the unsigned domain: the range may be wider than 2^63
+    if (unsigned > BigInt.asUintN(64, max - min)) {
+      return this.#fail(SerializeError.ValueOutOfRange);
+    }
+    ref.value = BigInt.asIntN(64, unsigned + BigInt.asUintN(64, min));
+    return true;
+  }
+
+  /**
    * Reads 8 bits into ref.value: the fixed-width uint8 helper, an alias for
    * serializeBits(ref, 8) carrying no range information of its own
    * (STANDARD.md). On success ref.value is in [0,255]; on failure it is
@@ -839,6 +921,33 @@ export class MeasureStream {
       return this.#fail(SerializeError.ValueOutOfRange);
     }
     return this.#measure(bitsRequired(min >>> 0, max >>> 0));
+  }
+
+  /**
+   * Measures a ranged 64-bit integer: exactly bitsRequired64 bits, zero for
+   * a degenerate range where min === max. min and max must be BigInts
+   * representable in int64 with min <= max (misuse throws, as is a
+   * non-BigInt value). Like a write, ref.value must be in [min,max] or the
+   * measure latches SerializeError.ValueOutOfRange: a message that cannot
+   * be written cannot be measured either.
+   * @param {{value: bigint}} ref holder of the integer that would be written.
+   * @param {bigint} min the minimum value, an int64 BigInt.
+   * @param {bigint} max the maximum value, an int64 BigInt, at least min.
+   * @returns {boolean} true on success.
+   */
+  serializeInt64(ref, min, max) {
+    validateInt64Range(min, max);
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const value = ref.value;
+    if (typeof value !== 'bigint') {
+      throw new TypeError(BIGINT_VALUE_MESSAGE);
+    }
+    if (value < min || value > max) {
+      return this.#fail(SerializeError.ValueOutOfRange);
+    }
+    return this.#measure(bitsRequired64(BigInt.asUintN(64, min), BigInt.asUintN(64, max)));
   }
 
   /**
