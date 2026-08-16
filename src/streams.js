@@ -27,12 +27,22 @@
 // in every state.
 
 import { BitWriter, BitReader } from './bitpacker.js';
-import { bitsRequired } from './bits.js';
+import { bitsRequired, bitsRequired64, bitsRequired128 } from './bits.js';
 
 const BITS_RANGE_MESSAGE = 'bits must be an integer in [1,32]';
+const BITS64_RANGE_MESSAGE = 'bits must be an integer in [1,64]';
 const INT32_RANGE_MESSAGE = 'min and max must be integers in [-2^31,2^31-1]';
+const INT64_RANGE_MESSAGE = 'min and max must be BigInts in [-2^63,2^63-1]';
+const INT128_RANGE_MESSAGE = 'min and max must be BigInts in [-2^127,2^127-1]';
 const MIN_MAX_MESSAGE = 'min must not exceed max';
 const VALUE_TYPE_MESSAGE = 'value must be a number';
+const BIGINT_VALUE_MESSAGE = 'value must be a BigInt';
+
+const INT64_MIN = -(2n ** 63n);
+const INT64_MAX = 2n ** 63n - 1n;
+const INT128_MIN = -(2n ** 127n);
+const INT128_MAX = 2n ** 127n - 1n;
+const MASK32 = 0xffffffffn;
 
 /**
  * The first error latched on a stream. A healthy stream's error is
@@ -88,6 +98,51 @@ function validateBits(bits) {
 function validateIntRange(min, max) {
   if ((min | 0) !== min || (max | 0) !== max) {
     throw new RangeError(INT32_RANGE_MESSAGE);
+  }
+  if (min > max) {
+    throw new RangeError(MIN_MAX_MESSAGE);
+  }
+}
+
+/**
+ * Validates the shared caller contract of serializeBits64: bits must be an
+ * integer in [1,64]. Violating it is caller misuse and throws on every
+ * stream in every state, even after an error has latched.
+ */
+function validateBits64(bits) {
+  if ((bits | 0) !== bits || bits < 1 || bits > 64) {
+    throw new RangeError(BITS64_RANGE_MESSAGE);
+  }
+}
+
+/**
+ * Validates the shared caller contract of serializeInt64: min and max must
+ * be BigInts representable in int64, with min <= max. Caller misuse throws
+ * on every stream in every state.
+ */
+function validateInt64Range(min, max) {
+  if (
+    typeof min !== 'bigint' || min < INT64_MIN || min > INT64_MAX ||
+    typeof max !== 'bigint' || max < INT64_MIN || max > INT64_MAX
+  ) {
+    throw new RangeError(INT64_RANGE_MESSAGE);
+  }
+  if (min > max) {
+    throw new RangeError(MIN_MAX_MESSAGE);
+  }
+}
+
+/**
+ * Validates the shared caller contract of serializeInt128: min and max must
+ * be BigInts representable in int128, with min <= max. Caller misuse throws
+ * on every stream in every state.
+ */
+function validateInt128Range(min, max) {
+  if (
+    typeof min !== 'bigint' || min < INT128_MIN || min > INT128_MAX ||
+    typeof max !== 'bigint' || max < INT128_MIN || max > INT128_MAX
+  ) {
+    throw new RangeError(INT128_RANGE_MESSAGE);
   }
   if (min > max) {
     throw new RangeError(MIN_MAX_MESSAGE);
@@ -157,6 +212,55 @@ export class WriteStream {
       return this.#fail(SerializeError.Overflow);
     }
     this.#writer.writeBits(value, bits);
+    return true;
+  }
+
+  /**
+   * Writes an unsigned BigInt already reduced below 2^bits in the family's
+   * wide group structure: a single group for 32 bits or fewer, otherwise
+   * the low 32-bit dword first, then the remaining bits - 32 high bits
+   * (STANDARD.md's serialize_bits splitting rule). bits must be in [1,64]
+   * and the availability check must have already passed: the caller checks
+   * the TOTAL bits up front, so a refused wide write puts NOTHING on the
+   * wire -- never a dangling low dword.
+   */
+  #writeWide64(value, bits) {
+    if (bits <= 32) {
+      this.#writer.writeBits(Number(value), bits);
+    } else {
+      this.#writer.writeBits(Number(value & MASK32), 32);
+      this.#writer.writeBits(Number(value >> 32n), bits - 32);
+    }
+  }
+
+  /**
+   * Writes the low order bits of ref.value, a BigInt, without padding to
+   * the nearest byte: the 64-bit counterpart of serializeBits. bits must be
+   * an integer in [1,64] and ref.value must be a BigInt (misuse throws);
+   * bits of the value above the count are ignored, and a negative BigInt
+   * wraps two's complement, as the uint64 parameter type of the other ports
+   * converts at the call site. Values wider than 32 bits are written as the
+   * low 32-bit dword first, then the high remainder. Returns false and
+   * latches Overflow if the write would pass the end of the buffer --
+   * checked against the TOTAL width up front, so nothing is written on
+   * refusal.
+   * @param {{value: bigint}} ref holder of the value to write.
+   * @param {number} bits width in [1,64].
+   * @returns {boolean} true on success.
+   */
+  serializeBits64(ref, bits) {
+    validateBits64(bits);
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const value = ref.value;
+    if (typeof value !== 'bigint') {
+      throw new TypeError(BIGINT_VALUE_MESSAGE);
+    }
+    if (bits > this.#writer.bitsAvailable()) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    this.#writeWide64(BigInt.asUintN(bits, value), bits);
     return true;
   }
 
@@ -241,6 +345,20 @@ export class WriteStream {
    */
   serializeUint32(ref) {
     return this.#writeBits(ref.value, 32);
+  }
+
+  /**
+   * Writes the low 64 bits of ref.value, a BigInt: the fixed-width uint64
+   * helper, an alias for serializeBits64(ref, 64) carrying no range
+   * information of its own (STANDARD.md) -- the low 32-bit dword first,
+   * then the high dword. Higher bits are ignored and a negative BigInt
+   * wraps two's complement. NOT ranged: always costs a full 64 bits --
+   * do not confuse it with serializeInt64.
+   * @param {{value: bigint}} ref holder of the value to write.
+   * @returns {boolean} true on success.
+   */
+  serializeUint64(ref) {
+    return this.serializeBits64(ref, 64);
   }
 
   /**
@@ -413,6 +531,47 @@ export class ReadStream {
   }
 
   /**
+   * Reads an unsigned wide value in the family's group structure and
+   * returns it as a BigInt: a single group for 32 bits or fewer, otherwise
+   * the low 32-bit dword first, then the remaining bits - 32 high bits.
+   * bits must be in [1,64] and the bounds check must have already passed:
+   * the caller checks the TOTAL bits up front, so a refused wide read
+   * consumes nothing.
+   */
+  #readWide64(bits) {
+    if (bits <= 32) {
+      return BigInt(this.#reader.readBits(bits));
+    }
+    const lo = this.#reader.readBits(32);
+    const hi = this.#reader.readBits(bits - 32);
+    return (BigInt(hi) << 32n) | BigInt(lo);
+  }
+
+  /**
+   * Reads bits from the stream into ref.value as a BigInt: the 64-bit
+   * counterpart of serializeBits. bits must be an integer in [1,64] (misuse
+   * throws). Values wider than 32 bits are read as the low 32-bit dword
+   * first, then the high remainder. On success ref.value is a BigInt in
+   * [0,2^bits-1]; on failure -- a read past the end of the data latches
+   * Overflow, checked against the TOTAL width up front -- ref.value is left
+   * unmodified. Hostile data never throws.
+   * @param {{value: bigint}} ref holder the value read is assigned to.
+   * @param {number} bits width in [1,64].
+   * @returns {boolean} true on success.
+   */
+  serializeBits64(ref, bits) {
+    validateBits64(bits);
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    if (this.#reader.wouldReadPastEnd(bits)) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    ref.value = this.#readWide64(bits);
+    return true;
+  }
+
+  /**
    * Reads a ranged integer -- the format's defining operation: exactly
    * bitsRequired(min,max) bits, decoded as the offset from min in the
    * unsigned domain. min and max must be integers representable in int32
@@ -485,6 +644,20 @@ export class ReadStream {
    */
   serializeUint32(ref) {
     return this.#readBits(ref, 32);
+  }
+
+  /**
+   * Reads 64 bits into ref.value as a BigInt: the fixed-width uint64
+   * helper, an alias for serializeBits64(ref, 64) carrying no range
+   * information of its own (STANDARD.md) -- the low 32-bit dword first,
+   * then the high dword. On success ref.value is a BigInt in [0,2^64-1];
+   * on failure it is left unmodified. NOT ranged: always costs a full 64
+   * bits -- do not confuse it with serializeInt64.
+   * @param {{value: bigint}} ref holder the value read is assigned to.
+   * @returns {boolean} true on success.
+   */
+  serializeUint64(ref) {
+    return this.serializeBits64(ref, 64);
   }
 
   /**
@@ -630,6 +803,18 @@ export class MeasureStream {
   }
 
   /**
+   * Measures bits, which must be an integer in [1,64] (misuse throws).
+   * ref is ignored: a measure never touches values.
+   * @param {{value: bigint}} ref ignored.
+   * @param {number} bits width in [1,64].
+   * @returns {boolean} true on success.
+   */
+  serializeBits64(ref, bits) {
+    validateBits64(bits);
+    return this.#measure(bits);
+  }
+
+  /**
    * Measures a ranged integer: exactly bitsRequired(min,max) bits, zero for
    * a degenerate range where min === max. min and max must be integers
    * representable in int32 with min <= max (misuse throws). Like a write,
@@ -681,6 +866,15 @@ export class MeasureStream {
    */
   serializeUint32(ref) {
     return this.#measure(32);
+  }
+
+  /**
+   * Measures the fixed-width uint64 helper: 64 bits. ref is ignored.
+   * @param {{value: bigint}} ref ignored.
+   * @returns {boolean} true on success.
+   */
+  serializeUint64(ref) {
+    return this.#measure(64);
   }
 
   /**
