@@ -7,7 +7,6 @@
 // The wire format is defined by STANDARD.md at the repository root, vendored
 // verbatim from mas-bandwidth/serialize. That document is the law.
 //
-// Under construction, chunk by chunk. This module is the package entry point;
-// the bitpacker lands next.
+// Under construction, chunk by chunk. This module is the package entry point.
 
-export {};
+export { BitWriter } from './bitpacker.js';
