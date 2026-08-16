@@ -38,6 +38,8 @@ const MIN_MAX_MESSAGE = 'min must not exceed max';
 const VALUE_TYPE_MESSAGE = 'value must be a number';
 const BIGINT_VALUE_MESSAGE = 'value must be a BigInt';
 const BYTES_TYPE_MESSAGE = 'data must be a Uint8Array';
+const STRING_VALUE_MESSAGE = 'value must be a string';
+const BUFFER_SIZE_MESSAGE = 'bufferSize must be an integer in [2,2^31-1]';
 
 const FLOAT_PARAMS_MESSAGE = 'min must be less than max and resolution must be positive, as float32 values';
 const FLOAT_DECLARATION_MESSAGE = 'compressed float declaration is not finite in float32: delta and delta / resolution must not overflow';
@@ -55,6 +57,23 @@ const MASK32 = 0xffffffffn;
 // explicit (little endian) on every access, so the scratch behaves the same
 // on any host.
 const FLOAT_SCRATCH = new DataView(new ArrayBuffer(8));
+
+// The string wire codecs, shared module-wide (stateless between calls).
+//
+// The encoder is WHATWG UTF-8: a lone surrogate in the input -- ill-formed
+// UTF-16, the writer's contract violated -- encodes as U+FFFD, the writer
+// contract surfacing JavaScript's way, exactly as Go's range-over-string
+// yields U+FFFD for invalid bytes. What reaches the wire is always
+// well-formed UTF-8.
+//
+// The decoder is the read-side refusal's platform crystal: fatal true makes
+// every malformed payload throw (caught and latched as InvalidString, never
+// escaping to the caller), and ignoreBOM true keeps a leading U+FEFF as the
+// code point the writer serialized -- the wire is not a file, and silently
+// dropping a code point would break round-trip fidelity. NUL is well-formed
+// UTF-8, so the interior-NUL refusal is an explicit scan, its own rule.
+const UTF8_ENCODER = new TextEncoder();
+const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 /**
  * The first error latched on a stream. A healthy stream's error is
@@ -88,6 +107,16 @@ export const SerializeError = Object.freeze({
    * the read and write serialize functions don't match.
    */
   Align: 'align',
+
+  /**
+   * A string payload read from the stream is malformed: bytes that are not
+   * valid UTF-8, or an interior NUL among the transmitted bytes -- the wire
+   * length and the C-string length a downstream consumer perceives would
+   * disagree, the two-lengths smuggling primitive. Readers refuse malformed
+   * string content in every build mode (STANDARD.md, adopted 2026-08-15);
+   * the write side is the writer's contract.
+   */
+  InvalidString: 'invalid_string',
 });
 
 /**
@@ -113,6 +142,20 @@ function validateIntRange(min, max) {
   }
   if (min > max) {
     throw new RangeError(MIN_MAX_MESSAGE);
+  }
+}
+
+/**
+ * Validates the shared caller contract of serializeString: bufferSize is
+ * part of the message format -- it prices the length field, so both sides
+ * must agree on it -- and must be an integer in [2,2^31-1]: at least one
+ * payload byte's worth of range plus the empty string, within the int32
+ * domain the length is serialized in. Violating it is caller misuse and
+ * throws on every stream in every state.
+ */
+function validateBufferSize(bufferSize) {
+  if (!Number.isInteger(bufferSize) || bufferSize < 2 || bufferSize > 0x7fffffff) {
+    throw new RangeError(BUFFER_SIZE_MESSAGE);
   }
 }
 
@@ -764,6 +807,44 @@ export class WriteStream {
   }
 
   /**
+   * Writes a string: UTF-8 on the wire (STANDARD.md, "string"). The length
+   * in UTF-8 BYTES rides first as serializeInt(length, 0, bufferSize - 1)
+   * -- bufferSize is part of the message format, both sides must agree on
+   * it, and the same string against different buffer sizes produces
+   * different bytes -- then the payload as serializeBytes, WHICH ALIGNS. No
+   * terminator is transmitted. ref.value must be a string and bufferSize an
+   * integer in [2,2^31-1] (misuse throws). A string of bufferSize or more
+   * UTF-8 bytes latches SerializeError.ValueOutOfRange and writes nothing:
+   * the checked runtime's always-on form of the family's debug assert. A
+   * lone surrogate in the string -- ill-formed UTF-16, the writer's
+   * contract violated -- encodes as U+FFFD, the contract surfacing
+   * JavaScript's way; the wire always carries well-formed UTF-8. Returns
+   * false and latches Overflow if the string does not fit the buffer.
+   * @param {{value: string}} ref holder of the string to write.
+   * @param {number} bufferSize the agreed buffer size; the payload must fit
+   *   in bufferSize - 1 bytes.
+   * @returns {boolean} true on success.
+   */
+  serializeString(ref, bufferSize) {
+    validateBufferSize(bufferSize);
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const value = ref.value;
+    if (typeof value !== 'string') {
+      throw new TypeError(STRING_VALUE_MESSAGE);
+    }
+    const utf8 = UTF8_ENCODER.encode(value);
+    if (utf8.length >= bufferSize) {
+      return this.#fail(SerializeError.ValueOutOfRange);
+    }
+    if (!this.serializeInt({ value: utf8.length }, 0, bufferSize - 1)) {
+      return false;
+    }
+    return this.serializeBytes(utf8);
+  }
+
+  /**
    * Pads the stream with zero bits to the next byte boundary; if it is
    * already byte aligned, writes nothing. This can never pass the end of the
    * buffer: the buffer size is a multiple of 8 bytes, so an unaligned bit
@@ -1327,6 +1408,64 @@ export class ReadStream {
   }
 
   /**
+   * Reads a string: the UTF-8 byte length as serializeInt in
+   * [0,bufferSize-1] -- bufferSize is part of the message format, both
+   * sides must agree on it -- then an align whose padding is verified zero,
+   * then the payload bytes. The payload is validated in every build mode
+   * (STANDARD.md, "Readers must refuse malformed string payloads", adopted
+   * 2026-08-15): an interior NUL among the transmitted bytes -- the
+   * two-lengths smuggling primitive, impossible from a conforming writer,
+   * and well-formed UTF-8, which is why the scan is explicit -- latches
+   * SerializeError.InvalidString, and malformed UTF-8 (overlong encodings,
+   * surrogate code points, values above U+10FFFF, truncated sequences,
+   * stray continuation bytes) latches InvalidString via the fatal decoder.
+   * A length that overruns the data latches Overflow; nonzero align padding
+   * latches Align. On success ref.value is the decoded string; on any
+   * refusal ref.value is left unmodified, and hostile data never throws.
+   * bufferSize must be an integer in [2,2^31-1] (misuse throws).
+   * @param {{value: string}} ref holder the string read is assigned to.
+   * @param {number} bufferSize the agreed buffer size; the payload is at
+   *   most bufferSize - 1 bytes.
+   * @returns {boolean} true on success.
+   */
+  serializeString(ref, bufferSize) {
+    validateBufferSize(bufferSize);
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const lengthRef = { value: 0 };
+    if (!this.serializeInt(lengthRef, 0, bufferSize - 1)) {
+      return false;
+    }
+    if (!this.#reader.readAlign()) {
+      return this.#fail(SerializeError.Align);
+    }
+    const length = lengthRef.value;
+    // compare in bytes rather than bits, consistent with the family's
+    // 64-bit bookkeeping
+    if (length > this.#reader.bitsRemaining() / 8) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    const payload = this.#reader.readBytes(length);
+    // interior NUL first: valid UTF-8, so the decoder below cannot catch
+    // it, and the terminator is never transmitted, so ANY NUL among the
+    // transmitted bytes is interior
+    for (let i = 0; i < length; i++) {
+      if (payload[i] === 0) {
+        return this.#fail(SerializeError.InvalidString);
+      }
+    }
+    let decoded;
+    try {
+      decoded = UTF8_DECODER.decode(payload);
+    } catch {
+      return this.#fail(SerializeError.InvalidString);
+    }
+    ref.value = decoded;
+    return true;
+  }
+
+  /**
    * Skips ahead to the next byte boundary, verifying that the padding bits
    * are zero. Nonzero padding latches SerializeError.Align, which typically
    * means the read and write serialize functions don't match. This can never
@@ -1660,6 +1799,38 @@ export class MeasureStream {
     }
     this.serializeAlign();
     return this.#measure(data.length * 8);
+  }
+
+  /**
+   * Measures a string: the length prefix (bitsRequired(0, bufferSize - 1)
+   * bits), a worst case 7-bit align, and the UTF-8 payload bytes. ref.value
+   * must be a string and bufferSize an integer in [2,2^31-1] (misuse
+   * throws). Like a write, a string of bufferSize or more UTF-8 bytes
+   * latches SerializeError.ValueOutOfRange: a message that cannot be
+   * written cannot be measured either.
+   * @param {{value: string}} ref holder of the string that would be written.
+   * @param {number} bufferSize the agreed buffer size; the payload must fit
+   *   in bufferSize - 1 bytes.
+   * @returns {boolean} true on success.
+   */
+  serializeString(ref, bufferSize) {
+    validateBufferSize(bufferSize);
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const value = ref.value;
+    if (typeof value !== 'string') {
+      throw new TypeError(STRING_VALUE_MESSAGE);
+    }
+    const byteLength = UTF8_ENCODER.encode(value).length;
+    if (byteLength >= bufferSize) {
+      return this.#fail(SerializeError.ValueOutOfRange);
+    }
+    if (!this.serializeInt({ value: byteLength }, 0, bufferSize - 1)) {
+      return false;
+    }
+    this.serializeAlign();
+    return this.#measure(byteLength * 8);
   }
 
   /**
