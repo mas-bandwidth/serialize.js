@@ -357,6 +357,72 @@ export class WriteStream {
   }
 
   /**
+   * Writes an unsigned BigInt already reduced below 2^bits in 32-bit groups,
+   * least significant group first: full 32-bit groups from the bottom with
+   * the final group carrying the remainder -- the shared group structure of
+   * the 128-bit paths (STANDARD.md's splitting rule, extended to four
+   * groups). bits must be in [1,128] and the availability check must have
+   * already passed: the caller checks the TOTAL bits up front, so a refused
+   * wide write puts NOTHING on the wire.
+   */
+  #writeGroups128(value, bits) {
+    if (bits <= 64) {
+      this.#writeWide64(value, bits);
+    } else if (bits <= 96) {
+      this.#writer.writeBits(Number(value & MASK32), 32);
+      this.#writer.writeBits(Number((value >> 32n) & MASK32), 32);
+      this.#writer.writeBits(Number(value >> 64n), bits - 64);
+    } else {
+      this.#writer.writeBits(Number(value & MASK32), 32);
+      this.#writer.writeBits(Number((value >> 32n) & MASK32), 32);
+      this.#writer.writeBits(Number((value >> 64n) & MASK32), 32);
+      this.#writer.writeBits(Number(value >> 96n), bits - 96);
+    }
+  }
+
+  /**
+   * Writes a ranged 128-bit integer: ref.value, a BigInt in [min,max],
+   * costs exactly bitsRequired128 bits as the offset from min, computed in
+   * the unsigned 128-bit domain so ranges wider than 2^127 are exact. min
+   * and max must be BigInts representable in int128 with min <= max:
+   * violating that is caller misuse and throws, as is a non-BigInt value. A
+   * value outside [min,max] latches SerializeError.ValueOutOfRange and
+   * writes nothing. The offset goes out in 32-bit groups, least significant
+   * first, up to four groups, checked against the TOTAL width up front.
+   * Where the range fits 64 bits or fewer the wire is identical to
+   * serializeInt64 over the same bounds (STANDARD.md): a field can be
+   * widened from 64 to 128 bits without changing the wire. A degenerate
+   * range where min === max costs ZERO bits.
+   * @param {{value: bigint}} ref holder of the integer to write.
+   * @param {bigint} min the minimum value, an int128 BigInt.
+   * @param {bigint} max the maximum value, an int128 BigInt, at least min.
+   * @returns {boolean} true on success.
+   */
+  serializeInt128(ref, min, max) {
+    validateInt128Range(min, max);
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const value = ref.value;
+    if (typeof value !== 'bigint') {
+      throw new TypeError(BIGINT_VALUE_MESSAGE);
+    }
+    if (value < min || value > max) {
+      return this.#fail(SerializeError.ValueOutOfRange);
+    }
+    const bits = bitsRequired128(BigInt.asUintN(128, min), BigInt.asUintN(128, max));
+    if (bits === 0) {
+      return true; // degenerate range: the value IS the range, nothing to send
+    }
+    if (bits > this.#writer.bitsAvailable()) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    // subtract in the unsigned domain: the range may be wider than 2^127
+    this.#writeGroups128(BigInt.asUintN(128, value - min), bits);
+    return true;
+  }
+
+  /**
    * Writes the low 8 bits of ref.value: the fixed-width uint8 helper, an
    * alias for serializeBits(ref, 8) carrying no range information of its
    * own (STANDARD.md). Higher bits are ignored, as the uint8 parameter type
@@ -400,6 +466,34 @@ export class WriteStream {
    */
   serializeUint64(ref) {
     return this.serializeBits64(ref, 64);
+  }
+
+  /**
+   * Writes the low 128 bits of ref.value, a BigInt: the fixed-width uint128
+   * helper, NOT ranged -- always a full 128 bits on the wire, the low
+   * 64-bit half first, then the high half, each half low dword first
+   * (STANDARD.md "uint128"). When the stream is byte aligned the result is
+   * the 16 bytes of the value in little-endian order. Higher bits are
+   * ignored and a negative BigInt wraps two's complement. Returns false and
+   * latches Overflow if the write would pass the end of the buffer --
+   * checked against the full 128 bits up front, so nothing is written on
+   * refusal. Do not confuse it with serializeInt128, which is ranged.
+   * @param {{value: bigint}} ref holder of the value to write.
+   * @returns {boolean} true on success.
+   */
+  serializeUint128(ref) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const value = ref.value;
+    if (typeof value !== 'bigint') {
+      throw new TypeError(BIGINT_VALUE_MESSAGE);
+    }
+    if (this.#writer.bitsAvailable() < 128) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    this.#writeGroups128(BigInt.asUintN(128, value), 128);
+    return true;
   }
 
   /**
@@ -695,6 +789,72 @@ export class ReadStream {
   }
 
   /**
+   * Reads an unsigned wide value written in 32-bit groups, least
+   * significant group first, and returns it as a BigInt: full 32-bit groups
+   * from the bottom with the final group carrying the remainder -- the
+   * shared group structure of the 128-bit paths. bits must be in [1,128]
+   * and the bounds check must have already passed: the caller checks the
+   * TOTAL bits up front, so a refused wide read consumes nothing.
+   */
+  #readGroups128(bits) {
+    if (bits <= 64) {
+      return this.#readWide64(bits);
+    }
+    if (bits <= 96) {
+      const g0 = this.#reader.readBits(32);
+      const g1 = this.#reader.readBits(32);
+      const g2 = this.#reader.readBits(bits - 64);
+      return (BigInt(g2) << 64n) | (BigInt(g1) << 32n) | BigInt(g0);
+    }
+    const g0 = this.#reader.readBits(32);
+    const g1 = this.#reader.readBits(32);
+    const g2 = this.#reader.readBits(32);
+    const g3 = this.#reader.readBits(bits - 96);
+    return (BigInt(g3) << 96n) | (BigInt(g2) << 64n) | (BigInt(g1) << 32n) | BigInt(g0);
+  }
+
+  /**
+   * Reads a ranged 128-bit integer: exactly bitsRequired128 bits, decoded
+   * as the offset from min in the unsigned 128-bit domain -- 32-bit groups,
+   * least significant first, up to four groups. min and max must be BigInts
+   * representable in int128 with min <= max, identical to the range the
+   * writer used: violating that is caller misuse and throws. On success
+   * ref.value is a BigInt GUARANTEED to be in [min,max]; a decoded offset
+   * above max - min in the unsigned domain -- a value smuggled into the bit
+   * headroom of the encoding -- latches SerializeError.ValueOutOfRange
+   * (reject, never clamp), and a read past the end of the data latches
+   * Overflow, checked against the TOTAL width up front so a refused read
+   * consumes nothing. On failure ref.value is left unmodified, and hostile
+   * data never throws. A degenerate range where min === max reads ZERO
+   * bits: ref.value = min from the range alone.
+   * @param {{value: bigint}} ref holder the integer read is assigned to.
+   * @param {bigint} min the minimum value, an int128 BigInt.
+   * @param {bigint} max the maximum value, an int128 BigInt, at least min.
+   * @returns {boolean} true on success.
+   */
+  serializeInt128(ref, min, max) {
+    validateInt128Range(min, max);
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const bits = bitsRequired128(BigInt.asUintN(128, min), BigInt.asUintN(128, max));
+    if (bits === 0) {
+      ref.value = min; // degenerate range: the value IS the range
+      return true;
+    }
+    if (this.#reader.wouldReadPastEnd(bits)) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    const unsigned = this.#readGroups128(bits);
+    // compare and add in the unsigned domain: the range may be wider than 2^127
+    if (unsigned > BigInt.asUintN(128, max - min)) {
+      return this.#fail(SerializeError.ValueOutOfRange);
+    }
+    ref.value = BigInt.asIntN(128, unsigned + BigInt.asUintN(128, min));
+    return true;
+  }
+
+  /**
    * Reads 8 bits into ref.value: the fixed-width uint8 helper, an alias for
    * serializeBits(ref, 8) carrying no range information of its own
    * (STANDARD.md). On success ref.value is in [0,255]; on failure it is
@@ -740,6 +900,29 @@ export class ReadStream {
    */
   serializeUint64(ref) {
     return this.serializeBits64(ref, 64);
+  }
+
+  /**
+   * Reads 128 bits into ref.value as a BigInt: the fixed-width uint128
+   * helper, NOT ranged -- always a full 128 bits, the low 64-bit half
+   * first, then the high half, each half low dword first (STANDARD.md
+   * "uint128"). On success ref.value is a BigInt in [0,2^128-1]; on failure
+   * -- a read past the end of the data latches Overflow, checked against
+   * the full 128 bits up front so nothing is consumed -- ref.value is left
+   * unmodified. Hostile data never throws. Do not confuse it with
+   * serializeInt128, which is ranged.
+   * @param {{value: bigint}} ref holder the value read is assigned to.
+   * @returns {boolean} true on success.
+   */
+  serializeUint128(ref) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    if (this.#reader.wouldReadPastEnd(128)) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    ref.value = this.#readGroups128(128);
+    return true;
   }
 
   /**
@@ -951,6 +1134,33 @@ export class MeasureStream {
   }
 
   /**
+   * Measures a ranged 128-bit integer: exactly bitsRequired128 bits, zero
+   * for a degenerate range where min === max. min and max must be BigInts
+   * representable in int128 with min <= max (misuse throws, as is a
+   * non-BigInt value). Like a write, ref.value must be in [min,max] or the
+   * measure latches SerializeError.ValueOutOfRange: a message that cannot
+   * be written cannot be measured either.
+   * @param {{value: bigint}} ref holder of the integer that would be written.
+   * @param {bigint} min the minimum value, an int128 BigInt.
+   * @param {bigint} max the maximum value, an int128 BigInt, at least min.
+   * @returns {boolean} true on success.
+   */
+  serializeInt128(ref, min, max) {
+    validateInt128Range(min, max);
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const value = ref.value;
+    if (typeof value !== 'bigint') {
+      throw new TypeError(BIGINT_VALUE_MESSAGE);
+    }
+    if (value < min || value > max) {
+      return this.#fail(SerializeError.ValueOutOfRange);
+    }
+    return this.#measure(bitsRequired128(BigInt.asUintN(128, min), BigInt.asUintN(128, max)));
+  }
+
+  /**
    * Measures the fixed-width uint8 helper: 8 bits. ref is ignored.
    * @param {{value: number}} ref ignored.
    * @returns {boolean} true on success.
@@ -984,6 +1194,15 @@ export class MeasureStream {
    */
   serializeUint64(ref) {
     return this.#measure(64);
+  }
+
+  /**
+   * Measures the fixed-width uint128 helper: 128 bits. ref is ignored.
+   * @param {{value: bigint}} ref ignored.
+   * @returns {boolean} true on success.
+   */
+  serializeUint128(ref) {
+    return this.#measure(128);
   }
 
   /**
