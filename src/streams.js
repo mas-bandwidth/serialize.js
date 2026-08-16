@@ -27,8 +27,12 @@
 // in every state.
 
 import { BitWriter, BitReader } from './bitpacker.js';
+import { bitsRequired } from './bits.js';
 
 const BITS_RANGE_MESSAGE = 'bits must be an integer in [1,32]';
+const INT32_RANGE_MESSAGE = 'min and max must be integers in [-2^31,2^31-1]';
+const MIN_MAX_MESSAGE = 'min must not exceed max';
+const VALUE_TYPE_MESSAGE = 'value must be a number';
 
 /**
  * The first error latched on a stream. A healthy stream's error is
@@ -48,6 +52,16 @@ export const SerializeError = Object.freeze({
   Overflow: 'overflow',
 
   /**
+   * A value outside the range it is serialized with. On read, the decoded
+   * value lies outside [min,max]: a value smuggled into the bit headroom of
+   * the range encoding, which conforming readers must refuse (STANDARD.md).
+   * On write and measure, the value passed in is outside [min,max]: the
+   * checked runtime refuses instead of writing a value the range cannot
+   * carry.
+   */
+  ValueOutOfRange: 'value_out_of_range',
+
+  /**
    * The zero pad bits read by an align are not zero. This typically means
    * the read and write serialize functions don't match.
    */
@@ -62,6 +76,21 @@ export const SerializeError = Object.freeze({
 function validateBits(bits) {
   if ((bits | 0) !== bits || bits < 1 || bits > 32) {
     throw new RangeError(BITS_RANGE_MESSAGE);
+  }
+}
+
+/**
+ * Validates the shared caller contract of serializeInt: min and max must be
+ * integers representable in int32, with min <= max. The range is part of the
+ * message format, never data, so violating it is caller misuse and throws on
+ * every stream in every state.
+ */
+function validateIntRange(min, max) {
+  if ((min | 0) !== min || (max | 0) !== max) {
+    throw new RangeError(INT32_RANGE_MESSAGE);
+  }
+  if (min > max) {
+    throw new RangeError(MIN_MAX_MESSAGE);
   }
 }
 
@@ -115,6 +144,23 @@ export class WriteStream {
   }
 
   /**
+   * Writes bits that have already been validated to [1,32]: the shared tail
+   * of every fixed-width write. A latched error and a write past the end of
+   * the buffer are refused as values; the bit writer masks the value to the
+   * bit count.
+   */
+  #writeBits(value, bits) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    if (bits > this.#writer.bitsAvailable()) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    this.#writer.writeBits(value, bits);
+    return true;
+  }
+
+  /**
    * Writes the low order bits of ref.value, without padding to the nearest
    * byte. bits must be an integer in [1,32] (misuse throws); bits of the
    * value above the count are ignored. Returns false and latches Overflow
@@ -125,14 +171,44 @@ export class WriteStream {
    */
   serializeBits(ref, bits) {
     validateBits(bits);
+    return this.#writeBits(ref.value, bits);
+  }
+
+  /**
+   * Writes a ranged integer -- the format's defining operation: ref.value,
+   * an integer in [min,max], costs exactly bitsRequired(min,max) bits as
+   * the offset from min, computed in the unsigned domain so ranges wider
+   * than 2^31 are exact. min and max must be integers representable in
+   * int32 with min <= max: the range is part of the message format, so
+   * violating that is caller misuse and throws. A value outside [min,max]
+   * -- including NaN and non-integers, which the int32 domain cannot carry
+   * -- latches SerializeError.ValueOutOfRange and writes nothing: checks
+   * run in every build, so the refusal is a value, not a throw. A
+   * degenerate range where min === max costs ZERO bits: the value IS the
+   * range and nothing is written.
+   * @param {{value: number}} ref holder of the integer to write.
+   * @param {number} min the minimum value, an int32.
+   * @param {number} max the maximum value, an int32, at least min.
+   * @returns {boolean} true on success.
+   */
+  serializeInt(ref, min, max) {
+    validateIntRange(min, max);
     if (this.#error !== SerializeError.None) {
       return false;
     }
-    if (bits > this.#writer.bitsAvailable()) {
-      return this.#fail(SerializeError.Overflow);
+    const value = ref.value;
+    if (typeof value !== 'number') {
+      throw new TypeError(VALUE_TYPE_MESSAGE);
     }
-    this.#writer.writeBits(ref.value, bits);
-    return true;
+    if (!Number.isInteger(value) || value < min || value > max) {
+      return this.#fail(SerializeError.ValueOutOfRange);
+    }
+    const bits = bitsRequired(min >>> 0, max >>> 0);
+    if (bits === 0) {
+      return true; // degenerate range: the value IS the range, nothing to send
+    }
+    // subtract in the unsigned domain: the range may be wider than 2^31
+    return this.#writeBits(((value >>> 0) - (min >>> 0)) >>> 0, bits);
   }
 
   /**
@@ -263,6 +339,23 @@ export class ReadStream {
   }
 
   /**
+   * Reads bits that have already been validated to [1,32] into ref.value:
+   * the shared tail of every fixed-width read. A latched error and a read
+   * past the end of the data are refused as values; on failure ref.value is
+   * left unmodified.
+   */
+  #readBits(ref, bits) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    if (this.#reader.wouldReadPastEnd(bits)) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    ref.value = this.#reader.readBits(bits);
+    return true;
+  }
+
+  /**
    * Reads bits from the stream into ref.value. bits must be an integer in
    * [1,32] (misuse throws). On success ref.value is in [0,(1<<bits)-1]; on
    * failure -- a read past the end of the data latches Overflow -- ref.value
@@ -273,13 +366,47 @@ export class ReadStream {
    */
   serializeBits(ref, bits) {
     validateBits(bits);
+    return this.#readBits(ref, bits);
+  }
+
+  /**
+   * Reads a ranged integer -- the format's defining operation: exactly
+   * bitsRequired(min,max) bits, decoded as the offset from min in the
+   * unsigned domain. min and max must be integers representable in int32
+   * with min <= max, identical to the range the writer used: the range is
+   * part of the message format, so violating that is caller misuse and
+   * throws. On success ref.value is GUARANTEED to be an integer in
+   * [min,max]; a decoded offset above max - min -- a value smuggled into
+   * the bit headroom of the encoding -- latches
+   * SerializeError.ValueOutOfRange, and a read past the end of the data
+   * latches Overflow. On failure ref.value is left unmodified, and hostile
+   * data never throws. A degenerate range where min === max reads ZERO
+   * bits: the value is known from the range alone and ref.value = min.
+   * @param {{value: number}} ref holder the integer read is assigned to.
+   * @param {number} min the minimum value, an int32.
+   * @param {number} max the maximum value, an int32, at least min.
+   * @returns {boolean} true on success.
+   */
+  serializeInt(ref, min, max) {
+    validateIntRange(min, max);
     if (this.#error !== SerializeError.None) {
       return false;
+    }
+    const bits = bitsRequired(min >>> 0, max >>> 0);
+    if (bits === 0) {
+      ref.value = min; // degenerate range: the value IS the range
+      return true;
     }
     if (this.#reader.wouldReadPastEnd(bits)) {
       return this.#fail(SerializeError.Overflow);
     }
-    ref.value = this.#reader.readBits(bits);
+    const unsigned = this.#reader.readBits(bits);
+    // compare and add in the unsigned domain: the range may be wider than
+    // 2^31, and | 0 wraps the sum back into the signed int32 domain
+    if (unsigned > ((max >>> 0) - (min >>> 0)) >>> 0) {
+      return this.#fail(SerializeError.ValueOutOfRange);
+    }
+    ref.value = (unsigned + (min >>> 0)) | 0;
     return true;
   }
 
@@ -343,10 +470,12 @@ export class ReadStream {
  * that is the one thing a measure is for. Comparing a measure to a write's
  * bitsProcessed and expecting equality is a misuse.
  *
- * A measure refuses nothing at runtime: nothing it sees came off a network.
- * No operation in the current surface can latch an error on a measure
- * stream; the error surface exists so unified serialize functions can check
- * ok on any stream uniformly.
+ * A measure validates like a write (the Go port's stance): nothing it sees
+ * came off a network, but a ranged value outside its range latches
+ * SerializeError.ValueOutOfRange exactly as the write would, so a message
+ * that cannot be written cannot be measured either. Wire-level refusals
+ * (Overflow, Align) cannot occur here: no operation on a measure stream
+ * touches a buffer.
  */
 export class MeasureStream {
   #bitsWritten;
@@ -377,6 +506,13 @@ export class MeasureStream {
     return false;
   }
 
+  #fail(error) {
+    if (this.#error === SerializeError.None) {
+      this.#error = error;
+    }
+    return false;
+  }
+
   #measure(bits) {
     if (this.#error !== SerializeError.None) {
       return false;
@@ -395,6 +531,33 @@ export class MeasureStream {
   serializeBits(ref, bits) {
     validateBits(bits);
     return this.#measure(bits);
+  }
+
+  /**
+   * Measures a ranged integer: exactly bitsRequired(min,max) bits, zero for
+   * a degenerate range where min === max. min and max must be integers
+   * representable in int32 with min <= max (misuse throws). Like a write,
+   * ref.value must be an integer in [min,max] or the measure latches
+   * SerializeError.ValueOutOfRange: a message that cannot be written cannot
+   * be measured either.
+   * @param {{value: number}} ref holder of the integer that would be written.
+   * @param {number} min the minimum value, an int32.
+   * @param {number} max the maximum value, an int32, at least min.
+   * @returns {boolean} true on success.
+   */
+  serializeInt(ref, min, max) {
+    validateIntRange(min, max);
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const value = ref.value;
+    if (typeof value !== 'number') {
+      throw new TypeError(VALUE_TYPE_MESSAGE);
+    }
+    if (!Number.isInteger(value) || value < min || value > max) {
+      return this.#fail(SerializeError.ValueOutOfRange);
+    }
+    return this.#measure(bitsRequired(min >>> 0, max >>> 0));
   }
 
   /**
