@@ -22,8 +22,16 @@ any other.
   CI diffs it against upstream on every push.
 - The package scaffold: ESM, zero dependencies, no build step, Node 20+,
   tested with node's built-in `node:test` runner on Linux, macOS and Windows.
-
-The library itself lands next, starting with the bitpacker.
+- The bitpacker: `BitWriter` and `BitReader`, the family wire in two-lane
+  32-bit arithmetic. The reader prices its windows **inside** the buffer —
+  any data length is supported and no slack past the data is required.
+- The streams: `WriteStream`, `ReadStream` and `MeasureStream` share one
+  bool-returning serialize surface (`serializeBits`, `serializeAlign` so
+  far), so a single serialize function writes, reads and measures. Refs are
+  `{ value }` holders — the JavaScript translation of the family's ref
+  parameters. The first failure latches on `stream.error` and sticks;
+  `measure` is a conservative bound, charging 7 bits per
+  alignment-performing operation, never exact.
 
 ## Design
 
