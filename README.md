@@ -48,6 +48,18 @@ any other.
   `serializeUint128` (not ranged — always 128 bits, the low 64-bit half
   first). Wide refusals are checked against the total width up front, so a
   refused operation consumes and writes nothing.
+- The floating point operations: `serializeFloat` and `serializeDouble` are
+  **bit transparent both ways** — every pattern is legal on the wire (NaNs
+  with any payload, signaling NaNs, infinities, negative zero, denormals)
+  and the transmitted pattern is reproduced exactly, with NaN payloads
+  riding a software narrowing/widening that never sets the quiet bit.
+  `serializeCompressedFloat` quantizes to a declared `[min, max]` at a
+  resolution in float32 with the standard's **two roundings on each side**
+  (`Math.fround` at every step — the roundings are part of the format, and
+  the family's discriminating vectors are pinned bit-exactly). Finite
+  values outside the declaration clamp; writing a non-finite value latches
+  `ValueOutOfRange`; reads refuse integers smuggled above
+  `max_integer_value`.
 - `bitsRequired(min, max)`, `bitsRequired64` and `bitsRequired128` — the
   serialize.h range-costing arithmetic, for pricing fields when designing a
   message format.
