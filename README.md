@@ -107,6 +107,10 @@ that fails its goldens reports nothing. `--csv` emits the numbers as
 `row,op,units,value`; `BENCH_BITPACKER_PASSES` and `BENCH_STREAM_PACKETS`
 scale the loops for linearity checks.
 
+Cross-language tables built from these rows present the fastest measured
+implementation as 100% and every other language as a multiple of its time —
+on this bench set that reference is C++.
+
 ## License
 
 [BSD 3-Clause](LICENSE), © Más Bandwidth LLC.
