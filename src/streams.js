@@ -45,6 +45,10 @@ const FLOAT_PARAMS_MESSAGE = 'min must be less than max and resolution must be p
 const FLOAT_DECLARATION_MESSAGE = 'compressed float declaration is not finite in float32: delta and delta / resolution must not overflow';
 
 const PREVIOUS_RANGE_MESSAGE = 'previous must be an integer in [0,2^32-1]';
+const FIXED_FORMAT_MESSAGE = 'integerBits must be an integer of at least 1, fractionBits an integer of at least 0, and their sum must be a storage width of 8, 16, 32, 64 or 128';
+const FIXED_NARROW_BOUNDS_MESSAGE = 'min and max must be integer Numbers in whole units for storage of 32 bits or fewer';
+const FIXED_CAPACITY_MESSAGE = 'min and max in whole units must fit the Q format';
+
 const INT64_MIN = -(2n ** 63n);
 const INT64_MAX = 2n ** 63n - 1n;
 const INT128_MIN = -(2n ** 127n);
@@ -339,6 +343,104 @@ function compressedFloatParams(min, max, resolution) {
   floatParams.maxIntegerValue = maxIntegerValue;
   floatParams.bits = bitsRequired(0, maxIntegerValue);
   return floatParams;
+}
+
+// The wire parameters shared by the write, read and measure implementations
+// of serializeFixed, computed into a reused module-level holder (filled and
+// consumed within a single call, no user code in between, so sharing is safe
+// and allocation-free on the narrow lane). wide selects the value domain:
+// Number lanes for storage of 32 bits or fewer, BigInt for 64 and 128 -- the
+// house BigInt-at-the-edges rule.
+const fixedParams = { wide: false, bits: 0, rawMin: 0, rawRange: 0, rawMinBig: 0n, rawRangeBig: 0n };
+
+/**
+ * Validates a fixed point declaration and computes its wire parameters --
+ * the JS translation of serialize.h's serialize_fixed_internal static
+ * asserts and compile-time constants. The declaration is part of the
+ * message format, never data, so violating it is caller misuse and throws
+ * on every stream in every state:
+ *
+ * - integerBits >= 1 (the sign bit counts), fractionBits >= 0, and their
+ *   sum -- the storage width -- must be 8, 16, 32, 64 or 128, exactly the
+ *   integer storage widths of the family.
+ * - min and max are bounds in WHOLE units: integer Numbers for storage of
+ *   32 bits or fewer, BigInts in the int64 domain for 64 and 128 bit
+ *   storage (the int64_t template parameter domain of the C++ reference),
+ *   with min <= max.
+ * - The bounds must fit the Q format's whole-unit capacity. The format is
+ *   read as signed exactly when min < 0 -- [-2^(integerBits-1),
+ *   2^(integerBits-1)-1] whole units -- and as unsigned otherwise --
+ *   [0, 2^integerBits - 1] -- the JS translation of the C++ storage type's
+ *   signedness, which never reaches the wire: for the same bounds signed
+ *   and unsigned storage produce identical bytes.
+ *
+ * The wire parameters are the raw (scaled) bounds and the bit cost:
+ * rawMin = min << fractionBits, rawRange = (max - min) << fractionBits,
+ * bits = bit length of rawRange (zero for the degenerate min === max range,
+ * on EVERY storage width -- STANDARD.md, adopted 2026-08-15).
+ */
+function fixedPointParams(integerBits, fractionBits, min, max) {
+  if (
+    (integerBits | 0) !== integerBits || integerBits < 1 ||
+    (fractionBits | 0) !== fractionBits || fractionBits < 0
+  ) {
+    throw new RangeError(FIXED_FORMAT_MESSAGE);
+  }
+  const width = integerBits + fractionBits;
+  if (width !== 8 && width !== 16 && width !== 32 && width !== 64 && width !== 128) {
+    throw new RangeError(FIXED_FORMAT_MESSAGE);
+  }
+  if (width <= 32) {
+    if (!Number.isInteger(min) || !Number.isInteger(max)) {
+      throw new RangeError(FIXED_NARROW_BOUNDS_MESSAGE);
+    }
+    if (min > max) {
+      throw new RangeError(MIN_MAX_MESSAGE);
+    }
+    if (min < 0) {
+      // signed reading: the sign bit is one of the integer bits
+      const half = 2 ** (integerBits - 1);
+      if (min < -half || max > half - 1) {
+        throw new RangeError(FIXED_CAPACITY_MESSAGE);
+      }
+    } else if (max > 2 ** integerBits - 1) {
+      // unsigned reading: the full integer bits carry magnitude
+      throw new RangeError(FIXED_CAPACITY_MESSAGE);
+    }
+    // exact in the Number domain: |raw| < 2^32 for storage of 32 bits or
+    // fewer, so the scaling multiply never rounds
+    const scale = 2 ** fractionBits;
+    fixedParams.wide = false;
+    fixedParams.rawMin = min * scale;
+    fixedParams.rawRange = (max - min) * scale;
+    fixedParams.bits = bitsRequired(0, fixedParams.rawRange);
+    return fixedParams;
+  }
+  validateInt64Range(min, max);
+  if (min < 0n) {
+    // signed reading, int64-clamped exactly as the C++ compile-time domain:
+    // 65 or more integer bits cover any int64 lower bound, 64 or more any
+    // upper bound, and validateInt64Range has already bounded both
+    if (integerBits < 65 && min < -(1n << BigInt(integerBits - 1))) {
+      throw new RangeError(FIXED_CAPACITY_MESSAGE);
+    }
+    if (integerBits < 64 && max > (1n << BigInt(integerBits - 1)) - 1n) {
+      throw new RangeError(FIXED_CAPACITY_MESSAGE);
+    }
+  } else if (integerBits < 64 && max > (1n << BigInt(integerBits)) - 1n) {
+    throw new RangeError(FIXED_CAPACITY_MESSAGE);
+  }
+  const shift = BigInt(fractionBits);
+  fixedParams.wide = true;
+  fixedParams.rawMinBig = min << shift;
+  fixedParams.rawRangeBig = (max - min) << shift;
+  // the bit length of the raw range, exact at any width: the range never
+  // wraps -- raw values fit the storage type -- so bitsRequired128 over
+  // [0, rawRange] is the C++ BitsRequired64/128 result on both wide lanes
+  fixedParams.bits = fixedParams.rawRangeBig === 0n
+    ? 0
+    : bitsRequired128(0n, fixedParams.rawRangeBig);
+  return fixedParams;
 }
 
 /**
@@ -678,6 +780,72 @@ export class WriteStream {
     }
     this.#writer.writeBits(0, 6);
     this.#writer.writeBits(current, 32);
+    return true;
+  }
+
+  /**
+   * Writes a fixed point value (STANDARD.md "fixed"): ref.value is the RAW
+   * scaled integer of a Q format -- the real value times 2^fractionBits --
+   * held in storage of exactly integerBits + fractionBits bits (8, 16, 32,
+   * 64 or 128, the sign bit counting toward integerBits), serialized as
+   * the offset from min << fractionBits in exactly the bit length of the
+   * raw range. For storage of 32 bits or fewer ref.value and the bounds
+   * are Numbers; for 64 and 128 bit storage ref.value is a BigInt, min and
+   * max are int64 BigInts, and the offset goes out in 32-bit groups, least
+   * significant first, up to four groups -- byte identical to
+   * serializeInt64 of the raw value over the raw bounds wherever the
+   * storage is 64 bits or fewer (STANDARD.md): fixed point adds no wire
+   * structure, only the compile-time scaling convention, and the round
+   * trip is EXACT -- no quantization, unlike serializeCompressedFloat. The
+   * declaration (integerBits, fractionBits, min, max in WHOLE units) is
+   * part of the message format: violating it is caller misuse and throws,
+   * as is a value of the wrong type for the storage width. A raw value
+   * outside the raw bounds latches SerializeError.ValueOutOfRange and
+   * writes nothing. A degenerate range where min === max is legal and
+   * costs ZERO bits on every storage width (STANDARD.md, adopted
+   * 2026-08-15): the value must be exactly min << fractionBits, and
+   * nothing is written. Wide writes are checked against the TOTAL width up
+   * front, so a refused write puts nothing on the wire.
+   * @param {{value: number|bigint}} ref holder of the raw fixed point value.
+   * @param {number} integerBits integer bits of the Q format, at least 1.
+   * @param {number} fractionBits fractional bits of the Q format.
+   * @param {number|bigint} min the minimum value in WHOLE units.
+   * @param {number|bigint} max the maximum value in WHOLE units, at least min.
+   * @returns {boolean} true on success.
+   */
+  serializeFixed(ref, integerBits, fractionBits, min, max) {
+    const params = fixedPointParams(integerBits, fractionBits, min, max);
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const value = ref.value;
+    if (!params.wide) {
+      if (typeof value !== 'number') {
+        throw new TypeError(VALUE_TYPE_MESSAGE);
+      }
+      const offset = value - params.rawMin;
+      if (!Number.isInteger(value) || offset < 0 || offset > params.rawRange) {
+        return this.#fail(SerializeError.ValueOutOfRange);
+      }
+      if (params.bits === 0) {
+        return true; // degenerate range: the value IS the range, nothing to send
+      }
+      return this.#writeBits(offset, params.bits);
+    }
+    if (typeof value !== 'bigint') {
+      throw new TypeError(BIGINT_VALUE_MESSAGE);
+    }
+    const offset = value - params.rawMinBig;
+    if (offset < 0n || offset > params.rawRangeBig) {
+      return this.#fail(SerializeError.ValueOutOfRange);
+    }
+    if (params.bits === 0) {
+      return true; // degenerate range: the value IS the range, nothing to send
+    }
+    if (params.bits > this.#writer.bitsAvailable()) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    this.#writeGroups128(offset, params.bits);
     return true;
   }
 
@@ -1408,6 +1576,65 @@ export class ReadStream {
   }
 
   /**
+   * Reads a fixed point value (STANDARD.md "fixed"): exactly the bit
+   * length of the raw range, decoded as the offset from
+   * min << fractionBits -- a Number for storage of 32 bits or fewer, a
+   * BigInt read in 32-bit groups, least significant first, for 64 and 128
+   * bit storage. The declaration (integerBits, fractionBits, min, max in
+   * WHOLE units) must be identical to the writer's -- it is part of the
+   * message format, so violating it is caller misuse and throws. On
+   * success ref.value is the raw scaled integer, GUARANTEED to be within
+   * the raw bounds, and the round trip is EXACT; a decoded offset above
+   * the raw range -- a raw value smuggled into the bit headroom of the
+   * encoding -- latches SerializeError.ValueOutOfRange (reject, never
+   * clamp), and a read past the end of the data latches Overflow, checked
+   * against the TOTAL width up front so a refused read consumes nothing.
+   * On failure ref.value is left unmodified, and hostile data never
+   * throws. A degenerate range where min === max reads ZERO bits on every
+   * storage width: ref.value = min << fractionBits from the range alone.
+   * @param {{value: number|bigint}} ref holder the raw value is assigned to.
+   * @param {number} integerBits integer bits of the Q format, at least 1.
+   * @param {number} fractionBits fractional bits of the Q format.
+   * @param {number|bigint} min the minimum value in WHOLE units.
+   * @param {number|bigint} max the maximum value in WHOLE units, at least min.
+   * @returns {boolean} true on success.
+   */
+  serializeFixed(ref, integerBits, fractionBits, min, max) {
+    const params = fixedPointParams(integerBits, fractionBits, min, max);
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    if (!params.wide) {
+      if (params.bits === 0) {
+        ref.value = params.rawMin; // degenerate range: the value IS the range
+        return true;
+      }
+      if (this.#reader.wouldReadPastEnd(params.bits)) {
+        return this.#fail(SerializeError.Overflow);
+      }
+      const offset = this.#reader.readBits(params.bits);
+      if (offset > params.rawRange) {
+        return this.#fail(SerializeError.ValueOutOfRange);
+      }
+      ref.value = params.rawMin + offset;
+      return true;
+    }
+    if (params.bits === 0) {
+      ref.value = params.rawMinBig; // degenerate range: the value IS the range
+      return true;
+    }
+    if (this.#reader.wouldReadPastEnd(params.bits)) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    const offset = this.#readGroups128(params.bits);
+    if (offset > params.rawRangeBig) {
+      return this.#fail(SerializeError.ValueOutOfRange);
+    }
+    ref.value = params.rawMinBig + offset;
+    return true;
+  }
+
+  /**
    * Reads 8 bits into ref.value: the fixed-width uint8 helper, an alias for
    * serializeBits(ref, 8) carrying no range information of its own
    * (STANDARD.md). On success ref.value is in [0,255]; on failure it is
@@ -2022,6 +2249,49 @@ export class MeasureStream {
       return this.#measure(23);
     }
     return this.#measure(38);
+  }
+
+  /**
+   * Measures a fixed point value: exactly the bit length of the raw range,
+   * a constant of the declaration -- zero for a degenerate min === max
+   * range, on every storage width (fixed never aligns, so the measure is
+   * exact, not a bound). The declaration must be valid or the measure
+   * throws, exactly as the write would (misuse), and like a write the raw
+   * ref.value must be an integer of the storage width's type within the
+   * raw bounds, or the measure latches SerializeError.ValueOutOfRange: a
+   * message that cannot be written cannot be measured either.
+   * @param {{value: number|bigint}} ref holder of the raw fixed point value
+   * that would be written.
+   * @param {number} integerBits integer bits of the Q format, at least 1.
+   * @param {number} fractionBits fractional bits of the Q format.
+   * @param {number|bigint} min the minimum value in WHOLE units.
+   * @param {number|bigint} max the maximum value in WHOLE units, at least min.
+   * @returns {boolean} true on success.
+   */
+  serializeFixed(ref, integerBits, fractionBits, min, max) {
+    const params = fixedPointParams(integerBits, fractionBits, min, max);
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const value = ref.value;
+    if (!params.wide) {
+      if (typeof value !== 'number') {
+        throw new TypeError(VALUE_TYPE_MESSAGE);
+      }
+      const offset = value - params.rawMin;
+      if (!Number.isInteger(value) || offset < 0 || offset > params.rawRange) {
+        return this.#fail(SerializeError.ValueOutOfRange);
+      }
+      return this.#measure(params.bits);
+    }
+    if (typeof value !== 'bigint') {
+      throw new TypeError(BIGINT_VALUE_MESSAGE);
+    }
+    const offset = value - params.rawMinBig;
+    if (offset < 0n || offset > params.rawRangeBig) {
+      return this.#fail(SerializeError.ValueOutOfRange);
+    }
+    return this.#measure(params.bits);
   }
 
   /**
