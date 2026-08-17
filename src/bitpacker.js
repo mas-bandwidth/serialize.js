@@ -11,13 +11,20 @@
 // implementations store as one qword -- and the bits that spilled past 64
 // carry over into the next scratch.
 //
-// Checks run in every build (JavaScript has no compile-out): like the Go port,
-// writes keep their checks and throw on caller error -- the write path is
-// trusted, so a violated writer contract is a bug in the caller, not data to
-// be tolerated. The read side is different: the wire is a trust boundary, and
-// hostile input never throws. See BitReader.
+// The writer ships in two variants, selected once at module load on NODE_ENV
+// (see mode.js): CheckedBitWriter -- the development default -- validates
+// every caller contract and throws on caller error, and ProductionBitWriter
+// carries the family's release shape: the caller is responsible for
+// well-formed writes (STANDARD.md, "Writes assume trusted data"), so the
+// per-operation caller validation is gone and only tryWriteBits's buffer-end
+// check remains -- the one write-path check the writer-trusted model keeps,
+// because its false is the stream layer's sticky Overflow. The read side is
+// different in EVERY mode: the wire is a trust boundary, and hostile input
+// never throws. See BitReader.
 //
 // Bit counts are Numbers, exact to 2^53: buffers cannot get near that.
+
+import { PRODUCTION } from './mode.js';
 
 const BUFFER_TYPE_MESSAGE = 'buffer must be a Uint8Array';
 const BUFFER_BYTES_MESSAGE = 'buffer size must be a multiple of 8 bytes';
@@ -56,8 +63,13 @@ const SMALL_COPY_BYTES = 64;
  *
  * IMPORTANT: When you have finished writing, call flushBits(), otherwise the
  * last word of data will not get flushed to memory.
+ *
+ * This is the CHECKED variant (the development default): every caller
+ * contract is validated and misuse throws. ProductionBitWriter below is the
+ * same wire without the validation; mode.js selects which one exports as
+ * BitWriter.
  */
-export class BitWriter {
+class CheckedBitWriter {
   #data; // Uint8Array
   #view; // DataView over the same range
   #scratchLo; // low 32 bits of the 64-bit scratch (uint32)
@@ -113,10 +125,11 @@ export class BitWriter {
    * (their uint32 parameter type performs the same conversion at the call
    * site). Throws if the write would go past the end of the buffer.
    *
-   * The core below the checks is duplicated in tryWriteBits -- fused into
-   * each public entry because V8 was not inlining a shared private core
-   * across the call layer, and the wrapper call cost was measurable on
-   * every hot row. KEEP THE TWO COPIES IDENTICAL.
+   * The core below the checks is duplicated in tryWriteBits and in both
+   * ProductionBitWriter entries -- fused into each public entry because V8
+   * was not inlining a shared private core across the call layer, and the
+   * wrapper call cost was measurable on every hot row. KEEP THE FOUR
+   * COPIES IDENTICAL.
    */
   writeBits(value, bits) {
     if ((bits | 0) !== bits || bits < 1 || bits > 32) {
@@ -180,7 +193,7 @@ export class BitWriter {
    * throws.
    *
    * The core below the checks is a fused copy of writeBits's core: KEEP THE
-   * TWO COPIES IDENTICAL (see writeBits).
+   * FOUR COPIES IDENTICAL (see writeBits).
    */
   tryWriteBits(value, bits) {
     if ((bits | 0) !== bits || bits < 1 || bits > 32) {
@@ -375,6 +388,316 @@ export class BitWriter {
     return this.#data.subarray(0, this.bytesWritten());
   }
 }
+
+/**
+ * The PRODUCTION variant of the bit writer: the same wire as
+ * CheckedBitWriter with the caller validation removed -- the family's
+ * release shape (STANDARD.md, "Writes assume trusted data": the caller is
+ * responsible for well-formed writes, and release builds carry zero caller
+ * validation on the write path). mode.js selects this class as BitWriter
+ * when NODE_ENV is 'production' at module load.
+ *
+ * What remains is exactly what the writer-trusted model keeps hard:
+ *
+ * - tryWriteBits keeps its buffer-end check. Its false is the stream
+ *   layer's sticky Overflow refusal: a message that does not fit the buffer
+ *   is a runtime condition, not a caller bug, so the overflow contract
+ *   latches identically in both modes.
+ * - The value mask stays in both entries: bits of the value above the count
+ *   are IGNORED by documented semantics (the Go/C# uint32 conversion), so
+ *   the mask is wire arithmetic, not validation.
+ *
+ * Everything else -- bits an integer in [1,32], a Number value, capacity
+ * for the trusted writeBits, a byte-aligned cursor and in-bounds span for
+ * writeBytes, a Uint8Array buffer whose length is a multiple of 8 -- is the
+ * caller's contract, validated only by the CHECKED variant. Violating it
+ * here produces garbage on the wire, never memory unsafety: a past-end
+ * write lands in DataView word stores that throw RangeError at the buffer
+ * boundary (or typed-array byte stores that drop), so the buffer's
+ * neighbors cannot be corrupted. That native backstop is JavaScript's
+ * memory safety, not an API contract -- what misuse produces is
+ * unspecified beyond being memory safe, exactly as the C release build
+ * owes a misbehaving writer nothing.
+ */
+class ProductionBitWriter {
+  #data; // Uint8Array
+  #view; // DataView over the same range
+  #scratchLo; // low 32 bits of the 64-bit scratch (uint32)
+  #scratchHi; // high 32 bits of the 64-bit scratch (uint32)
+  #scratchBits; // number of valid bits in scratch, in [0,63]
+  #numBits; // buffer capacity in bits
+  #bitsWritten; // bits written so far
+  #wordIndex; // next 8-byte word flushes to data[wordIndex*8]
+
+  /**
+   * Creates a bit writer that fills the given buffer with bitpacked data.
+   * @param {Uint8Array} buffer destination; length must be a multiple of 8.
+   */
+  constructor(buffer) {
+    this.reset(buffer);
+  }
+
+  /**
+   * Points the writer at a buffer and clears all write state: the checked
+   * reset without the buffer validation (the type and length-multiple
+   * contracts are the caller's). The DataView identity cache is unchanged.
+   * @param {Uint8Array} buffer destination; length must be a multiple of 8.
+   */
+  reset(buffer) {
+    if (buffer !== this.#data || buffer.byteLength !== this.#view.byteLength) {
+      this.#data = buffer;
+      this.#view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+    }
+    this.#scratchLo = 0;
+    this.#scratchHi = 0;
+    this.#scratchBits = 0;
+    this.#numBits = buffer.length * 8;
+    this.#bitsWritten = 0;
+    this.#wordIndex = 0;
+  }
+
+  /**
+   * Writes the low order bits of value: the trusted entry, all contracts
+   * the caller's -- bits in [1,32], value a Number, the write within
+   * capacity (size with a measure stream, or use the stream layer, which
+   * bounds checks through tryWriteBits and never calls this past the end).
+   *
+   * The body is the fused core of CheckedBitWriter.writeBits with the
+   * checks removed: KEEP THE FOUR COPIES IDENTICAL (see writeBits there).
+   */
+  writeBits(value, bits) {
+    // mask to the bit count: bits of value above the count are ignored
+    value = bits === 32 ? value >>> 0 : (value & (((1 << bits) >>> 0) - 1)) >>> 0;
+
+    // merge into the two-lane scratch at the current bit position. JavaScript
+    // shifts are mod 32, so every shift below is kept in [0,31] by the guards.
+    const s = this.#scratchBits;
+    if (s < 32) {
+      this.#scratchLo = (this.#scratchLo | (value << s)) >>> 0;
+      if (s > 0) {
+        // the part of value that crosses the 32-bit lane boundary
+        this.#scratchHi = (this.#scratchHi | (value >>> (32 - s))) >>> 0;
+      }
+    } else {
+      // the part that crosses the 64-bit boundary is discarded by the 32-bit
+      // shift here and recovered from value after the flush below
+      this.#scratchHi = (this.#scratchHi | (value << (s - 32))) >>> 0;
+    }
+
+    const newScratchBits = s + bits;
+
+    if (newScratchBits >= 64) {
+      // the scratch is full: store it as two little-endian 32-bit words, the
+      // same eight bytes the other implementations store as one qword
+      const base = this.#wordIndex * 8;
+      this.#view.setUint32(base, this.#scratchLo, true);
+      this.#view.setUint32(base + 4, this.#scratchHi, true);
+      this.#wordIndex++;
+      // recover the bits that spilled past 64. newScratchBits >= 64 with
+      // bits <= 32 implies s >= 32, so the shift is in [1,32]; at exactly 32
+      // nothing spilled (a JavaScript shift of 32 would be a shift of 0).
+      const shift = 64 - s;
+      this.#scratchLo = shift >= 32 ? 0 : value >>> shift;
+      this.#scratchHi = 0;
+      this.#scratchBits = newScratchBits - 64;
+    } else {
+      this.#scratchBits = newScratchBits;
+    }
+
+    this.#bitsWritten += bits;
+  }
+
+  /**
+   * Writes bits, refusing a past-end write as a value: returns true on
+   * success, or false -- writing nothing -- if the write would go past the
+   * end of the buffer. THE RETAINED HARD CHECK of the production write
+   * path: the stream layer's sticky Overflow latches off this false, in
+   * both modes identically. bits in [1,32] and a Number value remain the
+   * caller's contract, unvalidated here.
+   *
+   * The body below the bounds check is the fused core: KEEP THE FOUR
+   * COPIES IDENTICAL (see CheckedBitWriter.writeBits).
+   */
+  tryWriteBits(value, bits) {
+    if (this.#bitsWritten + bits > this.#numBits) {
+      return false;
+    }
+
+    // mask to the bit count: bits of value above the count are ignored
+    value = bits === 32 ? value >>> 0 : (value & (((1 << bits) >>> 0) - 1)) >>> 0;
+
+    // merge into the two-lane scratch at the current bit position. JavaScript
+    // shifts are mod 32, so every shift below is kept in [0,31] by the guards.
+    const s = this.#scratchBits;
+    if (s < 32) {
+      this.#scratchLo = (this.#scratchLo | (value << s)) >>> 0;
+      if (s > 0) {
+        // the part of value that crosses the 32-bit lane boundary
+        this.#scratchHi = (this.#scratchHi | (value >>> (32 - s))) >>> 0;
+      }
+    } else {
+      // the part that crosses the 64-bit boundary is discarded by the 32-bit
+      // shift here and recovered from value after the flush below
+      this.#scratchHi = (this.#scratchHi | (value << (s - 32))) >>> 0;
+    }
+
+    const newScratchBits = s + bits;
+
+    if (newScratchBits >= 64) {
+      // the scratch is full: store it as two little-endian 32-bit words, the
+      // same eight bytes the other implementations store as one qword
+      const base = this.#wordIndex * 8;
+      this.#view.setUint32(base, this.#scratchLo, true);
+      this.#view.setUint32(base + 4, this.#scratchHi, true);
+      this.#wordIndex++;
+      // recover the bits that spilled past 64. newScratchBits >= 64 with
+      // bits <= 32 implies s >= 32, so the shift is in [1,32]; at exactly 32
+      // nothing spilled (a JavaScript shift of 32 would be a shift of 0).
+      const shift = 64 - s;
+      this.#scratchLo = shift >= 32 ? 0 : value >>> shift;
+      this.#scratchHi = 0;
+      this.#scratchBits = newScratchBits - 64;
+    } else {
+      this.#scratchBits = newScratchBits;
+    }
+
+    this.#bitsWritten += bits;
+    return true;
+  }
+
+  /**
+   * Pads the bit stream with zeros so the bit index becomes a multiple of 8.
+   * If the current bit index is already a multiple of 8, nothing is written.
+   */
+  writeAlign() {
+    const remainderBits = this.#bitsWritten % 8;
+    if (remainderBits !== 0) {
+      this.writeBits(0, 8 - remainderBits);
+    }
+  }
+
+  /**
+   * Writes an array of bytes: CheckedBitWriter.writeBytes without the
+   * caller validation -- a Uint8Array, a byte-aligned bit index and a span
+   * that fits the buffer are the caller's contract (the stream layer aligns
+   * and bounds checks before calling). The copy structure is identical:
+   * head bytes through the scratch to the word boundary, whole words bulk
+   * copied, tail bytes through the scratch.
+   * @param {Uint8Array} data the bytes to write, in order.
+   */
+  writeBytes(data) {
+    const bytes = data.length;
+
+    // head: single bytes through the scratch until the cursor reaches a word
+    // boundary, or the data runs out first
+    let headBytes = (8 - ((this.#bitsWritten % 64) / 8)) % 8;
+    if (headBytes > bytes) {
+      headBytes = bytes;
+    }
+    for (let i = 0; i < headBytes; i++) {
+      this.writeBits(data[i], 8);
+    }
+    if (headBytes === bytes) {
+      return;
+    }
+
+    // at the word boundary the scratch is empty (scratchBits tracks
+    // bitsWritten % 64, and the write that filled bit 64 flushed it with a
+    // zero spill): whole words bulk copy straight into the buffer. At
+    // packet-sized counts a manual byte loop beats subarray-plus-set --
+    // the subarray view allocation dominates the copy -- while large
+    // counts keep the bulk set, which scales.
+    const numWords = Math.floor((bytes - headBytes) / 8);
+    if (numWords > 0) {
+      const wordBytes = numWords * 8;
+      if (wordBytes <= SMALL_COPY_BYTES) {
+        const dst = this.#data;
+        const dstBase = this.#wordIndex * 8;
+        for (let i = 0; i < wordBytes; i++) {
+          dst[dstBase + i] = data[headBytes + i];
+        }
+      } else {
+        this.#data.set(data.subarray(headBytes, headBytes + wordBytes), this.#wordIndex * 8);
+      }
+      this.#bitsWritten += numWords * 64;
+      this.#wordIndex += numWords;
+    }
+
+    // tail: the remaining bytes, fewer than 8, through the scratch
+    const tailStart = headBytes + numWords * 8;
+    for (let i = tailStart; i < bytes; i++) {
+      this.writeBits(data[i], 8);
+    }
+  }
+
+  /**
+   * Flushes any remaining bits in the scratch to memory. Call this once after
+   * you have finished writing bits. The flush stores a full 8-byte word: the
+   * buffer size is a multiple of 8 so this stays in bounds, and bytes past
+   * the written data are only ever written as zeros.
+   *
+   * flushBits ends the write: writing more bits after a mid-stream flush
+   * corrupts the stream, because the flushed partial word cannot be resumed.
+   */
+  flushBits() {
+    if (this.#scratchBits !== 0) {
+      const base = this.#wordIndex * 8;
+      this.#view.setUint32(base, this.#scratchLo, true);
+      this.#view.setUint32(base + 4, this.#scratchHi, true);
+      this.#scratchLo = 0;
+      this.#scratchHi = 0;
+      this.#scratchBits = 0;
+      this.#wordIndex++;
+    }
+  }
+
+  /**
+   * The number of align bits that would be written, if an align was written
+   * right now: in [0,7], where 0 means the stream is already byte aligned.
+   */
+  alignBits() {
+    return (8 - (this.#bitsWritten % 8)) % 8;
+  }
+
+  /** The number of bits written so far. */
+  bitsWritten() {
+    return this.#bitsWritten;
+  }
+
+  /** The number of bits still available to write. */
+  bitsAvailable() {
+    return this.#numBits - this.#bitsWritten;
+  }
+
+  /**
+   * The number of bytes flushed to memory: the bits written rounded up to the
+   * next byte. This is the size of the packet to send after bitpacking.
+   *
+   * IMPORTANT: Call flushBits() first, otherwise you risk missing the last
+   * word of data.
+   */
+  bytesWritten() {
+    return Math.ceil(this.#bitsWritten / 8);
+  }
+
+  /**
+   * The written portion of the buffer: a subarray view of the first
+   * bytesWritten() bytes of the buffer passed to the writer (not a copy).
+   *
+   * IMPORTANT: Call flushBits() first, otherwise you risk missing the last
+   * word of data.
+   */
+  data() {
+    return this.#data.subarray(0, this.bytesWritten());
+  }
+}
+
+/**
+ * The bit writer, selected once at module load (see mode.js): the CHECKED
+ * variant by default, the PRODUCTION variant when NODE_ENV is 'production'.
+ * The wire is identical in both; the difference is caller validation.
+ */
+export const BitWriter = PRODUCTION ? ProductionBitWriter : CheckedBitWriter;
 
 /**
  * Reads bitpacked integer values from a buffer.
