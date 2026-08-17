@@ -117,7 +117,38 @@ export class BitWriter {
     if (this.#bitsWritten + bits > this.#numBits) {
       throw new RangeError(WRITE_OVERFLOW_MESSAGE);
     }
+    this.#write(value, bits);
+  }
 
+  /**
+   * Writes bits, refusing a past-end write as a value: returns true on
+   * success, or false -- writing nothing -- if the write would go past the
+   * end of the buffer. The write-side mirror of tryReadBits, and the single
+   * bounds check on the stream layer's hot path: the stream refuses the
+   * false as its Overflow without a second check anywhere. bits must be in
+   * [1,32] and value a number -- caller contracts, and violating them
+   * throws.
+   */
+  tryWriteBits(value, bits) {
+    if ((bits | 0) !== bits || bits < 1 || bits > 32) {
+      throw new RangeError(BITS_RANGE_MESSAGE);
+    }
+    if (typeof value !== 'number') {
+      throw new TypeError(VALUE_TYPE_MESSAGE);
+    }
+    if (this.#bitsWritten + bits > this.#numBits) {
+      return false;
+    }
+    this.#write(value, bits);
+    return true;
+  }
+
+  /**
+   * The unchecked hot path shared by writeBits and tryWriteBits, which
+   * perform their own validation first. bits must be in [1,32] and the
+   * write must fit the buffer.
+   */
+  #write(value, bits) {
     // mask to the bit count: bits of value above the count are ignored
     value = bits === 32 ? value >>> 0 : (value & (((1 << bits) >>> 0) - 1)) >>> 0;
 

@@ -496,16 +496,16 @@ export class WriteStream {
    * Writes bits that have already been validated to [1,32]: the shared tail
    * of every fixed-width write. A latched error and a write past the end of
    * the buffer are refused as values; the bit writer masks the value to the
-   * bit count.
+   * bit count. The bounds check lives in tryWriteBits and runs exactly
+   * once: its false IS the overflow refusal.
    */
   #writeBits(value, bits) {
     if (this.#error !== SerializeError.None) {
       return false;
     }
-    if (bits > this.#writer.bitsAvailable()) {
+    if (!this.#writer.tryWriteBits(value, bits)) {
       return this.#fail(SerializeError.Overflow);
     }
-    this.#writer.writeBits(value, bits);
     return true;
   }
 
