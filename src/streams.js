@@ -1856,7 +1856,8 @@ export class ReadStream {
     if (data.length > this.#reader.bitsRemaining() / 8) {
       return this.#fail(SerializeError.Overflow);
     }
-    data.set(this.#reader.readBytes(data.length));
+    // copy-in form: no subarray view, no second copy out of it
+    this.#reader.readBytesInto(data);
     return true;
   }
 

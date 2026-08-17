@@ -39,6 +39,12 @@ const READ_UNALIGNED_MESSAGE = 'readBytes requires a byte-aligned bit index';
 // wrap skipped when reset gets the identical array back.
 const SMALL_READ_BYTES = 64;
 
+// Bulk byte copies at or below this size go through a manual byte loop
+// instead of subarray-plus-set: at packet sizes the subarray view
+// allocation dominates the copy it feeds. Above it, the bulk set's
+// memcpy wins and the one-off view amortizes to nothing.
+const SMALL_COPY_BYTES = 64;
+
 /**
  * Bitpacks unsigned integer values to a buffer.
  *
@@ -281,10 +287,22 @@ export class BitWriter {
 
     // at the word boundary the scratch is empty (scratchBits tracks
     // bitsWritten % 64, and the write that filled bit 64 flushed it with a
-    // zero spill): whole words bulk copy straight into the buffer
+    // zero spill): whole words bulk copy straight into the buffer. At
+    // packet-sized counts a manual byte loop beats subarray-plus-set --
+    // the subarray view allocation dominates the copy -- while large
+    // counts keep the bulk set, which scales.
     const numWords = Math.floor((bytes - headBytes) / 8);
     if (numWords > 0) {
-      this.#data.set(data.subarray(headBytes, headBytes + numWords * 8), this.#wordIndex * 8);
+      const wordBytes = numWords * 8;
+      if (wordBytes <= SMALL_COPY_BYTES) {
+        const dst = this.#data;
+        const dstBase = this.#wordIndex * 8;
+        for (let i = 0; i < wordBytes; i++) {
+          dst[dstBase + i] = data[headBytes + i];
+        }
+      } else {
+        this.#data.set(data.subarray(headBytes, headBytes + wordBytes), this.#wordIndex * 8);
+      }
       this.#bitsWritten += numWords * 64;
       this.#wordIndex += numWords;
     }
@@ -595,6 +613,42 @@ export class BitReader {
     const byteIndex = this.#bitsRead / 8;
     this.#bitsRead += bytes * 8;
     return this.#data.subarray(byteIndex, byteIndex + bytes);
+  }
+
+  /**
+   * Reads dest.length bytes from the bitpacked data INTO dest: the copy-in
+   * twin of readBytes, for callers that already own the destination array
+   * -- at packet-sized counts a manual byte loop into dest beats the
+   * subarray view readBytes would allocate, and large counts bulk copy
+   * with set, which scales. Same contracts as readBytes: the bit index
+   * must be byte aligned, dest must be a Uint8Array, and the read must not
+   * pass the end of the data -- caller contracts, and violating them
+   * throws (the trusted-caller form; the stream layer bounds checks first
+   * and refuses as a value, with dest untouched on refusal).
+   * @param {Uint8Array} dest destination; its length is the byte count.
+   */
+  readBytesInto(dest) {
+    if (!(dest instanceof Uint8Array)) {
+      throw new TypeError(DATA_TYPE_MESSAGE);
+    }
+    if (this.#bitsRead % 8 !== 0) {
+      throw new RangeError(READ_UNALIGNED_MESSAGE);
+    }
+    const bytes = dest.length;
+    if (this.#bitsRead + bytes * 8 > this.#numBits) {
+      throw new RangeError(READ_OVERFLOW_MESSAGE);
+    }
+    // the bit index is byte aligned, so this is a straight copy of the data
+    const byteIndex = this.#bitsRead / 8;
+    const data = this.#data;
+    if (bytes <= SMALL_COPY_BYTES) {
+      for (let i = 0; i < bytes; i++) {
+        dest[i] = data[byteIndex + i];
+      }
+    } else {
+      dest.set(data.subarray(byteIndex, byteIndex + bytes));
+    }
+    this.#bitsRead += bytes * 8;
   }
 
   /**
