@@ -26,10 +26,14 @@
 //
 // WHAT IT EXISTS TO ANSWER
 //
-// Where the checked JavaScript runtime lands against the other five
-// implementations, on the same rows. The checks run in every build --
-// JavaScript has no compile-out -- so this is the price a consumer actually
-// pays. Two costs are structural and deliberately left visible rather than
+// Where the JavaScript runtime lands against the other five implementations,
+// on the same rows -- in BOTH of its modes. The write path forks at module
+// load on NODE_ENV (see src/mode.js): a plain run measures the CHECKED
+// variants (the development default), and NODE_ENV=production measures the
+// caller-trust release shape, the number that answers the family's release
+// benches. The golden gate runs in either mode, so a production run proves
+// its wire before it times a row. Two costs are structural and deliberately
+// left visible rather than
 // benched around: the streams' reset() path re-wraps the buffer in a DataView
 // per packet (the library's own allocation-free-reuse surface, measured as
 // shipped), and the stream row's uint64 field crosses the BigInt edge per

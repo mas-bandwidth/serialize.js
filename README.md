@@ -35,7 +35,7 @@ measures. [USAGE.md](USAGE.md) teaches every operation by example.
   two roundings on each side.
 - **Bytes and strings**: `serializeBytes` (aligned bulk copy, count
   agreed, not transmitted); `serializeString` (UTF-8 on the wire, payload
-  validated in every build); `serializeWideString` (one 32-bit group per
+  validated on read in every mode); `serializeWideString` (one 32-bit group per
   UTF-16 code unit, no alignment anywhere — the one place the wide path
   deliberately differs from its narrow counterpart).
 - **The relative integer**: `serializeIntRelative` — the flag ladder for
@@ -73,21 +73,51 @@ surface.
 
 ## Design
 
-This is a **hand-port to native JavaScript** — no wasm. It takes the family's
-checked-runtime shape: checks run in every build, reads validate everything
-(the wire is a trust boundary), and errors are values — bool-returning
-serialize methods plus a sticky latched stream error. Hostile input never
-throws.
+This is a **hand-port to native JavaScript** — no wasm. Errors are values —
+bool-returning serialize methods plus a sticky latched stream error — and
+hostile input never throws.
+
+The check model is the family standard's (STANDARD.md, "Writes assume
+trusted data"): **the caller is responsible for well-formed writes**, with
+writer contracts asserted in debug and compiled to zero in release.
+JavaScript has no compiler to strip code, so the write path forks **once,
+at module load**, on `NODE_ENV` — the JS `#ifdef`:
+
+- **Checked** (the default): caller misuse throws, invalid values latch —
+  the always-on form of the family's debug asserts. Develop and test here.
+- **Production** (`NODE_ENV=production`): the caller is trusted, exactly as
+  a C/C++ release build trusts it. Per-operation caller validation is gone
+  from `WriteStream`, `MeasureStream` and `BitWriter`; every write keeps
+  the sticky-error gate and the buffer-end check, whose false latches
+  `Overflow` — a message that does not fit is a runtime condition, not a
+  caller bug. Misuse produces garbage on the wire (which conforming readers
+  refuse), never memory unsafety: JavaScript's own bounds semantics
+  backstop the trusted path.
+
+The selection is frozen — the environment is read once, whole classes are
+chosen at export time, changing `NODE_ENV` after load has no effect — and
+the wire is byte identical in both modes: the golden pins and the property
+sweep are re-run under the production variants. Reads validate everything
+in **every** mode: the wire is a trust boundary, `ReadStream` has no
+variants, and the read-side content refusals bind in production too.
 
 ## Testing
 
 ```
-npm test
+npm test                  # dev leg: the checked variants, every suite
+npm run test:production   # production leg: wire, trust boundary and
+                          # caller-trust contract under the production variants
 ```
 
-which is nothing more than `node --test` — the runner's default matcher picks
-up every `*.test.js` under `test/`. (A bare directory argument stopped being
-accepted by Node 22's runner, so the invocation stays argument-free.)
+`npm test` is nothing more than `node --test` — the runner's default matcher
+picks up every `*.test.js` under `test/`. (A bare directory argument stopped
+being accepted by Node 22's runner, so the invocation stays argument-free.)
+The production leg runs `production-tests.mjs`, which spawns the same runner
+with `NODE_ENV=production` pinned over every test file that asserts no
+dev-only caller validation, plus `test/production/` — where each dev assert
+is proven **absent**: calls that throw or latch in dev pass through in
+production, and overflow still latches. CI runs both legs on every OS and
+Node version.
 
 ## Benchmark
 
@@ -105,7 +135,10 @@ is timed — the exact buffers the loops write are verified byte for byte
 against pins produced by the C reference's own bench data paths, and a bench
 that fails its goldens reports nothing. `--csv` emits the numbers as
 `row,op,units,value`; `BENCH_BITPACKER_PASSES` and `BENCH_STREAM_PACKETS`
-scale the loops for linearity checks.
+scale the loops for linearity checks. A plain run measures the checked mode;
+`NODE_ENV=production npm run bench` measures the production write path — the
+number that answers the family's release benches — golden gated identically,
+so a production run proves its wire before it times a row.
 
 Cross-language tables built from these rows present the fastest measured
 implementation as 100% and every other language as a multiple of its time —

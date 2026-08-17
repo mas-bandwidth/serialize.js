@@ -25,17 +25,30 @@ STANDARD.md wins.
   directory positional, and the default matcher finds every `*.test.js`).
   That command must be green before every commit. Never push red.
 
-## Checked-runtime shape (the Go/C#/Rust side of the family)
+## Check model: two variants, selected at module load
 
-JavaScript has no compile-out, so like Go, checks run in **every** build:
+The family standard (STANDARD.md, "Writes assume trusted data") makes the
+caller responsible for well-formed writes. JavaScript has no compile-out,
+so `src/mode.js` reads NODE_ENV **once at module load** and the write-path
+classes export in one of two variants — the JS #ifdef:
 
-- **Writes keep their checks.** There is no NDEBUG to strip them into.
-- **Reads validate everything.** The wire is a trust boundary.
+- **CHECKED** (default): caller misuse throws, invalid write values latch —
+  the always-on form of the family's debug asserts. Develop and test here.
+- **PRODUCTION** (`NODE_ENV=production`): per-op caller validation removed
+  from WriteStream/MeasureStream/BitWriter, the C/C++ release shape. Every
+  write keeps the sticky-error gate and the buffer-end check (its false
+  latches Overflow). Misuse yields wire garbage, never memory unsafety.
+- **Reads validate everything in EVERY mode.** The wire is a trust
+  boundary; ReadStream has no variants; ruling #8 content refusals always
+  bind.
 - **Errors are values**: serialize methods return `bool`, and the stream
   carries a **sticky latched error** (serialize.cs's shape). Once a stream
   has failed, every subsequent operation on it fails.
 - **Hostile input NEVER throws.** A doctored buffer produces `false` and a
   latched error, never an exception.
+- Both modes speak ONE wire: `npm run test:production` re-runs the golden
+  pins and property sweep under the production variants. Run BOTH legs
+  before every commit.
 
 Readers refuse: past-end reads, out-of-range decoded values, invalid UTF-8,
 interior NULs, wstring groups above 0xFFFF, and unpaired / misordered /
