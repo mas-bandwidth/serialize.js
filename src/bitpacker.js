@@ -62,7 +62,13 @@ export class BitWriter {
 
   /**
    * Points the writer at a buffer and clears all write state, allowing a
-   * single writer to be reused without allocation.
+   * single writer to be reused without allocation. Resetting to the SAME
+   * buffer -- the reuse pattern this method exists for -- reuses the
+   * existing DataView instead of wrapping a new one: the view is a pure
+   * function of the buffer identity (same memory, same offset, same
+   * length), so skipping the re-wrap changes nothing but the allocation.
+   * A resized buffer (a length-tracking view over a resizable ArrayBuffer)
+   * changes byteLength under the same identity, so the guard checks both.
    * @param {Uint8Array} buffer destination; length must be a multiple of 8.
    */
   reset(buffer) {
@@ -72,8 +78,10 @@ export class BitWriter {
     if (buffer.length % 8 !== 0) {
       throw new RangeError(BUFFER_BYTES_MESSAGE);
     }
-    this.#data = buffer;
-    this.#view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+    if (buffer !== this.#data || buffer.byteLength !== this.#view.byteLength) {
+      this.#data = buffer;
+      this.#view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+    }
     this.#scratchLo = 0;
     this.#scratchHi = 0;
     this.#scratchBits = 0;
@@ -327,8 +335,15 @@ export class BitReader {
       throw new TypeError(BUFFER_TYPE_MESSAGE);
     }
     const bytes = data.length;
-    this.#data = data;
-    this.#view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    // Resetting to the SAME data array reuses the existing DataView: the
+    // view is a pure function of the array identity, so only the identity
+    // (or a resized length under the same identity) forces a re-wrap. The
+    // tail window below is re-assembled on EVERY reset: it depends on the
+    // data's CONTENT, which may have changed under the same identity.
+    if (data !== this.#data || data.byteLength !== this.#view.byteLength) {
+      this.#data = data;
+      this.#view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    }
     this.#numBits = bytes * 8;
     this.#bitsRead = 0;
     if (bytes >= 8) {
