@@ -94,6 +94,31 @@ any other.
   dangling surrogates (`InvalidString`). The family's conformance pin —
   U+1F600 then U+0041 at `bufferSize` 8 is exactly 13 bytes, 99 bits — and
   the STANDARD.md worked example both hold byte-for-byte.
+- `serializeIntRelative(previous, ref)` — the flag-ladder relative integer
+  for **strictly increasing sequences** in the unsigned 32-bit domain
+  (`current > previous`, **no wrapping** — the pinned semantics). A
+  difference of 1 — the common case for sequence numbers — costs a single
+  bit; small differences cost 5/8/13/18/23 bits across the payload tiers;
+  past the ladder, six zero flags carry `current` itself as 32 raw bits —
+  the absolute form, which the reader checks for ordering and refuses
+  otherwise. Payload tiers reconstruct `previous + difference` in uint32
+  arithmetic, exactly as the reference does, and every tier's bytes are
+  pinned from the canonical serialize.h's own output.
+- `serializeFixed(ref, integerBits, fractionBits, min, max)` — Q-format
+  fixed point: `ref.value` is the **raw scaled integer** (the real value
+  times `2^fractionBits`) in storage of exactly
+  `integerBits + fractionBits` bits (8, 16, 32, 64 or 128, the sign bit
+  counting toward `integerBits`), with `min` and `max` in **whole units**
+  as part of the message format — Numbers for storage of 32 bits or fewer,
+  int64 BigInts for 64 and 128. The wire is the offset from
+  `min << fractionBits` in exactly the bit length of the raw range, in
+  32-bit groups least significant first — **byte identical to
+  `serializeInt64` of the raw value** wherever storage fits 64 bits, and
+  the round trip is **exact**: no quantization, unlike the compressed
+  float. A degenerate `min === max` range costs **zero bits on every
+  storage width**. Reads refuse raw values smuggled into the bit headroom
+  (reject, never clamp); an invalid declaration throws as caller misuse on
+  every stream.
 - `bitsRequired(min, max)`, `bitsRequired64` and `bitsRequired128` — the
   serialize.h range-costing arithmetic, for pricing fields when designing a
   message format.
