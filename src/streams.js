@@ -610,8 +610,11 @@ export class WriteStream {
     if (bits === 0) {
       return true; // degenerate range: the value IS the range, nothing to send
     }
-    // subtract in the unsigned domain: the range may be wider than 2^31
-    return this.#writeBits(((value >>> 0) - (min >>> 0)) >>> 0, bits);
+    // subtract in the unsigned domain: the range may be wider than 2^31.
+    // #error was checked above, so the tail goes straight to tryWriteBits:
+    // the overflow check runs exactly once and its false IS the refusal.
+    return this.#writer.tryWriteBits(((value >>> 0) - (min >>> 0)) >>> 0, bits) ||
+      this.#fail(SerializeError.Overflow);
   }
 
   /**
@@ -757,25 +760,26 @@ export class WriteStream {
     // bits, the one flag above them, the payload offset above that -- which
     // is bit-identical to the reference's flag-by-flag serialize_bool /
     // serialize_int sequence, because sequential writes pack from the least
-    // significant bit upward
+    // significant bit upward. #error was checked above, so each tail goes
+    // straight to tryWriteBits: one overflow check, its false the refusal.
     const difference = current - previous;
     if (difference === 1) {
-      return this.#writeBits(1, 1);
+      return this.#writer.tryWriteBits(1, 1) || this.#fail(SerializeError.Overflow);
     }
     if (difference <= 6) {
-      return this.#writeBits(0b10 | ((difference - 2) << 2), 5);
+      return this.#writer.tryWriteBits(0b10 | ((difference - 2) << 2), 5) || this.#fail(SerializeError.Overflow);
     }
     if (difference <= 23) {
-      return this.#writeBits(0b100 | ((difference - 7) << 3), 8);
+      return this.#writer.tryWriteBits(0b100 | ((difference - 7) << 3), 8) || this.#fail(SerializeError.Overflow);
     }
     if (difference <= 280) {
-      return this.#writeBits(0b1000 | ((difference - 24) << 4), 13);
+      return this.#writer.tryWriteBits(0b1000 | ((difference - 24) << 4), 13) || this.#fail(SerializeError.Overflow);
     }
     if (difference <= 4377) {
-      return this.#writeBits(0b10000 | ((difference - 281) << 5), 18);
+      return this.#writer.tryWriteBits(0b10000 | ((difference - 281) << 5), 18) || this.#fail(SerializeError.Overflow);
     }
     if (difference <= 69914) {
-      return this.#writeBits(0b100000 | ((difference - 4378) << 6), 23);
+      return this.#writer.tryWriteBits(0b100000 | ((difference - 4378) << 6), 23) || this.#fail(SerializeError.Overflow);
     }
     // the final tier: six zero flags, then current itself -- the ABSOLUTE
     // value, not the difference -- as 32 raw bits, 38 bits total, checked
@@ -835,7 +839,9 @@ export class WriteStream {
       if (params.bits === 0) {
         return true; // degenerate range: the value IS the range, nothing to send
       }
-      return this.#writeBits(offset, params.bits);
+      // #error was checked above: the tail goes straight to tryWriteBits
+      return this.#writer.tryWriteBits(offset, params.bits) ||
+        this.#fail(SerializeError.Overflow);
     }
     if (typeof value !== 'bigint') {
       throw new TypeError(BIGINT_VALUE_MESSAGE);
@@ -961,7 +967,9 @@ export class WriteStream {
     if (typeof value !== 'number') {
       throw new TypeError(VALUE_TYPE_MESSAGE);
     }
-    return this.#writeBits(float32BitsFromNumber(value), 32);
+    // #error was checked above: the tail goes straight to tryWriteBits
+    return this.#writer.tryWriteBits(float32BitsFromNumber(value), 32) ||
+      this.#fail(SerializeError.Overflow);
   }
 
   /**
