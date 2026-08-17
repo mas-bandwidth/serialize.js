@@ -522,8 +522,13 @@ export class WriteStream {
     if (bits <= 32) {
       this.#writer.writeBits(Number(value), bits);
     } else {
-      this.#writer.writeBits(Number(value & MASK32), 32);
-      this.#writer.writeBits(Number(value >> 32n), bits - 32);
+      // split through the scratch: one BigInt store, two Number loads.
+      // setBigUint64 wraps mod 2^64 -- the callers have already reduced
+      // value below 2^bits -- and no BigInt temporaries are created, where
+      // the mask-and-shift split builds several per call.
+      FLOAT_SCRATCH.setBigUint64(0, value, true);
+      this.#writer.writeBits(FLOAT_SCRATCH.getUint32(0, true), 32);
+      this.#writer.writeBits(FLOAT_SCRATCH.getUint32(4, true), bits - 32);
     }
   }
 
@@ -1336,7 +1341,12 @@ export class ReadStream {
     }
     const lo = this.#reader.readBits(32);
     const hi = this.#reader.readBits(bits - 32);
-    return (BigInt(hi) << 32n) | BigInt(lo);
+    // assemble through the scratch: two Number stores, one BigInt load --
+    // a single BigInt allocation, where the shift-and-or assembly builds
+    // three or four temporaries per call
+    FLOAT_SCRATCH.setUint32(0, lo, true);
+    FLOAT_SCRATCH.setUint32(4, hi, true);
+    return FLOAT_SCRATCH.getBigUint64(0, true);
   }
 
   /**
