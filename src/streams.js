@@ -44,6 +44,7 @@ const BUFFER_SIZE_MESSAGE = 'bufferSize must be an integer in [2,2^31-1]';
 const FLOAT_PARAMS_MESSAGE = 'min must be less than max and resolution must be positive, as float32 values';
 const FLOAT_DECLARATION_MESSAGE = 'compressed float declaration is not finite in float32: delta and delta / resolution must not overflow';
 
+const PREVIOUS_RANGE_MESSAGE = 'previous must be an integer in [0,2^32-1]';
 const INT64_MIN = -(2n ** 63n);
 const INT64_MAX = 2n ** 63n - 1n;
 const INT128_MIN = -(2n ** 127n);
@@ -163,6 +164,29 @@ function validateBufferSize(bufferSize) {
     throw new RangeError(BUFFER_SIZE_MESSAGE);
   }
 }
+
+/**
+ * Validates the shared caller contract of serializeIntRelative: previous
+ * lives in the unsigned 32-bit domain, the operation's pinned semantics
+ * (STANDARD.md "int_relative": positive only, up to the uint32 maximum
+ * only). It is the caller's own sequence state, never wire data, so
+ * violating it is caller misuse and throws on every stream in every state.
+ */
+function validatePrevious(previous) {
+  if (!Number.isInteger(previous) || previous < 0 || previous > 0xffffffff) {
+    throw new RangeError(PREVIOUS_RANGE_MESSAGE);
+  }
+}
+
+// The int_relative flag ladder (STANDARD.md "int_relative"), tiers 2..6:
+// after tier's index worth of zero flags and a one flag, the difference is
+// serialized as serialize_int(d, base, base + range) -- an offset below base
+// in the tier's payload width. Tier 1 (a difference of exactly 1) carries no
+// payload and tier 7 (six zero flags) carries current itself in 32 raw bits,
+// so neither appears in the tables. Indexed by the number of zero flags.
+const RELATIVE_TIER_BITS = [0, 3, 5, 9, 13, 17];
+const RELATIVE_TIER_BASE = [1, 2, 7, 24, 281, 4378];
+const RELATIVE_TIER_RANGE = [0, 4, 16, 256, 4096, 65536];
 
 /**
  * Validates the shared caller contract of serializeBits64: bits must be an
@@ -587,6 +611,73 @@ export class WriteStream {
     }
     // subtract in the unsigned domain: the range may be wider than 2^127
     this.#writeGroups128(BigInt.asUintN(128, value - min), bits);
+    return true;
+  }
+
+  /**
+   * Writes ref.value relative to previous with the int_relative flag ladder
+   * (STANDARD.md "int_relative"): a difference of 1 -- the common case for
+   * sequence numbers -- costs a single bit, small differences cost a few
+   * flag bits plus a small ranged payload, and past the last tier six zero
+   * flags are followed by current itself as 32 raw bits (the absolute form,
+   * not the difference). The semantics are pinned: strictly increasing in
+   * the unsigned 32-bit domain, NO wrapping (STANDARD.md, adopted
+   * 2026-08-15) -- both values are integers in [0,2^32-1] and ref.value
+   * must exceed previous. previous is the caller's own sequence state, part
+   * of the contract on both sides, so an invalid previous is caller misuse
+   * and throws; a ref.value that is not an integer in the uint32 domain
+   * above previous latches SerializeError.ValueOutOfRange and writes
+   * nothing -- the checked runtime's always-on form of the reference's
+   * ordering assert. The tier is checked against the buffer as one total
+   * width up front, so a refused write puts NOTHING on the wire.
+   * @param {number} previous the previous value, an integer in [0,2^32-1].
+   * @param {{value: number}} ref holder of the current value to write.
+   * @returns {boolean} true on success.
+   */
+  serializeIntRelative(previous, ref) {
+    validatePrevious(previous);
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const current = ref.value;
+    if (typeof current !== 'number') {
+      throw new TypeError(VALUE_TYPE_MESSAGE);
+    }
+    if (!Number.isInteger(current) || current <= previous || current > 0xffffffff) {
+      return this.#fail(SerializeError.ValueOutOfRange);
+    }
+    // each tier is emitted as ONE fused group -- the zero flags in the low
+    // bits, the one flag above them, the payload offset above that -- which
+    // is bit-identical to the reference's flag-by-flag serialize_bool /
+    // serialize_int sequence, because sequential writes pack from the least
+    // significant bit upward
+    const difference = current - previous;
+    if (difference === 1) {
+      return this.#writeBits(1, 1);
+    }
+    if (difference <= 6) {
+      return this.#writeBits(0b10 | ((difference - 2) << 2), 5);
+    }
+    if (difference <= 23) {
+      return this.#writeBits(0b100 | ((difference - 7) << 3), 8);
+    }
+    if (difference <= 280) {
+      return this.#writeBits(0b1000 | ((difference - 24) << 4), 13);
+    }
+    if (difference <= 4377) {
+      return this.#writeBits(0b10000 | ((difference - 281) << 5), 18);
+    }
+    if (difference <= 69914) {
+      return this.#writeBits(0b100000 | ((difference - 4378) << 6), 23);
+    }
+    // the final tier: six zero flags, then current itself -- the ABSOLUTE
+    // value, not the difference -- as 32 raw bits, 38 bits total, checked
+    // up front so a refused write puts nothing on the wire
+    if (this.#writer.bitsAvailable() < 38) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    this.#writer.writeBits(0, 6);
+    this.#writer.writeBits(current, 32);
     return true;
   }
 
@@ -1253,6 +1344,70 @@ export class ReadStream {
   }
 
   /**
+   * Reads a value written relative to previous with the int_relative flag
+   * ladder (STANDARD.md "int_relative"), mirroring serialize.h's reader
+   * step for step: flag bits are read one at a time until a tier claims the
+   * value; a payload tier reconstructs current = previous + difference in
+   * the unsigned 32-bit domain, wrapping mod 2^32 exactly as the reference
+   * does; the final tier -- six zero flags -- carries current itself as 32
+   * raw bits, the absolute form with no ordering guarantee of its own, so
+   * the reader checks current > previous and latches
+   * SerializeError.ValueOutOfRange otherwise (STANDARD.md: strictly
+   * increasing, no wrapping -- adopted 2026-08-15). A payload offset above
+   * its tier's range -- a difference smuggled into the bit headroom --
+   * latches ValueOutOfRange, and a read past the end of the data latches
+   * Overflow. previous must be an integer in [0,2^32-1], identical to the
+   * writer's: it is the caller's own sequence state, so violating that is
+   * caller misuse and throws. On success ref.value is an integer in
+   * [0,2^32-1]; on failure it is left unmodified, and hostile data never
+   * throws.
+   * @param {number} previous the previous value, an integer in [0,2^32-1].
+   * @param {{value: number}} ref holder the current value is assigned to.
+   * @returns {boolean} true on success.
+   */
+  serializeIntRelative(previous, ref) {
+    validatePrevious(previous);
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    for (let tier = 0; tier < 6; tier++) {
+      if (this.#reader.wouldReadPastEnd(1)) {
+        return this.#fail(SerializeError.Overflow);
+      }
+      if (this.#reader.readBits(1) === 1) {
+        if (tier === 0) {
+          // a difference of exactly 1: no payload
+          ref.value = (previous + 1) >>> 0;
+          return true;
+        }
+        const bits = RELATIVE_TIER_BITS[tier];
+        if (this.#reader.wouldReadPastEnd(bits)) {
+          return this.#fail(SerializeError.Overflow);
+        }
+        const offset = this.#reader.readBits(bits);
+        if (offset > RELATIVE_TIER_RANGE[tier]) {
+          return this.#fail(SerializeError.ValueOutOfRange);
+        }
+        // reconstruct in the unsigned domain: previous + difference wraps
+        // mod 2^32, exactly the reference's uint32 arithmetic
+        ref.value = (previous + RELATIVE_TIER_BASE[tier] + offset) >>> 0;
+        return true;
+      }
+    }
+    if (this.#reader.wouldReadPastEnd(32)) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    const current = this.#reader.readBits(32);
+    if (current <= previous) {
+      // the absolute form carries no ordering guarantee of its own: the
+      // reader enforces strictly increasing here (STANDARD.md)
+      return this.#fail(SerializeError.ValueOutOfRange);
+    }
+    ref.value = current;
+    return true;
+  }
+
+  /**
    * Reads 8 bits into ref.value: the fixed-width uint8 helper, an alias for
    * serializeBits(ref, 8) carrying no range information of its own
    * (STANDARD.md). On success ref.value is in [0,255]; on failure it is
@@ -1818,6 +1973,55 @@ export class MeasureStream {
       return this.#fail(SerializeError.ValueOutOfRange);
     }
     return this.#measure(bitsRequired128(BigInt.asUintN(128, min), BigInt.asUintN(128, max)));
+  }
+
+  /**
+   * Measures a value written relative to previous with the int_relative
+   * flag ladder: exactly the tier the write would emit -- 1, 5, 8, 13, 18
+   * or 23 bits for the difference tiers, 38 bits for the absolute final
+   * tier (int_relative never aligns, so the measure is exact, not a
+   * bound). Like a write, previous must be an integer in [0,2^32-1]
+   * (misuse throws, as is a non-number ref.value) and ref.value must be an
+   * integer in the uint32 domain above previous, or the measure latches
+   * SerializeError.ValueOutOfRange: a message that cannot be written
+   * cannot be measured either.
+   * @param {number} previous the previous value, an integer in [0,2^32-1].
+   * @param {{value: number}} ref holder of the current value that would be
+   * written.
+   * @returns {boolean} true on success.
+   */
+  serializeIntRelative(previous, ref) {
+    validatePrevious(previous);
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const current = ref.value;
+    if (typeof current !== 'number') {
+      throw new TypeError(VALUE_TYPE_MESSAGE);
+    }
+    if (!Number.isInteger(current) || current <= previous || current > 0xffffffff) {
+      return this.#fail(SerializeError.ValueOutOfRange);
+    }
+    const difference = current - previous;
+    if (difference === 1) {
+      return this.#measure(1);
+    }
+    if (difference <= 6) {
+      return this.#measure(5);
+    }
+    if (difference <= 23) {
+      return this.#measure(8);
+    }
+    if (difference <= 280) {
+      return this.#measure(13);
+    }
+    if (difference <= 4377) {
+      return this.#measure(18);
+    }
+    if (difference <= 69914) {
+      return this.#measure(23);
+    }
+    return this.#measure(38);
   }
 
   /**
