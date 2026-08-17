@@ -862,7 +862,7 @@ print('\n');
 if (CSV) {
   let csv = 'row,op,units,value\n';
   for (const r of results) {
-    csv += `${r.row},${r.op},${r.units},${r.value.toFixed(1)}\n`;
+    csv += `${r.row},${r.op},${r.units},${r.value.toFixed(4)}\n`;
   }
   process.stdout.write(csv);
 }
