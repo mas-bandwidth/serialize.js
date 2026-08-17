@@ -333,3 +333,38 @@ test('measure bounds the write at every one of the 8 starting offsets', () => {
     );
   }
 });
+
+test('the sabotage sweep: flipping any consumed bit defeats the battery, and no flip ever throws', () => {
+  // the battery must be able to fail: a conformance harness that accepts
+  // doctored streams proves nothing. every one of the 891 consumed bits
+  // of the golden stream is load bearing -- a value bit changes a decoded
+  // value, an align padding bit latches Align, a flag or length bit
+  // derails the decode -- so flipping any single one must make the read
+  // refuse or produce different values. the 5 trailing bits are the
+  // exact complement: flipping any of them must change nothing at all.
+  // and across all 896 doctored streams, hostile data never throws.
+  const values = goldenValues();
+  for (let bit = 0; bit < GOLDEN_WIRE_BYTES.length * 8; bit++) {
+    const doctored = Uint8Array.from(GOLDEN_WIRE_BYTES);
+    doctored[bit >> 3] ^= 1 << (bit & 7);
+
+    const reader = new ReadStream(doctored);
+    const refs = makeReadRefs();
+    const ok = serializeGoldenWire(reader, refs);
+    const matches = ok && matchesGolden(refs, values);
+
+    if (bit < GOLDEN_BITS) {
+      assert.equal(
+        matches,
+        false,
+        `consumed bit ${bit} flipped: the doctored stream still decoded the golden values`,
+      );
+    } else {
+      assert.equal(
+        matches && reader.bitsProcessed() === GOLDEN_BITS,
+        true,
+        `trailing bit ${bit} flipped: the doctored stream was not accepted identically`,
+      );
+    }
+  }
+});
