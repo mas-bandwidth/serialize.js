@@ -207,6 +207,108 @@ test('read side: the golden bytes decode to the expected values, on every platfo
   assert.deepEqual(Array.from(refs.bytes), Array.from(expected.bytes));
 });
 
+test('trailing bits: the writer zeroes them and the reader is indifferent to them', () => {
+  // writer obligation, small stream: a message ending 3 bits into its
+  // final byte, written into a buffer pre-filled with 0xFF so the zeros
+  // must come from the writer, not from the caller
+  const buffer = new Uint8Array(64).fill(0xff);
+  const writer = new WriteStream(buffer);
+  assert.equal(writer.serializeBits({ value: 0xdeadbeef }, 32), true);
+  assert.equal(writer.serializeBits({ value: 5 }, 3), true);
+  writer.flush();
+
+  const bytesWritten = writer.bytesProcessed();
+  const bitsInFinalByte = writer.bitsProcessed() % 8;
+  assert.equal(bitsInFinalByte, 3); // the stream really does end unaligned
+  const trailingMask = (0xff << bitsInFinalByte) & 0xff;
+  const data = writer.data();
+  assert.equal(data[bytesWritten - 1] & trailingMask, 0); // writers must write zero
+
+  // reader indifference, small stream: set every trailing bit and read
+  // back. the doctored stream must be accepted and decode the same values.
+  data[bytesWritten - 1] |= trailingMask;
+  const reader = new ReadStream(data);
+  const head = {};
+  assert.equal(reader.serializeBits(head, 32), true);
+  assert.equal(head.value, 0xdeadbeef);
+  const tail = {};
+  assert.equal(reader.serializeBits(tail, 3), true);
+  assert.equal(tail.value, 5);
+});
+
+test('trailing bits: a doctored golden stream decodes identically', () => {
+  // reader indifference, full message: the golden stream ends unaligned
+  // (891 consumed bits, 5 trailing), so this test can discriminate. the
+  // pinned emission itself met the writer obligation.
+  const bitsInFinalByte = GOLDEN_BITS % 8;
+  assert.equal(bitsInFinalByte !== 0, true);
+  const trailingMask = (0xff << bitsInFinalByte) & 0xff;
+  assert.equal(GOLDEN_WIRE_BYTES[GOLDEN_WIRE_BYTES.length - 1] & trailingMask, 0);
+
+  const doctored = Uint8Array.from(GOLDEN_WIRE_BYTES);
+  doctored[doctored.length - 1] |= trailingMask; // set every trailing bit
+
+  const reader = new ReadStream(doctored);
+  const refs = makeReadRefs();
+  assert.equal(serializeGoldenWire(reader, refs), true); // readers must not reject
+  assert.equal(matchesGolden(refs, goldenValues()), true); // and must decode identically
+  assert.equal(reader.bitsProcessed(), GOLDEN_BITS);
+});
+
+test('past-end poison: bytes past the stream end are never interpreted', () => {
+  // accept path: the golden stream decodes identically whether the bytes
+  // past the end of its data view are zero or poison. the JS reader
+  // prices its windows inside the buffer, so the poison sits in the same
+  // allocation, immediately past the view it must never interpret.
+  const cleanBuffer = new Uint8Array(256);
+  const poisonBuffer = new Uint8Array(256).fill(0xff);
+  cleanBuffer.set(GOLDEN_WIRE_BYTES);
+  poisonBuffer.set(GOLDEN_WIRE_BYTES);
+
+  const cleanReader = new ReadStream(cleanBuffer.subarray(0, GOLDEN_WIRE_BYTES.length));
+  const cleanRefs = makeReadRefs();
+  assert.equal(serializeGoldenWire(cleanReader, cleanRefs), true);
+  assert.equal(matchesGolden(cleanRefs, goldenValues()), true);
+
+  const poisonReader = new ReadStream(poisonBuffer.subarray(0, GOLDEN_WIRE_BYTES.length));
+  const poisonRefs = makeReadRefs();
+  assert.equal(serializeGoldenWire(poisonReader, poisonRefs), true);
+  assert.equal(matchesGolden(poisonRefs, goldenValues()), true);
+  assert.equal(poisonReader.bitsProcessed(), cleanReader.bitsProcessed());
+});
+
+test('past-end poison: a truncated stream refuses identically regardless of the tail', () => {
+  // refusal path: truncate the stream one byte short so the decode must
+  // fail. the refusal must be identical -- same refusal point, same
+  // partial state -- whether the bytes at and past the truncated end are
+  // zero or poison.
+  const truncatedBytes = GOLDEN_WIRE_BYTES.length - 1;
+
+  const cleanBuffer = new Uint8Array(256);
+  const poisonBuffer = new Uint8Array(256).fill(0xff);
+  cleanBuffer.set(GOLDEN_WIRE_BYTES.subarray(0, truncatedBytes));
+  poisonBuffer.set(GOLDEN_WIRE_BYTES.subarray(0, truncatedBytes));
+
+  const cleanReader = new ReadStream(cleanBuffer.subarray(0, truncatedBytes));
+  const cleanRefs = makeReadRefs();
+  assert.equal(serializeGoldenWire(cleanReader, cleanRefs), false);
+
+  const poisonReader = new ReadStream(poisonBuffer.subarray(0, truncatedBytes));
+  const poisonRefs = makeReadRefs();
+  assert.equal(serializeGoldenWire(poisonReader, poisonRefs), false);
+
+  // refused at the same point, with identical partial state
+  assert.equal(poisonReader.bitsProcessed(), cleanReader.bitsProcessed());
+  for (const field of SCALAR_FIELDS) {
+    assert.equal(
+      Object.is(poisonRefs[field].value, cleanRefs[field].value),
+      true,
+      `${field}: poison decoded ${poisonRefs[field].value}, clean ${cleanRefs[field].value}`,
+    );
+  }
+  assert.deepEqual(Array.from(poisonRefs.bytes), Array.from(cleanRefs.bytes));
+});
+
 test('measure bounds the write at every one of the 8 starting offsets', () => {
   // the measure stream prices aligning operations conservatively, so its
   // bound must hold wherever the message lands relative to a byte
