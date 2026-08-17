@@ -30,6 +30,15 @@ const BYTES_COUNT_MESSAGE = 'bytes must be a non-negative integer';
 const WRITE_UNALIGNED_MESSAGE = 'writeBytes requires a byte-aligned bit index';
 const READ_UNALIGNED_MESSAGE = 'readBytes requires a byte-aligned bit index';
 
+// Data at or below this size is copied into the reader's persistent scratch
+// at reset and windowed through the persistent scratch view, so reset
+// allocates nothing: at packet sizes the per-reset DataView allocation is
+// the dominant cost of a read, several times the bulk copy that replaces
+// it. Above the threshold -- where resets amortize to nothing and a copy
+// would scale with the data -- the buffer is wrapped directly, with the
+// wrap skipped when reset gets the identical array back.
+const SMALL_READ_BYTES = 64;
+
 /**
  * Bitpacks unsigned integer values to a buffer.
  *
@@ -307,7 +316,11 @@ export class BitWriter {
  */
 export class BitReader {
   #data; // Uint8Array
-  #view; // DataView over the same range
+  #view; // DataView windows load through: #largeView or #scratchView
+  #largeView; // DataView over #viewData's range (data above the threshold)
+  #viewData; // the Uint8Array #largeView wraps, for the identity cache
+  #scratch; // persistent copy destination for data at or below the threshold
+  #scratchView; // persistent DataView over #scratch, allocated once
   #numBits; // data length in bits
   #bitsRead; // bits read so far
   #tailBase; // byte index the tail window starts at
@@ -320,6 +333,8 @@ export class BitReader {
    * @param {Uint8Array} data the bitpacked data to read.
    */
   constructor(data) {
+    this.#scratch = new Uint8Array(SMALL_READ_BYTES);
+    this.#scratchView = new DataView(this.#scratch.buffer);
     this.reset(data);
   }
 
@@ -335,19 +350,32 @@ export class BitReader {
       throw new TypeError(BUFFER_TYPE_MESSAGE);
     }
     const bytes = data.length;
-    // Resetting to the SAME data array reuses the existing DataView: the
-    // view is a pure function of the array identity, so only the identity
-    // (or a resized length under the same identity) forces a re-wrap. The
-    // tail window below is re-assembled on EVERY reset: it depends on the
-    // data's CONTENT, which may have changed under the same identity.
-    if (data !== this.#data || data.byteLength !== this.#view.byteLength) {
-      this.#data = data;
-      this.#view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-    }
+    this.#data = data;
     this.#numBits = bytes * 8;
     this.#bitsRead = 0;
     if (bytes >= 8) {
       this.#tailBase = bytes - 8;
+      if (bytes <= SMALL_READ_BYTES) {
+        // small data: copy it into the persistent scratch and window
+        // through the persistent scratch view -- no allocation, and the
+        // copy IS the reset-time snapshot of the data's content (the data
+        // must not change while the reader is reading it, per the class
+        // contract, so the snapshot is invisible)
+        this.#scratch.set(data);
+        this.#view = this.#scratchView;
+      } else {
+        // large data: wrap it directly, reusing the existing view when
+        // reset gets the identical array back -- the view is a pure
+        // function of the array identity, so only the identity (or a
+        // resized length under the same identity) forces a re-wrap
+        if (data !== this.#viewData || data.byteLength !== this.#largeView.byteLength) {
+          this.#viewData = data;
+          this.#largeView = new DataView(data.buffer, data.byteOffset, data.byteLength);
+        }
+        this.#view = this.#largeView;
+      }
+      // the tail window is re-assembled on EVERY reset: it depends on the
+      // data's CONTENT, which may have changed under the same identity
       this.#tailLo = this.#view.getUint32(bytes - 8, true);
       this.#tailHi = this.#view.getUint32(bytes - 4, true);
     } else {
@@ -383,9 +411,10 @@ export class BitReader {
 
     let out;
     if (byteIndex < this.#tailBase) {
-      // inside the buffer: a direct two-word little-endian window load.
-      // byteIndex + 8 <= numBytes - 1 here, so the load never runs off the
-      // end, and the shift is the bit remainder, in [0,7].
+      // inside the buffer: a direct two-word little-endian window load
+      // (through the scratch snapshot for small data -- same bytes, same
+      // indices). byteIndex + 8 <= numBytes - 1 here, so the load never
+      // runs off the end, and the shift is the bit remainder, in [0,7].
       const lo = this.#view.getUint32(byteIndex, true);
       const hi = this.#view.getUint32(byteIndex + 4, true);
       const s = bitsRead & 7;
