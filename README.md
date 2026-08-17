@@ -140,6 +140,35 @@ scale the loops for linearity checks. A plain run measures the checked mode;
 number that answers the family's release benches — golden gated identically,
 so a production run proves its wire before it times a row.
 
+For throughput-sensitive use, measure with V8's inlining budgets lifted:
+
+```
+NODE_ENV=production node --stress-inline bench/bench.js
+```
+
+is worth **+40% geomean** over a default production run on this bench set
+(stream read +73%, int packet read +71%; the raw bitpacker write row does not
+move at all — its one hot call already inlines). The packet rows are
+inlining-bound: V8 stops flattening
+an optimized function once the bytecode it has inlined reaches a fixed
+budget, and one serialized field's call tree prices near that whole budget,
+so under defaults most per-field serialize calls stay calls. That refusal is
+cumulative across the packet's call tree, not any single function's size, so
+no restructuring of this library reaches it. The durable spelling, measured
+identical to `--stress-inline` here, names the three budgets directly:
+
+```
+node --max-inlined-bytecode-size=999999 \
+     --max-inlined-bytecode-size-cumulative=999999 \
+     --max-inlined-bytecode-size-absolute=999999
+```
+
+(Leave `--max-inlined-bytecode-size-small` alone: lifting it too measures
+*slower* — every function then counts as "small" and eager inlining order
+degrades.) The honest caveat: these are V8-internal flags, not API-stable —
+they can change meaning or vanish between Node majors, so re-verify the gain
+with this bench on every Node upgrade before shipping the flags.
+
 Cross-language tables built from these rows present the fastest measured
 implementation as 100% and every other language as a multiple of its time —
 on this bench set that reference is C++.
