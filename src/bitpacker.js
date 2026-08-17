@@ -106,6 +106,11 @@ export class BitWriter {
    * bits of value above the count are ignored, as in the Go and C# ports
    * (their uint32 parameter type performs the same conversion at the call
    * site). Throws if the write would go past the end of the buffer.
+   *
+   * The core below the checks is duplicated in tryWriteBits -- fused into
+   * each public entry because V8 was not inlining a shared private core
+   * across the call layer, and the wrapper call cost was measurable on
+   * every hot row. KEEP THE TWO COPIES IDENTICAL.
    */
   writeBits(value, bits) {
     if ((bits | 0) !== bits || bits < 1 || bits > 32) {
@@ -117,38 +122,7 @@ export class BitWriter {
     if (this.#bitsWritten + bits > this.#numBits) {
       throw new RangeError(WRITE_OVERFLOW_MESSAGE);
     }
-    this.#write(value, bits);
-  }
 
-  /**
-   * Writes bits, refusing a past-end write as a value: returns true on
-   * success, or false -- writing nothing -- if the write would go past the
-   * end of the buffer. The write-side mirror of tryReadBits, and the single
-   * bounds check on the stream layer's hot path: the stream refuses the
-   * false as its Overflow without a second check anywhere. bits must be in
-   * [1,32] and value a number -- caller contracts, and violating them
-   * throws.
-   */
-  tryWriteBits(value, bits) {
-    if ((bits | 0) !== bits || bits < 1 || bits > 32) {
-      throw new RangeError(BITS_RANGE_MESSAGE);
-    }
-    if (typeof value !== 'number') {
-      throw new TypeError(VALUE_TYPE_MESSAGE);
-    }
-    if (this.#bitsWritten + bits > this.#numBits) {
-      return false;
-    }
-    this.#write(value, bits);
-    return true;
-  }
-
-  /**
-   * The unchecked hot path shared by writeBits and tryWriteBits, which
-   * perform their own validation first. bits must be in [1,32] and the
-   * write must fit the buffer.
-   */
-  #write(value, bits) {
     // mask to the bit count: bits of value above the count are ignored
     value = bits === 32 ? value >>> 0 : (value & (((1 << bits) >>> 0) - 1)) >>> 0;
 
@@ -188,6 +162,71 @@ export class BitWriter {
     }
 
     this.#bitsWritten += bits;
+  }
+
+  /**
+   * Writes bits, refusing a past-end write as a value: returns true on
+   * success, or false -- writing nothing -- if the write would go past the
+   * end of the buffer. The write-side mirror of tryReadBits, and the single
+   * bounds check on the stream layer's hot path: the stream refuses the
+   * false as its Overflow without a second check anywhere. bits must be in
+   * [1,32] and value a number -- caller contracts, and violating them
+   * throws.
+   *
+   * The core below the checks is a fused copy of writeBits's core: KEEP THE
+   * TWO COPIES IDENTICAL (see writeBits).
+   */
+  tryWriteBits(value, bits) {
+    if ((bits | 0) !== bits || bits < 1 || bits > 32) {
+      throw new RangeError(BITS_RANGE_MESSAGE);
+    }
+    if (typeof value !== 'number') {
+      throw new TypeError(VALUE_TYPE_MESSAGE);
+    }
+    if (this.#bitsWritten + bits > this.#numBits) {
+      return false;
+    }
+
+    // mask to the bit count: bits of value above the count are ignored
+    value = bits === 32 ? value >>> 0 : (value & (((1 << bits) >>> 0) - 1)) >>> 0;
+
+    // merge into the two-lane scratch at the current bit position. JavaScript
+    // shifts are mod 32, so every shift below is kept in [0,31] by the guards.
+    const s = this.#scratchBits;
+    if (s < 32) {
+      this.#scratchLo = (this.#scratchLo | (value << s)) >>> 0;
+      if (s > 0) {
+        // the part of value that crosses the 32-bit lane boundary
+        this.#scratchHi = (this.#scratchHi | (value >>> (32 - s))) >>> 0;
+      }
+    } else {
+      // the part that crosses the 64-bit boundary is discarded by the 32-bit
+      // shift here and recovered from value after the flush below
+      this.#scratchHi = (this.#scratchHi | (value << (s - 32))) >>> 0;
+    }
+
+    const newScratchBits = s + bits;
+
+    if (newScratchBits >= 64) {
+      // the scratch is full: store it as two little-endian 32-bit words, the
+      // same eight bytes the other implementations store as one qword
+      const base = this.#wordIndex * 8;
+      this.#view.setUint32(base, this.#scratchLo, true);
+      this.#view.setUint32(base + 4, this.#scratchHi, true);
+      this.#wordIndex++;
+      // recover the bits that spilled past 64. newScratchBits >= 64 with
+      // bits <= 32 implies s >= 32, so the shift is in [1,32]; at exactly 32
+      // nothing spilled (a JavaScript shift of 32 would be a shift of 0).
+      const shift = 64 - s;
+      this.#scratchLo = shift >= 32 ? 0 : value >>> shift;
+      this.#scratchHi = 0;
+      this.#scratchBits = newScratchBits - 64;
+    } else {
+      this.#scratchBits = newScratchBits;
+    }
+
+    this.#bitsWritten += bits;
+    return true;
   }
 
   /**
