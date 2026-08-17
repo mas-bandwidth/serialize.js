@@ -89,6 +89,24 @@ which is nothing more than `node --test` — the runner's default matcher picks
 up every `*.test.js` under `test/`. (A bare directory argument stopped being
 accepted by Node 22's runner, so the invocation stays argument-free.)
 
+## Benchmark
+
+```
+npm run bench
+```
+
+runs [bench/bench.js](bench/bench.js), an operation-for-operation mirror of
+serialize.c's `bench.c` (itself a mirror of the C++ `bench.cpp`), so the
+family's benchmark outputs read side by side: the raw bitpacker, the
+representative stream packet through write, read and measure, and three
+packet shapes, at the same iteration counts with the same LCG-driven inputs
+and best-of-five-trials discipline. Every row is golden gated before any row
+is timed — the exact buffers the loops write are verified byte for byte
+against pins produced by the C reference's own bench data paths, and a bench
+that fails its goldens reports nothing. `--csv` emits the numbers as
+`row,op,units,value`; `BENCH_BITPACKER_PASSES` and `BENCH_STREAM_PACKETS`
+scale the loops for linearity checks.
+
 ## License
 
 [BSD 3-Clause](LICENSE), © Más Bandwidth LLC.
