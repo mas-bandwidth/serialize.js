@@ -41,10 +41,15 @@ export function bitsRequired(min, max) {
  * The bit length of a nonzero unsigned 64-bit BigInt, computed in two 32-bit
  * lanes with Math.clz32 -- the serialize.h no-builtin branch of
  * bits_required64: high ? 32 + bits_required( 0, high ) : bits_required( 0, low ).
+ *
+ * Exported as the UNCHECKED core for the production stream variants (see
+ * mode.js), which carry the family's release shape and price ranges without
+ * re-validating them; not re-exported by the package entry point -- the
+ * public pricing surface is the three bitsRequired functions.
  * @param {bigint} x a BigInt in [1,2^64-1].
  * @returns {number} floor( log2( x ) ) + 1, in [1,64].
  */
-function bitLength64(x) {
+export function bitLength64(x) {
   const hi = Number(x >> 32n);
   return hi !== 0 ? 64 - Math.clz32(hi) : 32 - Math.clz32(Number(x));
 }

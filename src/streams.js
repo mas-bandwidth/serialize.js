@@ -13,21 +13,33 @@
 // it is ignored. Holders can be preallocated and reused: the streams never
 // retain them.
 //
-// The error model (the family's checked-runtime shape): errors are VALUES.
-// Every serialize method returns true on success. The first failure latches
-// on the stream -- see SerializeError -- and every later serialize call
-// returns false without touching the stream or the ref. Check every call, or
-// serialize a whole object and check stream.ok once at the end. Like the Go
-// port, checks run in every build on BOTH sides: JavaScript has no
-// compile-out, so writes keep their checks (a write past the end of the
-// buffer latches Overflow instead of throwing), and reads validate
-// everything -- the wire is a trust boundary, and hostile input NEVER
-// throws. Throws are reserved for caller misuse: an invalid bits count is a
-// bug in the calling code, not data, and throws RangeError on every stream
-// in every state.
+// The error model: errors are VALUES. Every serialize method returns true on
+// success. The first failure latches on the stream -- see SerializeError --
+// and every later serialize call returns false without touching the stream
+// or the ref. Check every call, or serialize a whole object and check
+// stream.ok once at the end. Reads validate everything in EVERY mode: the
+// wire is a trust boundary, and hostile input NEVER throws.
+//
+// The write side ships in two variants, selected once at module load on
+// NODE_ENV (see mode.js) -- the JS translation of the family's
+// debug-assert/release fork (STANDARD.md, "Writes assume trusted data"):
+//
+// - CHECKED (the development default): caller misuse throws -- an invalid
+//   bits count is a bug in the calling code, not data, and throws
+//   RangeError on every stream in every state -- and an invalid value
+//   latches ValueOutOfRange / InvalidString as the always-on form of the
+//   family's debug assert.
+// - PRODUCTION (NODE_ENV=production): the caller is trusted, exactly as a
+//   C/C++ release build trusts it. Per-op caller validation is gone; what
+//   remains on every write is the sticky-error gate and the buffer-end
+//   check, whose false latches Overflow -- identical semantics in both
+//   modes, because a message that does not fit is a runtime condition, not
+//   a caller bug. Misused production writes produce garbage on the wire
+//   (which conforming readers refuse), never memory unsafety.
 
 import { BitWriter, BitReader } from './bitpacker.js';
-import { bitsRequired, bitsRequired64, bitsRequired128 } from './bits.js';
+import { bitsRequired, bitsRequired64, bitsRequired128, bitLength64 } from './bits.js';
+import { PRODUCTION } from './mode.js';
 
 const BITS_RANGE_MESSAGE = 'bits must be an integer in [1,32]';
 const BITS64_RANGE_MESSAGE = 'bits must be an integer in [1,64]';
@@ -447,10 +459,16 @@ function fixedPointParams(integerBits, fractionBits, min, max) {
  * Writes bitpacked data to a buffer, wrapping BitWriter with the serialize
  * surface so unified serialize functions can write with it. A write that
  * would pass the end of the buffer latches SerializeError.Overflow and
- * returns false -- checks run in every build, the Go port's stance -- so a
- * message that does not fit surfaces as a value, not a throw.
+ * returns false -- in every mode -- so a message that does not fit surfaces
+ * as a value, not a throw.
+ *
+ * This is the CHECKED variant (the development default): caller misuse
+ * throws and invalid values latch, as the always-on form of the family's
+ * debug asserts. ProductionWriteStream below is the same wire with the
+ * caller validation removed; mode.js selects which one exports as
+ * WriteStream.
  */
-export class WriteStream {
+class CheckedWriteStream {
   #writer;
   #error;
 
@@ -1207,6 +1225,670 @@ export class WriteStream {
    * packet you should send.
    *
    * IMPORTANT: Call flush() first.
+   */
+  data() {
+    return this.#writer.data();
+  }
+
+  /**
+   * The number of bits required to align the stream to the next byte
+   * boundary, in [0,7].
+   */
+  alignBits() {
+    return this.#writer.alignBits();
+  }
+
+  /** The number of bits written so far. */
+  bitsProcessed() {
+    return this.#writer.bitsWritten();
+  }
+
+  /**
+   * The number of bits written so far, rounded up to the next byte. This is
+   * effectively the packet size.
+   */
+  bytesProcessed() {
+    return this.#writer.bytesWritten();
+  }
+
+  /**
+   * The number of bits still available to write, so callers can preflight
+   * whether a value fits without dropping to the BitWriter layer.
+   */
+  bitsAvailable() {
+    return this.#writer.bitsAvailable();
+  }
+
+  /** The first error latched on the stream, or SerializeError.None (null). */
+  get error() {
+    return this.#error;
+  }
+
+  /** True while no error is latched. */
+  get ok() {
+    return this.#error === SerializeError.None;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   The PRODUCTION write side (see mode.js): the same wire as the checked
+   classes with the caller validation removed -- STANDARD.md's writer-trusted
+   doctrine, the JS translation of the family's release build. The helpers
+   below are the unchecked twins of the checked validators' compute halves:
+   they price and parameterize without validating, because in production the
+   declaration and the value are the caller's contract. For a conforming
+   caller they compute exactly what the checked forms compute -- the golden
+   pins are re-run in production mode to prove the wire identical.
+   -------------------------------------------------------------------------- */
+
+/**
+ * The unchecked core of bitsRequired: min and max already live in the
+ * unsigned 32-bit domain (trusted), and the subtraction wraps mod 2^32.
+ */
+function uncheckedBitsRequired(min, max) {
+  return min === max ? 0 : 32 - Math.clz32((max - min) >>> 0);
+}
+
+/**
+ * The unchecked core of bitsRequired64: min and max already live in the
+ * unsigned 64-bit domain as BigInts (trusted).
+ */
+function uncheckedBitsRequired64(min, max) {
+  return min === max ? 0 : bitLength64(BigInt.asUintN(64, max - min));
+}
+
+/**
+ * The unchecked core of bitsRequired128: min and max already live in the
+ * unsigned 128-bit domain as BigInts (trusted).
+ */
+function uncheckedBitsRequired128(min, max) {
+  if (min === max) {
+    return 0;
+  }
+  const diff = BigInt.asUintN(128, max - min);
+  const hi = diff >> 64n;
+  return hi !== 0n ? 64 + bitLength64(hi) : bitLength64(diff);
+}
+
+/**
+ * The compute half of compressedFloatParams without the validation: same
+ * float32 roundings, same clamp to [1, 4294967040], same holder. A valid
+ * declaration -- the caller's contract in production -- produces exactly
+ * the checked function's parameters.
+ */
+function productionCompressedFloatParams(min, max, resolution) {
+  min = Math.fround(min);
+  const delta = Math.fround(Math.fround(max) - min);
+  let values = Math.fround(delta / Math.fround(resolution));
+  if (!(values >= 1.0)) {
+    values = 1.0;
+  } else if (values > 4294967040.0) { // largest float32 below 2^32
+    values = 4294967040.0;
+  }
+  const maxIntegerValue = Math.ceil(values);
+  floatParams.min = min;
+  floatParams.delta = delta;
+  floatParams.maxIntegerValue = maxIntegerValue;
+  floatParams.bits = 32 - Math.clz32(maxIntegerValue >>> 0);
+  return floatParams;
+}
+
+/**
+ * The compute half of fixedPointParams without the validation: same lanes,
+ * same raw bounds and bit cost, same holder. A valid declaration -- the
+ * caller's contract in production -- produces exactly the checked
+ * function's parameters.
+ */
+function productionFixedPointParams(integerBits, fractionBits, min, max) {
+  if (integerBits + fractionBits <= 32) {
+    // exact in the Number domain: |raw| < 2^32 for storage of 32 bits or
+    // fewer, so the scaling multiply never rounds
+    const scale = 2 ** fractionBits;
+    fixedParams.wide = false;
+    fixedParams.rawMin = min * scale;
+    fixedParams.rawRange = (max - min) * scale;
+    fixedParams.bits = uncheckedBitsRequired(0, fixedParams.rawRange >>> 0);
+    return fixedParams;
+  }
+  const shift = BigInt(fractionBits);
+  fixedParams.wide = true;
+  fixedParams.rawMinBig = min << shift;
+  fixedParams.rawRangeBig = (max - min) << shift;
+  fixedParams.bits = uncheckedBitsRequired128(0n, fixedParams.rawRangeBig);
+  return fixedParams;
+}
+
+/**
+ * The PRODUCTION variant of the write stream: the same wire as
+ * CheckedWriteStream with the per-operation caller validation removed --
+ * the family's release shape (STANDARD.md, "Writes assume trusted data":
+ * the caller is responsible for well-formed writes). mode.js selects this
+ * class as WriteStream when NODE_ENV is 'production' at module load.
+ *
+ * What every operation KEEPS, in both modes identically:
+ *
+ * - The sticky-error gate: after the first failure every call returns
+ *   false without touching the stream.
+ * - The buffer-end refusal: a write that would pass the end of the buffer
+ *   latches SerializeError.Overflow and writes nothing (wide operations
+ *   check their TOTAL width up front, exactly as the checked variant
+ *   does). A message that does not fit is a runtime condition, not a
+ *   caller bug, so overflow stays a hard, latched value -- the JS
+ *   equivalent of what the C port's writer-trusted model retained.
+ * - The wire arithmetic, unchanged and byte identical: the golden pins
+ *   are re-run in production mode.
+ *
+ * What is GONE, per the standard's writer-trusted doctrine: parameter
+ * validation throws (bits counts, ranges, declarations, previous, buffer
+ * sizes, value types) and value refusal latches (ValueOutOfRange on write,
+ * InvalidString's O(n) well-formedness scan -- the standard's type case of
+ * a check no release path should carry). A caller that violates those
+ * contracts gets garbage on the wire -- which conforming readers refuse --
+ * never memory unsafety: JavaScript's own bounds semantics are the
+ * backstop. The read side is not touched by any of this: ReadStream
+ * validates everything in every mode.
+ */
+class ProductionWriteStream {
+  #writer;
+  #error;
+
+  /**
+   * Creates a write stream that writes to the given buffer. The buffer size
+   * must be a multiple of 8 bytes (the caller's contract, validated only in
+   * the checked variant).
+   * @param {Uint8Array} buffer destination; length must be a multiple of 8.
+   */
+  constructor(buffer) {
+    this.#writer = new BitWriter(buffer);
+    this.#error = SerializeError.None;
+  }
+
+  /**
+   * Points the stream at a buffer and clears all write state including any
+   * latched error, allowing a single stream to be reused without allocation.
+   * @param {Uint8Array} buffer destination; length must be a multiple of 8.
+   */
+  reset(buffer) {
+    this.#writer.reset(buffer);
+    this.#error = SerializeError.None;
+  }
+
+  /** True: this stream consumes ref values. */
+  get isWriting() {
+    return true;
+  }
+
+  /** False. */
+  get isReading() {
+    return false;
+  }
+
+  #fail(error) {
+    if (this.#error === SerializeError.None) {
+      this.#error = error;
+    }
+    return false;
+  }
+
+  /**
+   * The shared tail of every fixed-width write: the sticky-error gate, then
+   * tryWriteBits, whose false IS the overflow refusal -- the production
+   * write path's two retained checks in one place.
+   */
+  #writeBits(value, bits) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    if (!this.#writer.tryWriteBits(value, bits)) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    return true;
+  }
+
+  /**
+   * Writes an unsigned BigInt already reduced below 2^bits in the family's
+   * wide group structure (see CheckedWriteStream.#writeWide64 -- identical
+   * body; the availability check has already passed).
+   */
+  #writeWide64(value, bits) {
+    if (bits <= 32) {
+      this.#writer.writeBits(Number(value), bits);
+    } else {
+      // split through the scratch: one BigInt store, two Number loads.
+      // setBigUint64 wraps mod 2^64 -- the callers have already reduced
+      // value below 2^bits -- and no BigInt temporaries are created, where
+      // the mask-and-shift split builds several per call.
+      FLOAT_SCRATCH.setBigUint64(0, value, true);
+      this.#writer.writeBits(FLOAT_SCRATCH.getUint32(0, true), 32);
+      this.#writer.writeBits(FLOAT_SCRATCH.getUint32(4, true), bits - 32);
+    }
+  }
+
+  /**
+   * Writes an unsigned BigInt already reduced below 2^bits in 32-bit groups
+   * (see CheckedWriteStream.#writeGroups128 -- identical body; the
+   * availability check has already passed).
+   */
+  #writeGroups128(value, bits) {
+    if (bits <= 64) {
+      this.#writeWide64(value, bits);
+    } else if (bits <= 96) {
+      this.#writer.writeBits(Number(value & MASK32), 32);
+      this.#writer.writeBits(Number((value >> 32n) & MASK32), 32);
+      this.#writer.writeBits(Number(value >> 64n), bits - 64);
+    } else {
+      this.#writer.writeBits(Number(value & MASK32), 32);
+      this.#writer.writeBits(Number((value >> 32n) & MASK32), 32);
+      this.#writer.writeBits(Number((value >> 64n) & MASK32), 32);
+      this.#writer.writeBits(Number(value >> 96n), bits - 96);
+    }
+  }
+
+  /**
+   * serializeBits, trusted: bits in [1,32] and a Number value are the
+   * caller's contract. Overflow latches, as in every mode.
+   * @param {{value: number}} ref holder of the value to write.
+   * @param {number} bits width in [1,32].
+   * @returns {boolean} true on success.
+   */
+  serializeBits(ref, bits) {
+    return this.#writeBits(ref.value, bits);
+  }
+
+  /**
+   * serializeBits64, trusted: bits in [1,64] and a BigInt value are the
+   * caller's contract. Checked against the TOTAL width up front, so a
+   * refused write puts nothing on the wire.
+   * @param {{value: bigint}} ref holder of the value to write.
+   * @param {number} bits width in [1,64].
+   * @returns {boolean} true on success.
+   */
+  serializeBits64(ref, bits) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    if (bits > this.#writer.bitsAvailable()) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    this.#writeWide64(BigInt.asUintN(bits, ref.value), bits);
+    return true;
+  }
+
+  /**
+   * serializeInt, trusted: an int32 range with min <= max and an integer
+   * value within it are the caller's contract; the offset arithmetic and
+   * the wire are exactly the checked variant's. Overflow latches.
+   * @param {{value: number}} ref holder of the integer to write.
+   * @param {number} min the minimum value, an int32.
+   * @param {number} max the maximum value, an int32, at least min.
+   * @returns {boolean} true on success.
+   */
+  serializeInt(ref, min, max) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const bits = uncheckedBitsRequired(min >>> 0, max >>> 0);
+    if (bits === 0) {
+      return true; // degenerate range: the value IS the range, nothing to send
+    }
+    // subtract in the unsigned domain: the range may be wider than 2^31
+    return this.#writer.tryWriteBits(((ref.value >>> 0) - (min >>> 0)) >>> 0, bits) ||
+      this.#fail(SerializeError.Overflow);
+  }
+
+  /**
+   * serializeInt64, trusted: an int64 BigInt range with min <= max and a
+   * BigInt value within it are the caller's contract. Checked against the
+   * TOTAL width up front.
+   * @param {{value: bigint}} ref holder of the integer to write.
+   * @param {bigint} min the minimum value, an int64 BigInt.
+   * @param {bigint} max the maximum value, an int64 BigInt, at least min.
+   * @returns {boolean} true on success.
+   */
+  serializeInt64(ref, min, max) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const bits = uncheckedBitsRequired64(BigInt.asUintN(64, min), BigInt.asUintN(64, max));
+    if (bits === 0) {
+      return true; // degenerate range: the value IS the range, nothing to send
+    }
+    if (bits > this.#writer.bitsAvailable()) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    // subtract in the unsigned domain: the range may be wider than 2^63
+    this.#writeWide64(BigInt.asUintN(64, ref.value - min), bits);
+    return true;
+  }
+
+  /**
+   * serializeInt128, trusted: an int128 BigInt range with min <= max and a
+   * BigInt value within it are the caller's contract. Checked against the
+   * TOTAL width up front.
+   * @param {{value: bigint}} ref holder of the integer to write.
+   * @param {bigint} min the minimum value, an int128 BigInt.
+   * @param {bigint} max the maximum value, an int128 BigInt, at least min.
+   * @returns {boolean} true on success.
+   */
+  serializeInt128(ref, min, max) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const bits = uncheckedBitsRequired128(BigInt.asUintN(128, min), BigInt.asUintN(128, max));
+    if (bits === 0) {
+      return true; // degenerate range: the value IS the range, nothing to send
+    }
+    if (bits > this.#writer.bitsAvailable()) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    // subtract in the unsigned domain: the range may be wider than 2^127
+    this.#writeGroups128(BigInt.asUintN(128, ref.value - min), bits);
+    return true;
+  }
+
+  /**
+   * serializeIntRelative, trusted: previous and ref.value integers in the
+   * uint32 domain with ref.value strictly above previous are the caller's
+   * contract. The fused tier groups are exactly the checked variant's;
+   * each tail's single overflow check latches.
+   * @param {number} previous the previous value, an integer in [0,2^32-1].
+   * @param {{value: number}} ref holder of the current value to write.
+   * @returns {boolean} true on success.
+   */
+  serializeIntRelative(previous, ref) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const current = ref.value;
+    const difference = current - previous;
+    if (difference === 1) {
+      return this.#writer.tryWriteBits(1, 1) || this.#fail(SerializeError.Overflow);
+    }
+    if (difference <= 6) {
+      return this.#writer.tryWriteBits(0b10 | ((difference - 2) << 2), 5) || this.#fail(SerializeError.Overflow);
+    }
+    if (difference <= 23) {
+      return this.#writer.tryWriteBits(0b100 | ((difference - 7) << 3), 8) || this.#fail(SerializeError.Overflow);
+    }
+    if (difference <= 280) {
+      return this.#writer.tryWriteBits(0b1000 | ((difference - 24) << 4), 13) || this.#fail(SerializeError.Overflow);
+    }
+    if (difference <= 4377) {
+      return this.#writer.tryWriteBits(0b10000 | ((difference - 281) << 5), 18) || this.#fail(SerializeError.Overflow);
+    }
+    if (difference <= 69914) {
+      return this.#writer.tryWriteBits(0b100000 | ((difference - 4378) << 6), 23) || this.#fail(SerializeError.Overflow);
+    }
+    // the final tier: six zero flags, then current itself -- the ABSOLUTE
+    // value, not the difference -- as 32 raw bits, 38 bits total, checked
+    // up front so a refused write puts nothing on the wire
+    if (this.#writer.bitsAvailable() < 38) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    this.#writer.writeBits(0, 6);
+    this.#writer.writeBits(current, 32);
+    return true;
+  }
+
+  /**
+   * serializeFixed, trusted: a valid declaration and a raw value of the
+   * storage width's type within the raw bounds are the caller's contract.
+   * The wire parameters and groups are exactly the checked variant's.
+   * @param {{value: number|bigint}} ref holder of the raw fixed point value.
+   * @param {number} integerBits integer bits of the Q format, at least 1.
+   * @param {number} fractionBits fractional bits of the Q format.
+   * @param {number|bigint} min the minimum value in WHOLE units.
+   * @param {number|bigint} max the maximum value in WHOLE units, at least min.
+   * @returns {boolean} true on success.
+   */
+  serializeFixed(ref, integerBits, fractionBits, min, max) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const params = productionFixedPointParams(integerBits, fractionBits, min, max);
+    if (params.bits === 0) {
+      return true; // degenerate range: the value IS the range, nothing to send
+    }
+    if (!params.wide) {
+      return this.#writer.tryWriteBits(ref.value - params.rawMin, params.bits) ||
+        this.#fail(SerializeError.Overflow);
+    }
+    if (params.bits > this.#writer.bitsAvailable()) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    this.#writeGroups128(ref.value - params.rawMinBig, params.bits);
+    return true;
+  }
+
+  /**
+   * Writes the low 8 bits of ref.value: the fixed-width uint8 helper.
+   * @param {{value: number}} ref holder of the value to write.
+   * @returns {boolean} true on success.
+   */
+  serializeUint8(ref) {
+    return this.#writeBits(ref.value, 8);
+  }
+
+  /**
+   * Writes the low 16 bits of ref.value: the fixed-width uint16 helper.
+   * @param {{value: number}} ref holder of the value to write.
+   * @returns {boolean} true on success.
+   */
+  serializeUint16(ref) {
+    return this.#writeBits(ref.value, 16);
+  }
+
+  /**
+   * Writes the low 32 bits of ref.value: the fixed-width uint32 helper.
+   * @param {{value: number}} ref holder of the value to write.
+   * @returns {boolean} true on success.
+   */
+  serializeUint32(ref) {
+    return this.#writeBits(ref.value, 32);
+  }
+
+  /**
+   * Writes the low 64 bits of ref.value, a BigInt: the fixed-width uint64
+   * helper, the low 32-bit dword first, then the high dword.
+   * @param {{value: bigint}} ref holder of the value to write.
+   * @returns {boolean} true on success.
+   */
+  serializeUint64(ref) {
+    return this.serializeBits64(ref, 64);
+  }
+
+  /**
+   * Writes the low 128 bits of ref.value, a BigInt: the fixed-width uint128
+   * helper, checked against the full 128 bits up front.
+   * @param {{value: bigint}} ref holder of the value to write.
+   * @returns {boolean} true on success.
+   */
+  serializeUint128(ref) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    if (this.#writer.bitsAvailable() < 128) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    this.#writeGroups128(BigInt.asUintN(128, ref.value), 128);
+    return true;
+  }
+
+  /**
+   * Writes one bit: 1 if ref.value is truthy, 0 otherwise.
+   * @param {{value: boolean}} ref holder of the value to write.
+   * @returns {boolean} true on success.
+   */
+  serializeBool(ref) {
+    return this.#writeBits(ref.value ? 1 : 0, 1);
+  }
+
+  /**
+   * serializeFloat, trusted: a Number value is the caller's contract. The
+   * bit-transparent float32 conversion is exactly the checked variant's.
+   * @param {{value: number}} ref holder of the value to write.
+   * @returns {boolean} true on success.
+   */
+  serializeFloat(ref) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    return this.#writer.tryWriteBits(float32BitsFromNumber(ref.value), 32) ||
+      this.#fail(SerializeError.Overflow);
+  }
+
+  /**
+   * serializeDouble, trusted: a Number value is the caller's contract. The
+   * 64-bit group is exactly the checked variant's, checked up front.
+   * @param {{value: number}} ref holder of the value to write.
+   * @returns {boolean} true on success.
+   */
+  serializeDouble(ref) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    if (this.#writer.bitsAvailable() < 64) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    FLOAT_SCRATCH.setFloat64(0, ref.value, true);
+    // low dword first, then the high dword: the 64-bit group rule
+    this.#writer.writeBits(FLOAT_SCRATCH.getUint32(0, true), 32);
+    this.#writer.writeBits(FLOAT_SCRATCH.getUint32(4, true), 32);
+    return true;
+  }
+
+  /**
+   * serializeCompressedFloat, trusted: a valid declaration and a finite
+   * float32 value are the caller's contract. The two-rounding float32
+   * quantization is exactly the checked variant's -- the Math.fround
+   * around the product remains load bearing (STANDARD.md pins vectors
+   * that discriminate).
+   * @param {{value: number}} ref holder of the value to write.
+   * @param {number} min the minimum value, a float32.
+   * @param {number} max the maximum value, a float32, greater than min.
+   * @param {number} resolution the quantum size, a positive float32.
+   * @returns {boolean} true on success.
+   */
+  serializeCompressedFloat(ref, min, max, resolution) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const params = productionCompressedFloatParams(min, max, resolution);
+    if (params.bits > this.#writer.bitsAvailable()) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    const value32 = Math.fround(ref.value); // the float parameter type of the other ports
+    let normalized = Math.fround(Math.fround(value32 - params.min) / params.delta);
+    if (!(normalized >= 0.0)) {
+      normalized = 0.0;
+    } else if (!(normalized <= 1.0)) {
+      normalized = 1.0;
+    }
+    const scaled = Math.fround(normalized * Math.fround(params.maxIntegerValue));
+    this.#writer.writeBits(Math.floor(Math.fround(scaled + 0.5)), params.bits);
+    return true;
+  }
+
+  /**
+   * serializeBytes, trusted: a Uint8Array is the caller's contract. The
+   * align, the overflow latch and the bulk copy are exactly the checked
+   * variant's; the align padding, written before the check, is part of a
+   * latched stream's dead wire, as in every mode.
+   * @param {Uint8Array} data the bytes to write, in order.
+   * @returns {boolean} true on success.
+   */
+  serializeBytes(data) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    this.#writer.writeAlign();
+    if (data.length * 8 > this.#writer.bitsAvailable()) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    this.#writer.writeBytes(data);
+    return true;
+  }
+
+  /**
+   * serializeString, trusted: a string value and a bufferSize both sides
+   * agree on, with the payload under bufferSize - 1 UTF-8 bytes, are the
+   * caller's contract. The wire is exactly the checked variant's: the
+   * length as a ranged int in bitsRequired(0, bufferSize - 1) bits, then
+   * the payload through serializeBytes, which aligns.
+   * @param {{value: string}} ref holder of the string to write.
+   * @param {number} bufferSize the agreed buffer size; the payload must fit
+   *   in bufferSize - 1 bytes.
+   * @returns {boolean} true on success.
+   */
+  serializeString(ref, bufferSize) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const utf8 = UTF8_ENCODER.encode(ref.value);
+    if (!this.#writeBits(utf8.length, uncheckedBitsRequired(0, (bufferSize - 1) >>> 0))) {
+      return false;
+    }
+    return this.serializeBytes(utf8);
+  }
+
+  /**
+   * serializeWideString, trusted: a WELL-FORMED string (no lone
+   * surrogates) and a bufferSize both sides agree on, with the string
+   * under bufferSize - 1 UTF-16 code units, are the caller's contract --
+   * the O(n) isWellFormed scan is the standard's type case of a check no
+   * release path carries, so it lives only in the checked variant, and a
+   * lone surrogate written here reaches the wire for conforming readers
+   * to refuse. The wire is exactly the checked variant's: the length,
+   * then one 32-bit group per code unit, NO alignment anywhere.
+   * @param {{value: string}} ref holder of the string to write.
+   * @param {number} bufferSize the agreed buffer size in wide characters;
+   *   the string must fit in bufferSize - 1 UTF-16 code units.
+   * @returns {boolean} true on success.
+   */
+  serializeWideString(ref, bufferSize) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    const value = ref.value;
+    const length = value.length;
+    if (!this.#writeBits(length, uncheckedBitsRequired(0, (bufferSize - 1) >>> 0))) {
+      return false;
+    }
+    // NO align here -- deliberately unlike the narrow path (STANDARD.md)
+    if (length * 32 > this.#writer.bitsAvailable()) {
+      return this.#fail(SerializeError.Overflow);
+    }
+    for (let i = 0; i < length; i++) {
+      this.#writer.writeBits(value.charCodeAt(i), 32);
+    }
+    return true;
+  }
+
+  /**
+   * Pads the stream with zero bits to the next byte boundary; if it is
+   * already byte aligned, writes nothing. This can never pass the end of the
+   * buffer: the buffer size is a multiple of 8 bytes.
+   * @returns {boolean} true on success (false only after a latched error).
+   */
+  serializeAlign() {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    this.#writer.writeAlign();
+    return true;
+  }
+
+  /**
+   * Flushes the last word of bits to memory. Always call this after you
+   * finish writing and before you use data(). The flush ends the write.
+   */
+  flush() {
+    this.#writer.flushBits();
+  }
+
+  /**
+   * The written portion of the buffer (a subarray view, not a copy): the
+   * packet you should send. Call flush() first.
    */
   data() {
     return this.#writer.data();
@@ -2065,14 +2747,17 @@ export class ReadStream {
  * that is the one thing a measure is for. Comparing a measure to a write's
  * bitsProcessed and expecting equality is a misuse.
  *
- * A measure validates like a write (the Go port's stance): nothing it sees
- * came off a network, but a ranged value outside its range latches
- * SerializeError.ValueOutOfRange exactly as the write would, so a message
- * that cannot be written cannot be measured either. Wire-level refusals
- * (Overflow, Align) cannot occur here: no operation on a measure stream
- * touches a buffer.
+ * A measure validates like a write: nothing it sees came off a network, but
+ * a ranged value outside its range latches SerializeError.ValueOutOfRange
+ * exactly as the write would, so a message that cannot be written cannot be
+ * measured either. Wire-level refusals (Overflow, Align) cannot occur here:
+ * no operation on a measure stream touches a buffer.
+ *
+ * This is the CHECKED variant (the development default).
+ * ProductionMeasureStream below is the same pricing with the caller
+ * validation removed; mode.js selects which one exports as MeasureStream.
  */
-export class MeasureStream {
+class CheckedMeasureStream {
   #bitsWritten;
   #error;
 
@@ -2543,3 +3228,335 @@ export class MeasureStream {
     return this.#error === SerializeError.None;
   }
 }
+
+/**
+ * The PRODUCTION variant of the measure stream: pure bit arithmetic, the
+ * C++ MeasureStream's release shape. mode.js selects this class as
+ * MeasureStream when NODE_ENV is 'production' at module load.
+ *
+ * A measure sits on the trusted side of the boundary (STANDARD.md): nothing
+ * it sees came off a network, so with the caller validation gone NOTHING
+ * here can fail -- every method prices its operation and returns true, the
+ * error surface reports a permanently healthy stream, and the conservative
+ * 7-bit alignment bound is unchanged (the bound is format arithmetic, not
+ * validation). The prices are exactly the checked variant's for every
+ * conforming message: a measure and a write stay in lockstep in both modes.
+ */
+class ProductionMeasureStream {
+  #bitsWritten;
+
+  /** Creates a measure stream. */
+  constructor() {
+    this.#bitsWritten = 0;
+  }
+
+  /** Clears the measured bit count. */
+  reset() {
+    this.#bitsWritten = 0;
+  }
+
+  /**
+   * True: a measure stream behaves like a write stream so that unified
+   * serialize functions measure exactly what they would write.
+   */
+  get isWriting() {
+    return true;
+  }
+
+  /** False. */
+  get isReading() {
+    return false;
+  }
+
+  /**
+   * Measures bits in [1,32] (the caller's contract). ref is ignored.
+   * @param {{value: number}} ref ignored.
+   * @param {number} bits width in [1,32].
+   * @returns {boolean} true, always.
+   */
+  serializeBits(ref, bits) {
+    this.#bitsWritten += bits;
+    return true;
+  }
+
+  /**
+   * Measures bits in [1,64] (the caller's contract). ref is ignored.
+   * @param {{value: bigint}} ref ignored.
+   * @param {number} bits width in [1,64].
+   * @returns {boolean} true, always.
+   */
+  serializeBits64(ref, bits) {
+    this.#bitsWritten += bits;
+    return true;
+  }
+
+  /**
+   * Measures a ranged integer: exactly bitsRequired(min,max) bits, zero for
+   * a degenerate range. The range's validity is the caller's contract.
+   * @param {{value: number}} ref ignored.
+   * @param {number} min the minimum value, an int32.
+   * @param {number} max the maximum value, an int32, at least min.
+   * @returns {boolean} true, always.
+   */
+  serializeInt(ref, min, max) {
+    this.#bitsWritten += uncheckedBitsRequired(min >>> 0, max >>> 0);
+    return true;
+  }
+
+  /**
+   * Measures a ranged 64-bit integer: exactly bitsRequired64 bits, zero for
+   * a degenerate range. The range's validity is the caller's contract.
+   * @param {{value: bigint}} ref ignored.
+   * @param {bigint} min the minimum value, an int64 BigInt.
+   * @param {bigint} max the maximum value, an int64 BigInt, at least min.
+   * @returns {boolean} true, always.
+   */
+  serializeInt64(ref, min, max) {
+    this.#bitsWritten += uncheckedBitsRequired64(BigInt.asUintN(64, min), BigInt.asUintN(64, max));
+    return true;
+  }
+
+  /**
+   * Measures a ranged 128-bit integer: exactly bitsRequired128 bits, zero
+   * for a degenerate range. The range's validity is the caller's contract.
+   * @param {{value: bigint}} ref ignored.
+   * @param {bigint} min the minimum value, an int128 BigInt.
+   * @param {bigint} max the maximum value, an int128 BigInt, at least min.
+   * @returns {boolean} true, always.
+   */
+  serializeInt128(ref, min, max) {
+    this.#bitsWritten += uncheckedBitsRequired128(BigInt.asUintN(128, min), BigInt.asUintN(128, max));
+    return true;
+  }
+
+  /**
+   * Measures a value written relative to previous: exactly the tier the
+   * write would emit (int_relative never aligns, so the measure is exact).
+   * The ordering and domain contracts are the caller's.
+   * @param {number} previous the previous value, an integer in [0,2^32-1].
+   * @param {{value: number}} ref holder of the current value that would be
+   * written.
+   * @returns {boolean} true, always.
+   */
+  serializeIntRelative(previous, ref) {
+    const difference = ref.value - previous;
+    let bits;
+    if (difference === 1) {
+      bits = 1;
+    } else if (difference <= 6) {
+      bits = 5;
+    } else if (difference <= 23) {
+      bits = 8;
+    } else if (difference <= 280) {
+      bits = 13;
+    } else if (difference <= 4377) {
+      bits = 18;
+    } else if (difference <= 69914) {
+      bits = 23;
+    } else {
+      bits = 38;
+    }
+    this.#bitsWritten += bits;
+    return true;
+  }
+
+  /**
+   * Measures a fixed point value: exactly the bit length of the raw range,
+   * a constant of the declaration, whose validity is the caller's contract.
+   * @param {{value: number|bigint}} ref ignored.
+   * @param {number} integerBits integer bits of the Q format, at least 1.
+   * @param {number} fractionBits fractional bits of the Q format.
+   * @param {number|bigint} min the minimum value in WHOLE units.
+   * @param {number|bigint} max the maximum value in WHOLE units, at least min.
+   * @returns {boolean} true, always.
+   */
+  serializeFixed(ref, integerBits, fractionBits, min, max) {
+    this.#bitsWritten += productionFixedPointParams(integerBits, fractionBits, min, max).bits;
+    return true;
+  }
+
+  /**
+   * Measures the fixed-width uint8 helper: 8 bits. ref is ignored.
+   * @param {{value: number}} ref ignored.
+   * @returns {boolean} true, always.
+   */
+  serializeUint8(ref) {
+    this.#bitsWritten += 8;
+    return true;
+  }
+
+  /**
+   * Measures the fixed-width uint16 helper: 16 bits. ref is ignored.
+   * @param {{value: number}} ref ignored.
+   * @returns {boolean} true, always.
+   */
+  serializeUint16(ref) {
+    this.#bitsWritten += 16;
+    return true;
+  }
+
+  /**
+   * Measures the fixed-width uint32 helper: 32 bits. ref is ignored.
+   * @param {{value: number}} ref ignored.
+   * @returns {boolean} true, always.
+   */
+  serializeUint32(ref) {
+    this.#bitsWritten += 32;
+    return true;
+  }
+
+  /**
+   * Measures the fixed-width uint64 helper: 64 bits. ref is ignored.
+   * @param {{value: bigint}} ref ignored.
+   * @returns {boolean} true, always.
+   */
+  serializeUint64(ref) {
+    this.#bitsWritten += 64;
+    return true;
+  }
+
+  /**
+   * Measures the fixed-width uint128 helper: 128 bits. ref is ignored.
+   * @param {{value: bigint}} ref ignored.
+   * @returns {boolean} true, always.
+   */
+  serializeUint128(ref) {
+    this.#bitsWritten += 128;
+    return true;
+  }
+
+  /**
+   * Measures a bool: 1 bit. ref is ignored.
+   * @param {{value: boolean}} ref ignored.
+   * @returns {boolean} true, always.
+   */
+  serializeBool(ref) {
+    this.#bitsWritten += 1;
+    return true;
+  }
+
+  /**
+   * Measures a float: 32 bits. ref is ignored.
+   * @param {{value: number}} ref ignored.
+   * @returns {boolean} true, always.
+   */
+  serializeFloat(ref) {
+    this.#bitsWritten += 32;
+    return true;
+  }
+
+  /**
+   * Measures a double: 64 bits. ref is ignored.
+   * @param {{value: number}} ref ignored.
+   * @returns {boolean} true, always.
+   */
+  serializeDouble(ref) {
+    this.#bitsWritten += 64;
+    return true;
+  }
+
+  /**
+   * Measures a compressed float: exactly the declaration's bit count. The
+   * declaration's validity is the caller's contract.
+   * @param {{value: number}} ref ignored.
+   * @param {number} min the minimum value, a float32.
+   * @param {number} max the maximum value, a float32, greater than min.
+   * @param {number} resolution the quantum size, a positive float32.
+   * @returns {boolean} true, always.
+   */
+  serializeCompressedFloat(ref, min, max, resolution) {
+    this.#bitsWritten += productionCompressedFloatParams(min, max, resolution).bits;
+    return true;
+  }
+
+  /**
+   * Measures an array of bytes: a worst case 7-bit align plus the data
+   * bytes. data must be a Uint8Array (the caller's contract).
+   * @param {Uint8Array} data the bytes that would be written.
+   * @returns {boolean} true, always.
+   */
+  serializeBytes(data) {
+    this.#bitsWritten += 7 + data.length * 8;
+    return true;
+  }
+
+  /**
+   * Measures a string: the length prefix, a worst case 7-bit align, and the
+   * UTF-8 payload bytes. The string's fit under bufferSize - 1 bytes is the
+   * caller's contract.
+   * @param {{value: string}} ref holder of the string that would be written.
+   * @param {number} bufferSize the agreed buffer size; the payload must fit
+   *   in bufferSize - 1 bytes.
+   * @returns {boolean} true, always.
+   */
+  serializeString(ref, bufferSize) {
+    const byteLength = UTF8_ENCODER.encode(ref.value).length;
+    this.#bitsWritten += uncheckedBitsRequired(0, (bufferSize - 1) >>> 0) + 7 + byteLength * 8;
+    return true;
+  }
+
+  /**
+   * Measures a wide string: the length prefix plus 32 bits per UTF-16 code
+   * unit, NO alignment anywhere (measure and write agree bit for bit). The
+   * string's well-formedness and fit are the caller's contract.
+   * @param {{value: string}} ref holder of the string that would be written.
+   * @param {number} bufferSize the agreed buffer size in wide characters;
+   *   the string must fit in bufferSize - 1 UTF-16 code units.
+   * @returns {boolean} true, always.
+   */
+  serializeWideString(ref, bufferSize) {
+    this.#bitsWritten += uncheckedBitsRequired(0, (bufferSize - 1) >>> 0) + ref.value.length * 32;
+    return true;
+  }
+
+  /**
+   * Measures an align as the conservative worst case: 7 bits, always.
+   * @returns {boolean} true, always.
+   */
+  serializeAlign() {
+    this.#bitsWritten += 7;
+    return true;
+  }
+
+  /**
+   * The worst case align of 7 bits. The number of bits required for
+   * alignment depends on where the message lands in the final bit stream,
+   * so the measurement is conservative.
+   */
+  alignBits() {
+    return 7;
+  }
+
+  /** The number of bits measured so far. */
+  bitsProcessed() {
+    return this.#bitsWritten;
+  }
+
+  /** The number of bits measured so far, rounded up to the next byte. */
+  bytesProcessed() {
+    return Math.ceil(this.#bitsWritten / 8);
+  }
+
+  /**
+   * SerializeError.None, always: with the caller validation gone, nothing a
+   * production measure does can fail.
+   */
+  get error() {
+    return SerializeError.None;
+  }
+
+  /** True, always: a production measure cannot fail. */
+  get ok() {
+    return true;
+  }
+}
+
+/**
+ * The write-side streams, selected once at module load (see mode.js): the
+ * CHECKED variants by default, the PRODUCTION variants when NODE_ENV is
+ * 'production'. The wire and the sticky Overflow contract are identical in
+ * both; the difference is caller validation. ReadStream has no variants:
+ * the wire is a trust boundary in every mode.
+ */
+export const WriteStream = PRODUCTION ? ProductionWriteStream : CheckedWriteStream;
+export const MeasureStream = PRODUCTION ? ProductionMeasureStream : CheckedMeasureStream;

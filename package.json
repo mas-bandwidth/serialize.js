@@ -7,6 +7,7 @@
   "exports": "./src/index.js",
   "scripts": {
     "test": "node --test",
+    "test:production": "node production-tests.mjs",
     "bench": "node bench/bench.js"
   },
   "engines": {

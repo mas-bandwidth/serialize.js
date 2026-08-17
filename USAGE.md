@@ -87,8 +87,58 @@ stream's `error` is `SerializeError.None`, which is `null`, so
 Broken *code* is different from hostile *data*: misusing the API — bits
 out of `[1,32]`, a non-BigInt where the domain is BigInt, an invalid
 declaration — throws `TypeError`/`RangeError` on every stream, in every
-build. Writes are checked the same way reads are: writing a value outside
-its declared range latches `ValueOutOfRange` and writes nothing.
+state, and writing a value outside its declared range latches
+`ValueOutOfRange` and writes nothing. That is the **checked** mode, the
+default; whether those caller checks exist at all is the mode's choice —
+see the next section.
+
+## The two modes: checked and production
+
+The family standard makes the caller responsible for well-formed writes —
+writer contracts are debug asserts in the languages that can compile them
+out. JavaScript can't strip code at compile time, so the write path forks
+**once, at module load**, on `NODE_ENV`:
+
+```sh
+node app.js                       # checked: the development default
+NODE_ENV=production node app.js   # production: the caller-trust release shape
+```
+
+**Checked** is everything described above: caller misuse throws, invalid
+values latch — the always-on form of the family's debug asserts. Develop
+and test here.
+
+**Production** removes the per-operation caller validation from
+`WriteStream`, `MeasureStream` and `BitWriter`, exactly as a C/C++ release
+build compiles its asserts to nothing. What every write keeps, in both
+modes identically: the sticky-error gate and the buffer-end check —
+
+```js
+// production mode: a message that does not fit is still a latched VALUE
+const w = new WriteStream(new Uint8Array(8));
+const big = { value: 1n };
+w.serializeUint64(big); // -> true: 64 bits, the buffer is full
+w.serializeUint64(big); // -> false: SerializeError.Overflow, latched
+w.ok; // false, and every later call keeps returning false
+```
+
+— because overflow is a runtime condition, not a caller bug. Everything
+else on the write side is your contract in production: a value outside its
+declared range goes out as deterministic garbage (which conforming readers
+refuse), a lone surrogate reaches the wide-string wire (where conforming
+readers refuse it), and nothing is validated for you. Misuse never
+corrupts memory — JavaScript's own bounds semantics are the backstop — it
+corrupts your message. The wire for *conforming* writes is byte identical
+in both modes: `npm run test:production` re-runs the golden pins and the
+property sweep under the production variants to prove it.
+
+Reads are untouched by the mode: the wire is a trust boundary, and every
+read-side refusal — bounds, ranges, alignment padding, string content —
+binds in every mode.
+
+The selection is frozen: the environment is read once, and whole classes
+are chosen at export time (`ReadStream` has no variants). Changing
+`NODE_ENV` after load has no effect.
 
 ## Raw bits
 
