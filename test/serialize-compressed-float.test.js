@@ -191,3 +191,82 @@ test('measure prices a compressed float at the declaration bit count', () => {
   assert.equal(measure.bitsProcessed(), 10 + 15 + 32 + 15);
   assert.equal(measure.ok, true);
 });
+
+// The normative integer clamp (STANDARD.md, "The integer clamp is
+// normative", 2026-08-23; schema#109, ruled by Glenn live). Once
+// max_integer_value >= 2^23 the float32 ulp at the top of the range reaches
+// 1, so floor(scaled + 0.5) can land ONE ABOVE max_integer_value when the
+// value written is max. Two witnesses, both mandated by STANDARD.md, and
+// they fail in two different ways without the clamp -- which is why both are
+// pinned rather than one standing in for the other:
+//
+//   A. [0, 8388609] resolution 1 -- max_integer_value 8388609, 24 bits. The
+//      unclamped code 8388610 FITS the field, so the wire is well formed and
+//      the writer reports success; the reader's own
+//      integerValue > max_integer_value check then REFUSES the packet. A
+//      conforming writer's top-of-range value rejected by its own reader.
+//
+//   B. [0, 16777215] resolution 1 -- max_integer_value 16777215, 24 bits.
+//      The unclamped code 16777216 needs 25 bits, so writeBits masks the top
+//      bit away and the value decodes as 0 -- silent corruption, no error on
+//      either side. This is the class where implementations diverged on the
+//      wire before the ruling.
+//
+// Both write `max` and must round-trip to `max` exactly, compared by BITS.
+const CLAMP_WITNESSES = [
+  { declaration: [0, 8388609], maxIntegerValue: 8388609, bits: 24 },
+  { declaration: [0, 16777215], maxIntegerValue: 16777215, bits: 24 },
+];
+
+test('the normative integer clamp: top-of-range round-trips in both witness declarations', () => {
+  for (const { declaration, maxIntegerValue, bits } of CLAMP_WITNESSES) {
+    const [min, max] = declaration;
+    const label = `[${min}, ${max}] resolution 1`;
+
+    const measure = new MeasureStream();
+    assert.equal(measure.serializeCompressedFloat({ value: max }, min, max, 1), true);
+    assert.equal(measure.bitsProcessed(), bits, `${label}: ${bits} bits`);
+
+    const writer = new WriteStream(new Uint8Array(16));
+    assert.equal(
+      writer.serializeCompressedFloat({ value: max }, min, max, 1),
+      true,
+      `${label}: writing max succeeds`,
+    );
+    writer.flush();
+    assert.equal(writer.error, null, `${label}: no error latched on write`);
+
+    const reader = new ReadStream(writer.data());
+    const ref = { value: 0 };
+    assert.equal(
+      reader.serializeCompressedFloat(ref, min, max, 1),
+      true,
+      `${label}: the reader accepts its own writer's top-of-range code`,
+    );
+    assert.equal(reader.error, null, `${label}: no error latched on read`);
+    assert.equal(
+      bitsOfFloat32(ref.value),
+      bitsOfFloat32(max),
+      `${label}: max round-trips to max exactly`,
+    );
+  }
+});
+
+test('the normative integer clamp: the raw quantization would exceed max_integer_value', () => {
+  // The arithmetic this clamp exists to correct, recomputed independently of
+  // the library so the test states WHY the clamp is load bearing rather than
+  // only that the result is right. If either row stops exceeding, the
+  // witness has stopped witnessing and must be re-derived.
+  for (const { declaration, maxIntegerValue } of CLAMP_WITNESSES) {
+    const [min, max] = declaration;
+    const delta = Math.fround(Math.fround(max) - Math.fround(min));
+    const normalized = Math.fround(Math.fround(Math.fround(max) - Math.fround(min)) / delta);
+    const scaled = Math.fround(normalized * Math.fround(maxIntegerValue));
+    const unclamped = Math.floor(Math.fround(scaled + 0.5));
+    assert.equal(
+      unclamped,
+      maxIntegerValue + 1,
+      `[${min}, ${max}]: unclamped quantization lands one above max_integer_value`,
+    );
+  }
+});
