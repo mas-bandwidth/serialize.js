@@ -1069,7 +1069,18 @@ class CheckedWriteStream {
     // over [0,10] at resolution 0.01 must quantize to 1; an FMA writes 0,
     // double arithmetic writes 0).
     const scaled = Math.fround(normalized * Math.fround(params.maxIntegerValue));
-    this.#writer.writeBits(Math.floor(Math.fround(scaled + 0.5)), params.bits);
+    // STANDARD.md: the integer clamp is normative (2026-08-23, schema#109).
+    // Once maxIntegerValue >= 2^23 the float32 ulp at the top of the range
+    // reaches 1, so the rounded sum can exceed maxIntegerValue itself: the
+    // writer emits a code its own reader rejects, or one bit wider than the
+    // field, which writeBits then masks away. Clamping after the floor closes
+    // both; no byte changes for any declaration outside [2^23, 2^24). Matches
+    // serialize.h serialize_compressed_float_internal (serialize#88).
+    let integerValue = Math.floor(Math.fround(scaled + 0.5));
+    if (integerValue > params.maxIntegerValue) {
+      integerValue = params.maxIntegerValue;
+    }
+    this.#writer.writeBits(integerValue, params.bits);
     return true;
   }
 
@@ -1785,7 +1796,18 @@ class ProductionWriteStream {
       normalized = 1.0;
     }
     const scaled = Math.fround(normalized * Math.fround(params.maxIntegerValue));
-    this.#writer.writeBits(Math.floor(Math.fround(scaled + 0.5)), params.bits);
+    // STANDARD.md: the integer clamp is normative (2026-08-23, schema#109).
+    // Once maxIntegerValue >= 2^23 the float32 ulp at the top of the range
+    // reaches 1, so the rounded sum can exceed maxIntegerValue itself: the
+    // writer emits a code its own reader rejects, or one bit wider than the
+    // field, which writeBits then masks away. Clamping after the floor closes
+    // both; no byte changes for any declaration outside [2^23, 2^24). Matches
+    // serialize.h serialize_compressed_float_internal (serialize#88).
+    let integerValue = Math.floor(Math.fround(scaled + 0.5));
+    if (integerValue > params.maxIntegerValue) {
+      integerValue = params.maxIntegerValue;
+    }
+    this.#writer.writeBits(integerValue, params.bits);
     return true;
   }
 
