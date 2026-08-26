@@ -3,6 +3,8 @@
 [![CI](https://github.com/mas-bandwidth/serialize.js/actions/workflows/ci.yml/badge.svg)](https://github.com/mas-bandwidth/serialize.js/actions/workflows/ci.yml)
 [![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE)
 
+If this library helps you, please support it: **[Become a supporter](https://www.patreon.com/MasBandwidth/membership)**
+
 A bitpacking serialization library for **JavaScript**. The sixth
 implementation of the serialize family, wire compatible with the
 [C++](https://github.com/mas-bandwidth/serialize),
