@@ -62,21 +62,58 @@ wrote, and each arm's READER re-reads the other arm's buffer.
   holds every 32 bits rather than every 64 (head and tail through the scratch
   drop from ≤7 bytes to ≤3, and the bulk copy unit is 4 bytes).
 
-  **flushBits keeps the memory behaviour**: it stores the one pending 32-bit
-  word and, when that leaves the cursor on an odd 4-byte word, zeroes the
-  next one — so the bytes past the written data are still only ever written
-  as zeros over the same 8-byte span, the buffer-length contract (a multiple
-  of 8) is unchanged, and a reader that loads 64 bits at the tail sees the
-  memory it always did.
+  **flushBits keeps the memory behaviour** — see UNIT 2, which is where that
+  claim was actually made true.
 
-  Paired numbers, 3 invocations each, 4096 passes × 7 rounds:
+  Paired numbers, 3 invocations each, 4096 passes × 7 rounds, measured on the
+  branch as it now stands (UNIT 2's unconditional pairing store included):
 
-  | path | before (max) | after (max) | ratio | null |
-  |---|---|---|---|---|
-  | **bits** | 6.49–6.68 K passes/s | 7.88–7.91 | **1.1832, 1.2177, 1.1825** | ±1.1% |
-  | **bytes** | — | — | **1.3694, 1.3801, 1.3871** | ±0.2% |
+  | path | ratio | null |
+  |---|---|---|
+  | **bits** | **1.1743, 1.1809, 1.1816** | ±1.1% |
+  | **bytes** | **1.3594, 1.3605** | ±0.2% |
 
-  Gates: `node --test` 285 tests, 0 fail; `node production-tests.mjs` 124
+  Before UNIT 2 these read 1.1832 / 1.2177 / 1.1825 and 1.3694 / 1.3801 /
+  1.3871; the pairing store costs one unconditional branch per packet, which
+  is the difference. The figures above are the ones that describe the branch.
+
+- **UNIT 2 — the flush pairs its 8-byte span for EVERY bit count** (review
+  condition on #11). UNIT 1's flush zeroed the odd word's partner from inside
+  `if (this.#scratchBits !== 0)`. That guard is false exactly when the last
+  write ended on a 32-bit boundary — the merge had already stored the word and
+  left `scratchBits` at 0 — so for `bitsWritten ≡ 32 (mod 64)` the flush did
+  nothing at all and the second half of the 8-byte span kept whatever the
+  caller's buffer held before. `main` always wrote the full span.
+
+  Payload bytes were never affected; the exposure is a reused dirty buffer
+  whose consumer reads past `bytesWritten()` — 4 stale bytes on a transmitted
+  8-byte-aligned buffer — and, just as much, the class doc's "bytes past the
+  end of the written data are only ever written as zeros" being false.
+
+  The fix is the reviewer's: the pairing store moves OUTSIDE the guard. After
+  the guard the cursor is at word `ceil(bitsWritten / 32)` on both paths —
+  the partial word was stored, or there was none to store — so an odd index
+  means the span's second half has never been written, on either path. The
+  store does not advance the cursor, so a second `flushBits` is a no-op
+  rather than a walk off the end. Both class copies moved.
+
+  **Reproduced before it was fixed**, against `origin/main` as the reference:
+  a tail oracle writes k bits into a 0xff-prefilled buffer for every k in
+  [0, 384] and compares the WHOLE buffer with the same write through main.
+  Unfixed: **6 divergent counts — k = 32, 96, 160, 224, 288, 352, every one
+  past `bytesWritten()`, never payload.** Fixed: 0 divergent across all 385.
+
+  **The missing test class is now in the repo**: `test/writer-tail-span.test.js`
+  pins k = 32 and k = 96 by name, sweeps every k in [0, 384], covers the
+  `writeBytes` bulk-copy cursor, and pins flush idempotence — asserting the
+  full shape (packet bytes, zeros to `8*ceil(k/64)`, untouched 0xff beyond),
+  so over-zeroing fails it as loudly as under-zeroing. It joins
+  `production-tests.mjs` under that file's stated membership rule: it asserts
+  no dev-only caller validation, and both class copies carry the flush.
+  Negative control: with the store back inside the guard the file reports
+  **9 failures and exits 1 in BOTH modes**.
+
+  Gates: `node --test` 290 tests, 0 fail; `node production-tests.mjs` 129
   tests, 0 fail — both include the golden-wire battery. STANDARD.md
   untouched, so the vendored-copy job is unaffected.
 

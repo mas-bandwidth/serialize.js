@@ -318,19 +318,24 @@ class CheckedBitWriter {
    */
   flushBits() {
     if (this.#scratchBits !== 0) {
-      // one 32-bit word carries every remaining bit (scratchBits <= 31), and
-      // the second word of the old 8-byte flush is zeroed so the bytes past
-      // the written data stay zeros exactly as before: the buffer's length is
-      // a multiple of 8, so both stores are in bounds, and a reader that
-      // loads 64 bits at the tail sees the same memory it always did.
-      const base = this.#wordIndex * 4;
-      this.#view.setUint32(base, this.#scratch, true);
+      // one 32-bit word carries every remaining bit (scratchBits <= 31)
+      this.#view.setUint32(this.#wordIndex * 4, this.#scratch, true);
       this.#scratch = 0;
       this.#scratchBits = 0;
       this.#wordIndex++;
-      if ((this.#wordIndex & 1) !== 0) {
-        this.#view.setUint32(this.#wordIndex * 4, 0, true);
-      }
+    }
+    // The cursor is now at word ceil(bitsWritten / 32) whether or not there
+    // was a partial word to store -- a write that ends exactly on a 32-bit
+    // boundary has ALREADY stored its word and left scratchBits at 0. So the
+    // pairing store belongs outside that branch: an odd word index means the
+    // second half of the enclosing 8-byte span has never been written, and
+    // zeroing it here is what keeps "bytes past the end of the written data
+    // are only ever written as zeros" true for every bit count. The store is
+    // in bounds because the buffer's length is a multiple of 8, and it does
+    // not advance the cursor, so calling flushBits again is a no-op rather
+    // than a walk off the end.
+    if ((this.#wordIndex & 1) !== 0) {
+      this.#view.setUint32(this.#wordIndex * 4, 0, true);
     }
   }
 
@@ -607,19 +612,24 @@ class ProductionBitWriter {
    */
   flushBits() {
     if (this.#scratchBits !== 0) {
-      // one 32-bit word carries every remaining bit (scratchBits <= 31), and
-      // the second word of the old 8-byte flush is zeroed so the bytes past
-      // the written data stay zeros exactly as before: the buffer's length is
-      // a multiple of 8, so both stores are in bounds, and a reader that
-      // loads 64 bits at the tail sees the same memory it always did.
-      const base = this.#wordIndex * 4;
-      this.#view.setUint32(base, this.#scratch, true);
+      // one 32-bit word carries every remaining bit (scratchBits <= 31)
+      this.#view.setUint32(this.#wordIndex * 4, this.#scratch, true);
       this.#scratch = 0;
       this.#scratchBits = 0;
       this.#wordIndex++;
-      if ((this.#wordIndex & 1) !== 0) {
-        this.#view.setUint32(this.#wordIndex * 4, 0, true);
-      }
+    }
+    // The cursor is now at word ceil(bitsWritten / 32) whether or not there
+    // was a partial word to store -- a write that ends exactly on a 32-bit
+    // boundary has ALREADY stored its word and left scratchBits at 0. So the
+    // pairing store belongs outside that branch: an odd word index means the
+    // second half of the enclosing 8-byte span has never been written, and
+    // zeroing it here is what keeps "bytes past the end of the written data
+    // are only ever written as zeros" true for every bit count. The store is
+    // in bounds because the buffer's length is a multiple of 8, and it does
+    // not advance the cursor, so calling flushBits again is a no-op rather
+    // than a walk off the end.
+    if ((this.#wordIndex & 1) !== 0) {
+      this.#view.setUint32(this.#wordIndex * 4, 0, true);
     }
   }
 

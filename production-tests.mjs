@@ -40,6 +40,7 @@ const files = [
   'test/smoke.test.js',
   'test/stream-errors.test.js',
   'test/uint-helpers.test.js',
+  'test/writer-tail-span.test.js',
   'test/production/production-write-path.test.js',
 ];
 
