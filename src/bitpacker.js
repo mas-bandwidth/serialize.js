@@ -4,12 +4,12 @@
 // bit stream, least-significant-bit first, exactly as specified by STANDARD.md
 // and byte-identical to the C++, C, Go, C# and Rust implementations.
 //
-// The scratch is the family's 64-bit accumulator, carried here as two 32-bit
-// lanes (lo, hi) because JavaScript bitwise arithmetic is 32-bit. BigInt never
-// touches this hot path. When the scratch fills to 64 bits it is stored to the
-// buffer as two little-endian 32-bit words -- the same eight bytes the other
-// implementations store as one qword -- and the bits that spilled past 64
-// carry over into the next scratch.
+// The write scratch is a SINGLE 32-bit staging word, the width JavaScript
+// bitwise arithmetic is native in; BigInt never touches this hot path. Each
+// merge is one shift-or, one add and one branch. When the word fills to 32
+// bits it is stored little-endian and the bits that spilled past 32 become
+// the next word's low bits. Consecutive little-endian 32-bit words are the
+// same byte stream the other implementations write as 64-bit qwords.
 //
 // The writer ships in two variants, selected once at module load on NODE_ENV
 // (see mode.js): CheckedBitWriter -- the development default -- validates
@@ -55,11 +55,11 @@ const SMALL_COPY_BYTES = 64;
 /**
  * Bitpacks unsigned integer values to a buffer.
  *
- * The buffer size must be a multiple of 8 bytes, because the writer stores
- * scratch words to memory 8 bytes at a time. Bytes past the end of the
- * written data are only ever written as zeros: the flushed scratch beyond
- * the bit index is zero, so trailing bits are zero by construction, as the
- * standard obliges writers to guarantee.
+ * The buffer size must be a multiple of 8 bytes: the final flush spans the
+ * enclosing 8-byte word, so bytes past the end of the written data are only
+ * ever written as zeros. The flushed staging word beyond the bit index is
+ * zero, so trailing bits are zero by construction, as the standard obliges
+ * writers to guarantee.
  *
  * IMPORTANT: When you have finished writing, call flushBits(), otherwise the
  * last word of data will not get flushed to memory.
@@ -72,12 +72,11 @@ const SMALL_COPY_BYTES = 64;
 class CheckedBitWriter {
   #data; // Uint8Array
   #view; // DataView over the same range
-  #scratchLo; // low 32 bits of the 64-bit scratch (uint32)
-  #scratchHi; // high 32 bits of the 64-bit scratch (uint32)
-  #scratchBits; // number of valid bits in scratch, in [0,63]
+  #scratch; // the 32-bit staging word (uint32)
+  #scratchBits; // number of valid bits in the staging word, in [0,31]
   #numBits; // buffer capacity in bits
   #bitsWritten; // bits written so far
-  #wordIndex; // next 8-byte word flushes to data[wordIndex*8]
+  #wordIndex; // next 4-byte word flushes to data[wordIndex*4]
 
   /**
    * Creates a bit writer that fills the given buffer with bitpacked data.
@@ -109,8 +108,7 @@ class CheckedBitWriter {
       this.#data = buffer;
       this.#view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
     }
-    this.#scratchLo = 0;
-    this.#scratchHi = 0;
+    this.#scratch = 0;
     this.#scratchBits = 0;
     this.#numBits = buffer.length * 8;
     this.#bitsWritten = 0;
@@ -145,37 +143,28 @@ class CheckedBitWriter {
     // mask to the bit count: bits of value above the count are ignored
     value = bits === 32 ? value >>> 0 : (value & (((1 << bits) >>> 0) - 1)) >>> 0;
 
-    // merge into the two-lane scratch at the current bit position. JavaScript
-    // shifts are mod 32, so every shift below is kept in [0,31] by the guards.
+    // merge into the single 32-bit staging word at the current bit position.
+    // The invariant is that the word's bits at and above scratchBits are
+    // zero: `value << s` contributes bits [s, min(s + bits, 32)) -- a
+    // JavaScript shift drops the rest -- and the flush recovers the dropped
+    // high bits as the next word's low bits. s stays in [0,31], so no shift
+    // here is ever the mod-32 no-op a wider accumulator would need guards for.
     const s = this.#scratchBits;
-    if (s < 32) {
-      this.#scratchLo = (this.#scratchLo | (value << s)) >>> 0;
-      if (s > 0) {
-        // the part of value that crosses the 32-bit lane boundary
-        this.#scratchHi = (this.#scratchHi | (value >>> (32 - s))) >>> 0;
-      }
-    } else {
-      // the part that crosses the 64-bit boundary is discarded by the 32-bit
-      // shift here and recovered from value after the flush below
-      this.#scratchHi = (this.#scratchHi | (value << (s - 32))) >>> 0;
-    }
+    this.#scratch = (this.#scratch | (value << s)) >>> 0;
 
     const newScratchBits = s + bits;
 
-    if (newScratchBits >= 64) {
-      // the scratch is full: store it as two little-endian 32-bit words, the
-      // same eight bytes the other implementations store as one qword
-      const base = this.#wordIndex * 8;
-      this.#view.setUint32(base, this.#scratchLo, true);
-      this.#view.setUint32(base + 4, this.#scratchHi, true);
+    if (newScratchBits >= 32) {
+      // the staging word is full: store it as one little-endian 32-bit word,
+      // consecutive words are the byte stream a 64-bit qword store makes
+      this.#view.setUint32(this.#wordIndex * 4, this.#scratch, true);
       this.#wordIndex++;
-      // recover the bits that spilled past 64. newScratchBits >= 64 with
-      // bits <= 32 implies s >= 32, so the shift is in [1,32]; at exactly 32
-      // nothing spilled (a JavaScript shift of 32 would be a shift of 0).
-      const shift = 64 - s;
-      this.#scratchLo = shift >= 32 ? 0 : value >>> shift;
-      this.#scratchHi = 0;
-      this.#scratchBits = newScratchBits - 64;
+      // the bits that spilled past 32 become the next word's low bits.
+      // spill === 0 is the one case where the recovery shift would be 32 --
+      // a no-op in JavaScript, not zero -- so it is taken as a literal zero.
+      const spill = newScratchBits - 32;
+      this.#scratch = spill === 0 ? 0 : value >>> (bits - spill);
+      this.#scratchBits = spill;
     } else {
       this.#scratchBits = newScratchBits;
     }
@@ -209,37 +198,28 @@ class CheckedBitWriter {
     // mask to the bit count: bits of value above the count are ignored
     value = bits === 32 ? value >>> 0 : (value & (((1 << bits) >>> 0) - 1)) >>> 0;
 
-    // merge into the two-lane scratch at the current bit position. JavaScript
-    // shifts are mod 32, so every shift below is kept in [0,31] by the guards.
+    // merge into the single 32-bit staging word at the current bit position.
+    // The invariant is that the word's bits at and above scratchBits are
+    // zero: `value << s` contributes bits [s, min(s + bits, 32)) -- a
+    // JavaScript shift drops the rest -- and the flush recovers the dropped
+    // high bits as the next word's low bits. s stays in [0,31], so no shift
+    // here is ever the mod-32 no-op a wider accumulator would need guards for.
     const s = this.#scratchBits;
-    if (s < 32) {
-      this.#scratchLo = (this.#scratchLo | (value << s)) >>> 0;
-      if (s > 0) {
-        // the part of value that crosses the 32-bit lane boundary
-        this.#scratchHi = (this.#scratchHi | (value >>> (32 - s))) >>> 0;
-      }
-    } else {
-      // the part that crosses the 64-bit boundary is discarded by the 32-bit
-      // shift here and recovered from value after the flush below
-      this.#scratchHi = (this.#scratchHi | (value << (s - 32))) >>> 0;
-    }
+    this.#scratch = (this.#scratch | (value << s)) >>> 0;
 
     const newScratchBits = s + bits;
 
-    if (newScratchBits >= 64) {
-      // the scratch is full: store it as two little-endian 32-bit words, the
-      // same eight bytes the other implementations store as one qword
-      const base = this.#wordIndex * 8;
-      this.#view.setUint32(base, this.#scratchLo, true);
-      this.#view.setUint32(base + 4, this.#scratchHi, true);
+    if (newScratchBits >= 32) {
+      // the staging word is full: store it as one little-endian 32-bit word,
+      // consecutive words are the byte stream a 64-bit qword store makes
+      this.#view.setUint32(this.#wordIndex * 4, this.#scratch, true);
       this.#wordIndex++;
-      // recover the bits that spilled past 64. newScratchBits >= 64 with
-      // bits <= 32 implies s >= 32, so the shift is in [1,32]; at exactly 32
-      // nothing spilled (a JavaScript shift of 32 would be a shift of 0).
-      const shift = 64 - s;
-      this.#scratchLo = shift >= 32 ? 0 : value >>> shift;
-      this.#scratchHi = 0;
-      this.#scratchBits = newScratchBits - 64;
+      // the bits that spilled past 32 become the next word's low bits.
+      // spill === 0 is the one case where the recovery shift would be 32 --
+      // a no-op in JavaScript, not zero -- so it is taken as a literal zero.
+      const spill = newScratchBits - 32;
+      this.#scratch = spill === 0 ? 0 : value >>> (bits - spill);
+      this.#scratchBits = spill;
     } else {
       this.#scratchBits = newScratchBits;
     }
@@ -266,7 +246,7 @@ class CheckedBitWriter {
    * and violating them throws, like every writer contract in this class.
    *
    * Faster than writing each byte via writeBits(value, 8): single bytes go
-   * through the scratch only until the write cursor reaches a 64-bit word
+   * through the scratch only until the write cursor reaches a 32-bit word
    * boundary -- where the scratch is empty by the writer's invariant -- then
    * whole words bulk copy directly into the buffer, and the final partial
    * word of bytes goes through the scratch again. The wire is identical to
@@ -287,7 +267,7 @@ class CheckedBitWriter {
 
     // head: single bytes through the scratch until the cursor reaches a word
     // boundary, or the data runs out first
-    let headBytes = (8 - ((this.#bitsWritten % 64) / 8)) % 8;
+    let headBytes = (4 - ((this.#bitsWritten % 32) / 8)) % 4;
     if (headBytes > bytes) {
       headBytes = bytes;
     }
@@ -299,29 +279,29 @@ class CheckedBitWriter {
     }
 
     // at the word boundary the scratch is empty (scratchBits tracks
-    // bitsWritten % 64, and the write that filled bit 64 flushed it with a
+    // bitsWritten % 32, and the write that filled bit 32 flushed it with a
     // zero spill): whole words bulk copy straight into the buffer. At
     // packet-sized counts a manual byte loop beats subarray-plus-set --
     // the subarray view allocation dominates the copy -- while large
     // counts keep the bulk set, which scales.
-    const numWords = Math.floor((bytes - headBytes) / 8);
+    const numWords = Math.floor((bytes - headBytes) / 4);
     if (numWords > 0) {
-      const wordBytes = numWords * 8;
+      const wordBytes = numWords * 4;
       if (wordBytes <= SMALL_COPY_BYTES) {
         const dst = this.#data;
-        const dstBase = this.#wordIndex * 8;
+        const dstBase = this.#wordIndex * 4;
         for (let i = 0; i < wordBytes; i++) {
           dst[dstBase + i] = data[headBytes + i];
         }
       } else {
-        this.#data.set(data.subarray(headBytes, headBytes + wordBytes), this.#wordIndex * 8);
+        this.#data.set(data.subarray(headBytes, headBytes + wordBytes), this.#wordIndex * 4);
       }
-      this.#bitsWritten += numWords * 64;
+      this.#bitsWritten += numWords * 32;
       this.#wordIndex += numWords;
     }
 
     // tail: the remaining bytes, fewer than 8, through the scratch
-    const tailStart = headBytes + numWords * 8;
+    const tailStart = headBytes + numWords * 4;
     for (let i = tailStart; i < bytes; i++) {
       this.writeBits(data[i], 8);
     }
@@ -338,13 +318,24 @@ class CheckedBitWriter {
    */
   flushBits() {
     if (this.#scratchBits !== 0) {
-      const base = this.#wordIndex * 8;
-      this.#view.setUint32(base, this.#scratchLo, true);
-      this.#view.setUint32(base + 4, this.#scratchHi, true);
-      this.#scratchLo = 0;
-      this.#scratchHi = 0;
+      // one 32-bit word carries every remaining bit (scratchBits <= 31)
+      this.#view.setUint32(this.#wordIndex * 4, this.#scratch, true);
+      this.#scratch = 0;
       this.#scratchBits = 0;
       this.#wordIndex++;
+    }
+    // The cursor is now at word ceil(bitsWritten / 32) whether or not there
+    // was a partial word to store -- a write that ends exactly on a 32-bit
+    // boundary has ALREADY stored its word and left scratchBits at 0. So the
+    // pairing store belongs outside that branch: an odd word index means the
+    // second half of the enclosing 8-byte span has never been written, and
+    // zeroing it here is what keeps "bytes past the end of the written data
+    // are only ever written as zeros" true for every bit count. The store is
+    // in bounds because the buffer's length is a multiple of 8, and it does
+    // not advance the cursor, so calling flushBits again is a no-op rather
+    // than a walk off the end.
+    if ((this.#wordIndex & 1) !== 0) {
+      this.#view.setUint32(this.#wordIndex * 4, 0, true);
     }
   }
 
@@ -422,12 +413,11 @@ class CheckedBitWriter {
 class ProductionBitWriter {
   #data; // Uint8Array
   #view; // DataView over the same range
-  #scratchLo; // low 32 bits of the 64-bit scratch (uint32)
-  #scratchHi; // high 32 bits of the 64-bit scratch (uint32)
-  #scratchBits; // number of valid bits in scratch, in [0,63]
+  #scratch; // the 32-bit staging word (uint32)
+  #scratchBits; // number of valid bits in the staging word, in [0,31]
   #numBits; // buffer capacity in bits
   #bitsWritten; // bits written so far
-  #wordIndex; // next 8-byte word flushes to data[wordIndex*8]
+  #wordIndex; // next 4-byte word flushes to data[wordIndex*4]
 
   /**
    * Creates a bit writer that fills the given buffer with bitpacked data.
@@ -448,8 +438,7 @@ class ProductionBitWriter {
       this.#data = buffer;
       this.#view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
     }
-    this.#scratchLo = 0;
-    this.#scratchHi = 0;
+    this.#scratch = 0;
     this.#scratchBits = 0;
     this.#numBits = buffer.length * 8;
     this.#bitsWritten = 0;
@@ -469,37 +458,28 @@ class ProductionBitWriter {
     // mask to the bit count: bits of value above the count are ignored
     value = bits === 32 ? value >>> 0 : (value & (((1 << bits) >>> 0) - 1)) >>> 0;
 
-    // merge into the two-lane scratch at the current bit position. JavaScript
-    // shifts are mod 32, so every shift below is kept in [0,31] by the guards.
+    // merge into the single 32-bit staging word at the current bit position.
+    // The invariant is that the word's bits at and above scratchBits are
+    // zero: `value << s` contributes bits [s, min(s + bits, 32)) -- a
+    // JavaScript shift drops the rest -- and the flush recovers the dropped
+    // high bits as the next word's low bits. s stays in [0,31], so no shift
+    // here is ever the mod-32 no-op a wider accumulator would need guards for.
     const s = this.#scratchBits;
-    if (s < 32) {
-      this.#scratchLo = (this.#scratchLo | (value << s)) >>> 0;
-      if (s > 0) {
-        // the part of value that crosses the 32-bit lane boundary
-        this.#scratchHi = (this.#scratchHi | (value >>> (32 - s))) >>> 0;
-      }
-    } else {
-      // the part that crosses the 64-bit boundary is discarded by the 32-bit
-      // shift here and recovered from value after the flush below
-      this.#scratchHi = (this.#scratchHi | (value << (s - 32))) >>> 0;
-    }
+    this.#scratch = (this.#scratch | (value << s)) >>> 0;
 
     const newScratchBits = s + bits;
 
-    if (newScratchBits >= 64) {
-      // the scratch is full: store it as two little-endian 32-bit words, the
-      // same eight bytes the other implementations store as one qword
-      const base = this.#wordIndex * 8;
-      this.#view.setUint32(base, this.#scratchLo, true);
-      this.#view.setUint32(base + 4, this.#scratchHi, true);
+    if (newScratchBits >= 32) {
+      // the staging word is full: store it as one little-endian 32-bit word,
+      // consecutive words are the byte stream a 64-bit qword store makes
+      this.#view.setUint32(this.#wordIndex * 4, this.#scratch, true);
       this.#wordIndex++;
-      // recover the bits that spilled past 64. newScratchBits >= 64 with
-      // bits <= 32 implies s >= 32, so the shift is in [1,32]; at exactly 32
-      // nothing spilled (a JavaScript shift of 32 would be a shift of 0).
-      const shift = 64 - s;
-      this.#scratchLo = shift >= 32 ? 0 : value >>> shift;
-      this.#scratchHi = 0;
-      this.#scratchBits = newScratchBits - 64;
+      // the bits that spilled past 32 become the next word's low bits.
+      // spill === 0 is the one case where the recovery shift would be 32 --
+      // a no-op in JavaScript, not zero -- so it is taken as a literal zero.
+      const spill = newScratchBits - 32;
+      this.#scratch = spill === 0 ? 0 : value >>> (bits - spill);
+      this.#scratchBits = spill;
     } else {
       this.#scratchBits = newScratchBits;
     }
@@ -526,37 +506,28 @@ class ProductionBitWriter {
     // mask to the bit count: bits of value above the count are ignored
     value = bits === 32 ? value >>> 0 : (value & (((1 << bits) >>> 0) - 1)) >>> 0;
 
-    // merge into the two-lane scratch at the current bit position. JavaScript
-    // shifts are mod 32, so every shift below is kept in [0,31] by the guards.
+    // merge into the single 32-bit staging word at the current bit position.
+    // The invariant is that the word's bits at and above scratchBits are
+    // zero: `value << s` contributes bits [s, min(s + bits, 32)) -- a
+    // JavaScript shift drops the rest -- and the flush recovers the dropped
+    // high bits as the next word's low bits. s stays in [0,31], so no shift
+    // here is ever the mod-32 no-op a wider accumulator would need guards for.
     const s = this.#scratchBits;
-    if (s < 32) {
-      this.#scratchLo = (this.#scratchLo | (value << s)) >>> 0;
-      if (s > 0) {
-        // the part of value that crosses the 32-bit lane boundary
-        this.#scratchHi = (this.#scratchHi | (value >>> (32 - s))) >>> 0;
-      }
-    } else {
-      // the part that crosses the 64-bit boundary is discarded by the 32-bit
-      // shift here and recovered from value after the flush below
-      this.#scratchHi = (this.#scratchHi | (value << (s - 32))) >>> 0;
-    }
+    this.#scratch = (this.#scratch | (value << s)) >>> 0;
 
     const newScratchBits = s + bits;
 
-    if (newScratchBits >= 64) {
-      // the scratch is full: store it as two little-endian 32-bit words, the
-      // same eight bytes the other implementations store as one qword
-      const base = this.#wordIndex * 8;
-      this.#view.setUint32(base, this.#scratchLo, true);
-      this.#view.setUint32(base + 4, this.#scratchHi, true);
+    if (newScratchBits >= 32) {
+      // the staging word is full: store it as one little-endian 32-bit word,
+      // consecutive words are the byte stream a 64-bit qword store makes
+      this.#view.setUint32(this.#wordIndex * 4, this.#scratch, true);
       this.#wordIndex++;
-      // recover the bits that spilled past 64. newScratchBits >= 64 with
-      // bits <= 32 implies s >= 32, so the shift is in [1,32]; at exactly 32
-      // nothing spilled (a JavaScript shift of 32 would be a shift of 0).
-      const shift = 64 - s;
-      this.#scratchLo = shift >= 32 ? 0 : value >>> shift;
-      this.#scratchHi = 0;
-      this.#scratchBits = newScratchBits - 64;
+      // the bits that spilled past 32 become the next word's low bits.
+      // spill === 0 is the one case where the recovery shift would be 32 --
+      // a no-op in JavaScript, not zero -- so it is taken as a literal zero.
+      const spill = newScratchBits - 32;
+      this.#scratch = spill === 0 ? 0 : value >>> (bits - spill);
+      this.#scratchBits = spill;
     } else {
       this.#scratchBits = newScratchBits;
     }
@@ -590,7 +561,7 @@ class ProductionBitWriter {
 
     // head: single bytes through the scratch until the cursor reaches a word
     // boundary, or the data runs out first
-    let headBytes = (8 - ((this.#bitsWritten % 64) / 8)) % 8;
+    let headBytes = (4 - ((this.#bitsWritten % 32) / 8)) % 4;
     if (headBytes > bytes) {
       headBytes = bytes;
     }
@@ -602,29 +573,29 @@ class ProductionBitWriter {
     }
 
     // at the word boundary the scratch is empty (scratchBits tracks
-    // bitsWritten % 64, and the write that filled bit 64 flushed it with a
+    // bitsWritten % 32, and the write that filled bit 32 flushed it with a
     // zero spill): whole words bulk copy straight into the buffer. At
     // packet-sized counts a manual byte loop beats subarray-plus-set --
     // the subarray view allocation dominates the copy -- while large
     // counts keep the bulk set, which scales.
-    const numWords = Math.floor((bytes - headBytes) / 8);
+    const numWords = Math.floor((bytes - headBytes) / 4);
     if (numWords > 0) {
-      const wordBytes = numWords * 8;
+      const wordBytes = numWords * 4;
       if (wordBytes <= SMALL_COPY_BYTES) {
         const dst = this.#data;
-        const dstBase = this.#wordIndex * 8;
+        const dstBase = this.#wordIndex * 4;
         for (let i = 0; i < wordBytes; i++) {
           dst[dstBase + i] = data[headBytes + i];
         }
       } else {
-        this.#data.set(data.subarray(headBytes, headBytes + wordBytes), this.#wordIndex * 8);
+        this.#data.set(data.subarray(headBytes, headBytes + wordBytes), this.#wordIndex * 4);
       }
-      this.#bitsWritten += numWords * 64;
+      this.#bitsWritten += numWords * 32;
       this.#wordIndex += numWords;
     }
 
     // tail: the remaining bytes, fewer than 8, through the scratch
-    const tailStart = headBytes + numWords * 8;
+    const tailStart = headBytes + numWords * 4;
     for (let i = tailStart; i < bytes; i++) {
       this.writeBits(data[i], 8);
     }
@@ -641,13 +612,24 @@ class ProductionBitWriter {
    */
   flushBits() {
     if (this.#scratchBits !== 0) {
-      const base = this.#wordIndex * 8;
-      this.#view.setUint32(base, this.#scratchLo, true);
-      this.#view.setUint32(base + 4, this.#scratchHi, true);
-      this.#scratchLo = 0;
-      this.#scratchHi = 0;
+      // one 32-bit word carries every remaining bit (scratchBits <= 31)
+      this.#view.setUint32(this.#wordIndex * 4, this.#scratch, true);
+      this.#scratch = 0;
       this.#scratchBits = 0;
       this.#wordIndex++;
+    }
+    // The cursor is now at word ceil(bitsWritten / 32) whether or not there
+    // was a partial word to store -- a write that ends exactly on a 32-bit
+    // boundary has ALREADY stored its word and left scratchBits at 0. So the
+    // pairing store belongs outside that branch: an odd word index means the
+    // second half of the enclosing 8-byte span has never been written, and
+    // zeroing it here is what keeps "bytes past the end of the written data
+    // are only ever written as zeros" true for every bit count. The store is
+    // in bounds because the buffer's length is a multiple of 8, and it does
+    // not advance the cursor, so calling flushBits again is a no-op rather
+    // than a walk off the end.
+    if ((this.#wordIndex & 1) !== 0) {
+      this.#view.setUint32(this.#wordIndex * 4, 0, true);
     }
   }
 
