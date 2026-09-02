@@ -22,18 +22,29 @@ import assert from 'node:assert/strict';
 import { BitWriter, WriteStream, ReadStream, MeasureStream, SerializeError } from '../../src/index.js';
 import { PRODUCTION } from '../../src/mode.js';
 
+// Under the dev sweep the spine is silent: a green run prints test names and
+// nothing else, and a skip notice is narration (the family's convention, as
+// serialize.h states it). SERIALIZE_TEST_VERBOSE=1 restores the skips with
+// their reason; under NODE_ENV=production the spine simply runs.
+const VERBOSE = process.env.SERIALIZE_TEST_VERBOSE === '1';
 const gate = { skip: PRODUCTION ? false : 'production-mode leg: run with NODE_ENV=production' };
+
+function spine(name, options, fn) {
+  if (PRODUCTION || VERBOSE) {
+    test(name, options, fn);
+  }
+}
 
 function ref(value) {
   return { value };
 }
 
-test('the mode is frozen at load: this leg sees the production variants', gate, () => {
+spine('the mode is frozen at load: this leg sees the production variants', gate, () => {
   assert.equal(PRODUCTION, true);
   assert.equal(process.env.NODE_ENV, 'production');
 });
 
-test('overflow still latches in production: sticky, wire intact, reset clears', gate, () => {
+spine('overflow still latches in production: sticky, wire intact, reset clears', gate, () => {
   const buffer = new Uint8Array(8);
   const stream = new WriteStream(buffer);
 
@@ -66,7 +77,7 @@ test('overflow still latches in production: sticky, wire intact, reset clears', 
   assert.equal(stream.error, SerializeError.None);
 });
 
-test('wide writes are still checked as one total width up front', gate, () => {
+spine('wide writes are still checked as one total width up front', gate, () => {
   const stream = new WriteStream(new Uint8Array(8));
   assert.equal(stream.serializeUint32(ref(7)), true);
   // 128 bits cannot fit the remaining 32: refused up front, NOTHING written
@@ -75,7 +86,7 @@ test('wide writes are still checked as one total width up front', gate, () => {
   assert.equal(stream.bitsProcessed(), 32);
 });
 
-test('an invalid bits count that throws in dev passes through in production', gate, () => {
+spine('an invalid bits count that throws in dev passes through in production', gate, () => {
   // dev: validateBits throws RangeError on every stream in every state
   // (streams.test.js proves it). production: the caller is trusted -- the
   // call passes through, and a following valid write is undisturbed.
@@ -95,7 +106,7 @@ test('an invalid bits count that throws in dev passes through in production', ga
   assert.equal(measure.bitsProcessed(), 0);
 });
 
-test('an out-of-range ranged write that latches in dev passes through in production', gate, () => {
+spine('an out-of-range ranged write that latches in dev passes through in production', gate, () => {
   // dev: serializeInt latches ValueOutOfRange and writes nothing
   // (serialize-int-refusals.test.js proves it). production: the value is
   // the caller's contract -- the masked offset goes out, deterministically
@@ -114,7 +125,7 @@ test('an out-of-range ranged write that latches in dev passes through in product
   assert.equal(out.value, 44);
 });
 
-test('a wrong-typed value that throws in dev passes through in production', gate, () => {
+spine('a wrong-typed value that throws in dev passes through in production', gate, () => {
   // dev: serializeFloat throws TypeError on a non-number. production: the
   // conversion inside the wire arithmetic absorbs it (ToNumber -> NaN) and
   // 32 bits go out.
@@ -124,7 +135,7 @@ test('a wrong-typed value that throws in dev passes through in production', gate
   assert.equal(stream.bitsProcessed(), 32);
 });
 
-test('the wstring well-formedness scan is gone: the writer trusts, the reader refuses', gate, () => {
+spine('the wstring well-formedness scan is gone: the writer trusts, the reader refuses', gate, () => {
   // dev: a lone surrogate latches InvalidString on write -- the checked
   // form of the family's debug assert over the standard's named type case,
   // the O(n) scan no release path carries
@@ -144,7 +155,7 @@ test('the wstring well-formedness scan is gone: the writer trusts, the reader re
   assert.equal(out.value, '');
 });
 
-test('a production measure cannot fail', gate, () => {
+spine('a production measure cannot fail', gate, () => {
   // dev: an out-of-range value latches ValueOutOfRange on the measure too
   // (a message that cannot be written cannot be measured). production: the
   // measure is pure bit arithmetic, the C++ release shape -- it prices the
@@ -156,7 +167,7 @@ test('a production measure cannot fail', gate, () => {
   assert.equal(measure.bitsProcessed(), 4); // bitsRequired(0, 10)
 });
 
-test('the production bitpacker keeps exactly one hard check: tryWriteBits at the buffer end', gate, () => {
+spine('the production bitpacker keeps exactly one hard check: tryWriteBits at the buffer end', gate, () => {
   const writer = new BitWriter(new Uint8Array(8));
 
   // dev: writeBits(value, 0) throws RangeError (bitwriter.test.js proves

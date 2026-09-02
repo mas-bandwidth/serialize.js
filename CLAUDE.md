@@ -24,6 +24,9 @@ STANDARD.md wins.
 - `npm test` = `node --test` (argument-free: Node 22's runner rejects a bare
   directory positional, and the default matcher finds every `*.test.js`).
   That command must be green before every commit. Never push red.
+- A green run prints test names and nothing else, the family's convention.
+  The production spine's skips are silent under the dev sweep;
+  `SERIALIZE_TEST_VERBOSE=1` restores them with their reason.
 
 ## Check model: two variants, selected at module load
 
