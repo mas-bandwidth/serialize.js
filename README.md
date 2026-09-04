@@ -18,6 +18,31 @@ implementations of the serialize family, wire compatible with the
 values produce the same bytes in every one, so a stream written by one reads
 in any other.
 
+## Getting it
+
+serialize.js ships as source today. The implementation is ready and the package
+is not yet published, and the npm name is still to be decided: the bare name
+`serialize` on npm belongs to an unrelated package — a flow-control utility,
+latest 0.1.3 — so it is not ours to take. The `"name": "serialize"` in
+`package.json` is a local placeholder, not a published identity. Choosing the
+scoped name and pushing the package is a separate round.
+
+To use it now, vendor the source. It is pure JavaScript, zero dependencies, no
+build step — `src/` is what runs:
+
+```sh
+git clone https://github.com/mas-bandwidth/serialize.js.git   # or add it as a submodule
+```
+
+then import the entry point by path:
+
+```js
+import { WriteStream, ReadStream, MeasureStream } from './serialize.js/src/index.js';
+```
+
+Node 20 or newer, ESM only. Pin a release tag rather than tracking `main` —
+v1.4.0 is current.
+
 ## The surface
 
 The complete family operation set, on three streams sharing one
