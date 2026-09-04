@@ -11,6 +11,9 @@
 // - the 256-program property sweep: write == read, measure >= write;
 // - the read-side refusal batteries: ruling #8 content refusals and the
 //   error model bind in EVERY mode -- the wire stays a trust boundary;
+// - the shared conformance corpus (test/conformance.test.js): every vector
+//   in conformance/ decodes to its value and its bit count, or is refused,
+//   under this leg exactly as under the dev leg;
 // - the production spine (test/production/): overflow still latches sticky,
 //   and every dev assert is proven ABSENT -- calls that throw or latch in
 //   dev pass through, the caller-trust contract.
@@ -28,6 +31,7 @@ const files = [
   'test/bitreader.test.js',
   'test/bits-required-wide.test.js',
   'test/bits-required.test.js',
+  'test/conformance.test.js',
   'test/golden-wire.test.js',
   'test/measure.test.js',
   'test/property-sweep.test.js',
