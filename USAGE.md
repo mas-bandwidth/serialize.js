@@ -9,8 +9,12 @@ import {
   WriteStream, ReadStream, MeasureStream, SerializeError,
   BitWriter, BitReader,
   bitsRequired, bitsRequired64, bitsRequired128,
-} from 'serialize';
+} from './serialize.js/src/index.js';
 ```
+
+The library is vendored as source and imported by path — see
+[README.md](README.md#getting-it). The specifier becomes a package name once
+the npm package is published; the surface below does not change.
 
 ## One serialize function, three streams
 
