@@ -240,14 +240,16 @@ function randomOp(rng) {
     }
     default: {
       if ((rng.next() & 1) === 1) {
-        const previous = rng.below(0xffffffff); // [0, 2^32-2]: headroom above is never empty
-        const headroom = 0xffffffff - previous;
+        // the int_relative domain is 0 to 2^31 - 1 inclusive; drawing
+        // previous below its top keeps the headroom above non-empty
+        const previous = rng.below(0x7fffffff); // [0, 2^31-2]
+        const headroom = 0x7fffffff - previous;
         let value;
         switch (rng.below(4)) {
           case 0: value = previous + 1; break; // the one bit branch
           case 1: value = previous + 1 + rng.below(Math.min(headroom, 70000)); break; // the ladder
           case 2: value = previous + 1 + rng.below(headroom); break; // anywhere above
-          default: value = 0xffffffff; break; // the absolute branch's far edge
+          default: value = 0x7fffffff; break; // the absolute branch's far edge
         }
         return { label: `intRelative ${previous}`, value, run: (s, h) => s.serializeIntRelative(previous, h) };
       }
