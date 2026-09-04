@@ -226,6 +226,20 @@ function stepFromWords(text, where) {
       return { kind: 'align' };
     case 'float/1':
       return { kind: 'float' };
+    case 'double/1':
+      return { kind: 'double' };
+    case 'uint128/1':
+      return { kind: 'uint128' };
+    case 'int_relative/2':
+      return { kind: 'int_relative', previous: Number(number(1)) };
+    case 'compressed_float/4': {
+      const float = (index) => {
+        const value = Number(words[index]);
+        assert.ok(Number.isFinite(value), `${where}: step '${text}' states a non-finite bound`);
+        return value;
+      };
+      return { kind: 'compressed_float', min: float(1), max: float(2), res: float(3) };
+    }
     case 'bytes/2':
       return { kind: 'bytes', count: Number(number(1)) };
     case 'string/2':
@@ -234,6 +248,9 @@ function stepFromWords(text, where) {
       return { kind: 'wstring', bufferSize: Number(number(1)) };
     case 'int/3':
       return { kind: 'int', min: Number(number(1)), max: Number(number(2)) };
+    case 'int64/3':
+    case 'int128/3':
+      return { kind: words[0], min: number(1), max: number(2) };
     case 'fixed/5':
       return fixedStep(Number(number(1)), Number(number(2)), number(3), number(4));
     default:

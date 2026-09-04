@@ -77,14 +77,19 @@ jobs:
   # what a commit's CI proves. Find the newest tag with:
   #   gh release list --repo mas-bandwidth/serialize --limit 1
   # Bump family-wide, deliberately, in its own commit per repo. SERIALIZE_TAG
-  # below is the ONE place this repository names a version of the reference.
+  # below is the ONE place this repository names a version of the reference, and
+  # ONE pin is the whole point: the wire exchange and the conformance corpus are
+  # held to the same release, so the reference reader driving the corpus is the
+  # reference library the bytes are exchanged with. A release whose corpus this
+  # repository has not vendored fails the diff below rather than passing on a
+  # second, looser pin.
   # (The spec-sync job above deliberately stays on upstream main: drift DETECTION
   # is that job's whole purpose.)
   interop:
     name: interop with the C++ reference
     runs-on: ubuntu-24.04
     env:
-      SERIALIZE_TAG: v1.16.0
+      SERIALIZE_TAG: v1.16.2
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -94,17 +99,13 @@ jobs:
       - name: Check out the C++ reference at the pinned release
         run: git clone --quiet --depth 1 --branch "$SERIALIZE_TAG" https://github.com/mas-bandwidth/serialize.git /tmp/cpp-serialize
 
-      # TWO PINS, TWO SUBJECTS. The wire exchange below is pinned to a RELEASED
-      # tag, because "compatible with C++" must mean the same thing in every
-      # port. The conformance corpus is not on that clock: conformance/ is
-      # vendored from upstream MAIN and the spec-sync job above holds it there,
-      # so the reference reader that drives the corpus is taken from main too.
-      # The corpus and the runner that can drive it are one artifact -- a
-      # release older than the corpus cannot drive vectors whose operations it
-      # has no code for, and STANDARD.md requires that to be red rather than
-      # skipped.
-      - name: Check out the C++ reference at the corpus commit
-        run: git clone --quiet --depth 1 https://github.com/mas-bandwidth/serialize.git /tmp/cpp-corpus
+      # The corpus vendored here must be the one the pinned release carries: the
+      # corpus and the runner that can drive it are one artifact, and a reference
+      # reader older than the corpus cannot drive vectors whose operations it has
+      # no code for. STANDARD.md requires that to be red rather than skipped, so
+      # it is checked here rather than assumed.
+      - name: The vendored corpus is the pinned release's corpus
+        run: diff -ru /tmp/cpp-serialize/conformance conformance
 
       # Asserts stay ON (no -DNDEBUG): they are the C++ half of "API misuse
       # panics", and the degenerate ranges the message carries must pass with the
@@ -114,7 +115,7 @@ jobs:
       - name: Build the C++ halves against the pinned library
         run: |
           c++ -O2 -std=c++17 -Wall -I /tmp/cpp-serialize -o /tmp/cpp_interop interop/interop.cpp
-          c++ -O2 -std=c++17 -Wall -I /tmp/cpp-corpus -o /tmp/cpp_conformance /tmp/cpp-corpus/conformance.cpp
+          c++ -O2 -std=c++17 -Wall -I /tmp/cpp-serialize -o /tmp/cpp_conformance /tmp/cpp-serialize/conformance.cpp
 
       - name: Both halves write byte identical wire data
         run: |
@@ -146,7 +147,8 @@ jobs:
       # vectors are what this step is for: the reference reader and this port's
       # reader are held to the same accepts and the same refusals, from the same
       # vendored files. The standard job above proves those files match upstream,
-      # and the reference reader here is the one built at that same commit.
+      # and the step above proves they are the pinned release's own corpus, which
+      # is what the reference reader here was built from.
       - name: Both halves run the shared conformance corpus
         run: |
           /tmp/cpp_conformance conformance/*.txt
