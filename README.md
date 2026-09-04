@@ -40,8 +40,10 @@ then import the entry point by path:
 import { WriteStream, ReadStream, MeasureStream } from './serialize.js/src/index.js';
 ```
 
-Node 20 or newer, ESM only. Pin a release tag rather than tracking `main` —
-v1.4.0 is current.
+Node 20 or newer, ESM only. Pin a release tag rather than tracking `main`. The
+newest is on the [releases page](https://github.com/mas-bandwidth/serialize.js/releases):
+a release states a format version, and two endpoints interoperate only when they
+carry the same one.
 
 ## The surface
 
