@@ -93,17 +93,26 @@ silent, the C++ implementation breaks the tie. It implements **format
 version 1.1**.
 
 [`conformance/`](conformance) is vendored and diffed the same way: it is
-the family's shared corpus, and `test/conformance.test.js` runs every
-vector in it through this reader on both legs — an accepted vector must
-yield its value and consume its stated bits, a refused vector must refuse.
-Nothing there is regenerated from this port's own codec.
+the family's shared corpus, covering every operation the standard defines.
+`test/conformance.test.js` discovers the directory rather than naming its
+files and runs every vector in it on both legs — an accepted vector must
+yield its value and consume its stated bits, a `writer = canonical` vector
+must re-emit its whole stream byte for byte, a `measure_at_least` vector
+must price at or above its floor, and a refused vector must refuse, leave
+the caller's scalar destination untouched and leave the stream terminal. A
+vector whose operation, parameter or step spelling the runner cannot drive
+fails the run rather than being skipped. Nothing there is regenerated from
+this port's own codec.
 
 [`interop/`](interop) takes it further: the CI `interop` job builds the C++
-reference at a pinned release and runs it head to head with this port. Both
-halves write the same boundary message — every operation the standard
-defines, at its boundary values — and the files must be byte identical;
-each then decodes the other's bytes and re-encodes them exactly; both must
-refuse every truncation of the other's stream; and both run the corpus. The
+reference and runs it head to head with this port. Both halves write the
+same boundary message — every operation the standard defines, at its
+boundary values — and the files must be byte identical; each then decodes
+the other's bytes and re-encodes them exactly; both must refuse every
+truncation of the other's stream; and both run the corpus. The wire
+exchange is pinned to a released tag of the reference, so "compatible with
+C++" means the same thing here as in every other port; the corpus is driven
+by the reference at the commit the corpus itself is vendored from. The
 release candidate in this repository exchanges bytes with the reference on
 every push, so wire compatibility is measured rather than asserted.
 

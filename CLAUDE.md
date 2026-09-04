@@ -17,9 +17,13 @@ STANDARD.md wins.
 conformance corpus, diffed recursively against upstream by the same CI job.
 Never hand-edit a vector and never regenerate one from this port's output —
 a suite that writes its own expectations proves only that the port agrees
-with itself. `test/conformance.test.js` runs every vector through
-`ReadStream` on both legs; a vector file carrying an operation its table
-does not know fails the run rather than being skipped.
+with itself. `test/conformance.test.js` DISCOVERS the directory — it never
+names a file — and runs every vector through `ReadStream` on both legs,
+plus `WriteStream` where the vector states `writer = canonical` and
+`MeasureStream` where it states `measure_at_least`. An empty directory
+fails the run, and so does a vector whose operation, parameter or step
+spelling the runner cannot drive: an operation nobody implemented must be
+red rather than skipped.
 
 ## Platform crystal
 

@@ -221,11 +221,31 @@ test('a wide string that does not fit the write buffer latches Overflow after th
   assert.equal(writer.bitsProcessed(), bitsRequired(0, 15));
 });
 
+test('bufferSize 1 is the degenerate length field: the empty string in zero bits', () => {
+  // STANDARD.md prices the length as serialize_int( length, 0,
+  // buffer_size - 1 ), so bufferSize 1 is the range [0,0]: zero bits, the
+  // empty string, and nothing on the wire at all
+  const writer = new WriteStream(new Uint8Array(8));
+  assert.equal(writer.serializeWideString({ value: '' }, 1), true);
+  assert.equal(writer.bitsProcessed(), 0);
+
+  const reader = new ReadStream(new Uint8Array(0));
+  const ref = {};
+  assert.equal(reader.serializeWideString(ref, 1), true);
+  assert.equal(ref.value, '');
+  assert.equal(reader.bitsProcessed(), 0);
+
+  // one code unit has nowhere to go: the length field cannot carry a 1
+  const refused = new WriteStream(new Uint8Array(8));
+  assert.equal(refused.serializeWideString({ value: 'a' }, 1), false);
+  assert.equal(refused.error, SerializeError.ValueOutOfRange);
+});
+
 test('caller misuse throws on every stream: bufferSize and value type', () => {
   const writer = new WriteStream(new Uint8Array(8));
   const reader = new ReadStream(Uint8Array.from([0x00]));
   const measure = new MeasureStream();
-  for (const bad of [1, 0, -1, 1.5, 2 ** 31, '8', null]) {
+  for (const bad of [0, -1, 1.5, 2 ** 31, '8', null]) {
     assert.throws(() => writer.serializeWideString({ value: 'x' }, bad), RangeError, `write bufferSize ${bad}`);
     assert.throws(() => reader.serializeWideString({}, bad), RangeError, `read bufferSize ${bad}`);
     assert.throws(() => measure.serializeWideString({ value: 'x' }, bad), RangeError, `measure bufferSize ${bad}`);

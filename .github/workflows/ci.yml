@@ -94,6 +94,18 @@ jobs:
       - name: Check out the C++ reference at the pinned release
         run: git clone --quiet --depth 1 --branch "$SERIALIZE_TAG" https://github.com/mas-bandwidth/serialize.git /tmp/cpp-serialize
 
+      # TWO PINS, TWO SUBJECTS. The wire exchange below is pinned to a RELEASED
+      # tag, because "compatible with C++" must mean the same thing in every
+      # port. The conformance corpus is not on that clock: conformance/ is
+      # vendored from upstream MAIN and the spec-sync job above holds it there,
+      # so the reference reader that drives the corpus is taken from main too.
+      # The corpus and the runner that can drive it are one artifact -- a
+      # release older than the corpus cannot drive vectors whose operations it
+      # has no code for, and STANDARD.md requires that to be red rather than
+      # skipped.
+      - name: Check out the C++ reference at the corpus commit
+        run: git clone --quiet --depth 1 https://github.com/mas-bandwidth/serialize.git /tmp/cpp-corpus
+
       # Asserts stay ON (no -DNDEBUG): they are the C++ half of "API misuse
       # panics", and the degenerate ranges the message carries must pass with the
       # library's own checks enabled rather than around them. No -ffp-contract=off
@@ -102,7 +114,7 @@ jobs:
       - name: Build the C++ halves against the pinned library
         run: |
           c++ -O2 -std=c++17 -Wall -I /tmp/cpp-serialize -o /tmp/cpp_interop interop/interop.cpp
-          c++ -O2 -std=c++17 -Wall -I /tmp/cpp-serialize -o /tmp/cpp_conformance /tmp/cpp-serialize/conformance.cpp
+          c++ -O2 -std=c++17 -Wall -I /tmp/cpp-corpus -o /tmp/cpp_conformance /tmp/cpp-corpus/conformance.cpp
 
       - name: Both halves write byte identical wire data
         run: |
@@ -131,10 +143,10 @@ jobs:
           /tmp/cpp_interop refuse /tmp/js.bin
 
       # The corpus is the family's one conformance instrument, and its refusal
-      # vectors are what this step is for: the pinned reference reader and this
-      # port's reader are held to the same accepts and the same refusals, from the
-      # same vendored files. The standard job above proves those files match
-      # upstream.
+      # vectors are what this step is for: the reference reader and this port's
+      # reader are held to the same accepts and the same refusals, from the same
+      # vendored files. The standard job above proves those files match upstream,
+      # and the reference reader here is the one built at that same commit.
       - name: Both halves run the shared conformance corpus
         run: |
           /tmp/cpp_conformance conformance/*.txt
