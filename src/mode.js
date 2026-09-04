@@ -1,11 +1,12 @@
 // Load-time mode selection: the JavaScript #ifdef.
 //
 // The family's check model (STANDARD.md, "Writes assume trusted data") makes
-// the caller responsible for well-formed writes: writer contracts are debug
-// asserts in the languages that can strip them, and release builds carry
-// zero caller validation on the write path. JavaScript has no compiler to
-// strip code, so the same fork happens at MODULE LOAD instead: NODE_ENV is
-// read exactly once, here, and each write-path class is exported in one of
+// the caller responsible for well-formed writes: writer contracts are
+// assertions in a CHECKED BUILD -- the standard's term for a build with
+// assertions enabled -- and release builds carry zero caller validation on
+// the write path. JavaScript has no compiler to strip code, so the same fork
+// happens at MODULE LOAD instead: NODE_ENV is read exactly once, here, and
+// each write-path class is exported in one of
 // two variants -- CHECKED (caller validation on: misuse throws, invalid
 // values latch -- the development default) or PRODUCTION (caller-trust:
 // per-operation caller validation removed; only the checks the family keeps

@@ -6,7 +6,7 @@
 // the offset encoding -- must latch ValueOutOfRange (reject, never clamp),
 // while raw_range itself decodes to raw_max. Write-side range violations
 // are latched errors in every build (the checked runtime's form of the
-// reference's debug asserts), and an invalid declaration -- the JS
+// family's checked-build assertions), and an invalid declaration -- the JS
 // translation of the reference's static asserts -- throws as caller misuse
 // on every stream in every state.
 

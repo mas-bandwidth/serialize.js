@@ -35,19 +35,23 @@ jobs:
       - name: Test (production write path)
         run: node production-tests.mjs
 
-  # STANDARD.md here is a VERBATIM VENDORED COPY of the specification in
+  # STANDARD.md and conformance/ here are VERBATIM VENDORED COPIES of the
+  # specification and the shared conformance corpus in
   # mas-bandwidth/serialize. A duplicated normative document is the same
-  # failure as a duplicated constant, except it drifts silently. This job
-  # mirrors serialize.c's: fetch upstream, diff, and record the upstream
-  # SHA so a green run says what it was green against.
+  # failure as a duplicated constant, except it drifts silently, and the
+  # corpus is normative the same way: STANDARD.md makes it the family's one
+  # conformance instrument. This job mirrors serialize.c's: fetch upstream,
+  # diff, and record the upstream SHA so a green run says what it was green
+  # against. The corpus diff is recursive, so a vector file added upstream
+  # and not vendored here is red, not silent coverage loss.
   standard:
-    name: STANDARD.md matches upstream
+    name: STANDARD.md and conformance/ match upstream
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Compare against mas-bandwidth/serialize
         run: |
-          curl -fsSL -o /tmp/upstream-STANDARD.md \
-            https://raw.githubusercontent.com/mas-bandwidth/serialize/main/STANDARD.md
-          echo "upstream: mas-bandwidth/serialize@$(git ls-remote https://github.com/mas-bandwidth/serialize.git refs/heads/main | cut -f1)"
-          diff -u /tmp/upstream-STANDARD.md STANDARD.md
+          git clone --quiet --depth 1 https://github.com/mas-bandwidth/serialize.git /tmp/upstream
+          echo "upstream: mas-bandwidth/serialize@$(git -C /tmp/upstream rev-parse HEAD)"
+          diff -u /tmp/upstream/STANDARD.md STANDARD.md
+          diff -ru /tmp/upstream/conformance conformance

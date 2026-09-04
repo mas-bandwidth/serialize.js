@@ -5,15 +5,18 @@
 
 If this library helps you, please support it: **[Become a supporter](https://www.patreon.com/MasBandwidth/membership)**
 
-A bitpacking serialization library for **JavaScript**. The sixth
-implementation of the serialize family, wire compatible with the
+A bitpacking serialization library for **JavaScript**. One of the nine
+implementations of the serialize family, wire compatible with the
 [C++](https://github.com/mas-bandwidth/serialize),
 [C](https://github.com/mas-bandwidth/serialize.c),
+[C#](https://github.com/mas-bandwidth/serialize.cs),
+[Dart](https://github.com/mas-bandwidth/serialize.dart),
+[Elixir](https://github.com/mas-bandwidth/serialize.elixir),
 [Go](https://github.com/mas-bandwidth/serialize.go),
-[C#](https://github.com/mas-bandwidth/serialize.cs) and
+[Java](https://github.com/mas-bandwidth/serialize.java) and
 [Rust](https://github.com/mas-bandwidth/serialize.rs) libraries — the same
-values produce the same bytes in all six, so a stream written by one reads in
-any other.
+values produce the same bytes in every one, so a stream written by one reads
+in any other.
 
 ## The surface
 
@@ -41,8 +44,9 @@ measures. [USAGE.md](USAGE.md) teaches every operation by example.
   UTF-16 code unit, no alignment anywhere — the one place the wide path
   deliberately differs from its narrow counterpart).
 - **The relative integer**: `serializeIntRelative` — the flag ladder for
-  strictly increasing uint32 sequences, one bit for a difference of 1, no
-  wrapping.
+  strictly increasing sequences over the non-negative int32 domain, 0 to
+  2^31 - 1, one bit for a difference of 1, no wrapping. Every tier's
+  reconstruction is checked against the domain on read.
 - **Fixed point**: `serializeFixed` — Q formats at 8/16/32/64/128-bit
   storage, the raw scaled integer as an exact ranged offset, byte
   identical to `serializeInt64` wherever storage fits 64 bits, zero bits
@@ -59,9 +63,18 @@ ESM, zero dependencies, no build step, Node 20+.
 
 [STANDARD.md](STANDARD.md) — vendored verbatim from
 [mas-bandwidth/serialize](https://github.com/mas-bandwidth/serialize) and
-diffed against upstream by CI on every push — is the law, and the C++
-reference's serialize.h is canonical. The suite pins the family's golden
-vectors byte for byte, all minted from the reference's own output: the
+diffed against upstream by CI on every push — is the authority; where it is
+silent, the C++ implementation breaks the tie. It implements **format
+version 1.1**.
+
+[`conformance/`](conformance) is vendored and diffed the same way: it is
+the family's shared corpus, and `test/conformance.test.js` runs every
+vector in it through this reader on both legs — an accepted vector must
+yield its value and consume its stated bits, a refused vector must refuse.
+Nothing there is regenerated from this port's own codec.
+
+Around the corpus the suite pins the family's golden vectors byte for
+byte, all minted from the C++ implementation's own output: the
 112-byte golden wire message covering every operation class in one
 stream, the discriminating compressed-float vectors (bit patterns, not
 tolerances), the string and wide-string pins, every relative-integer
@@ -81,12 +94,14 @@ hostile input never throws.
 
 The check model is the family standard's (STANDARD.md, "Writes assume
 trusted data"): **the caller is responsible for well-formed writes**, with
-writer contracts asserted in debug and compiled to zero in release.
+writer contracts asserted in a **checked build** — the standard's term
+for a build with assertions enabled — and compiled to zero in release.
 JavaScript has no compiler to strip code, so the write path forks **once,
 at module load**, on `NODE_ENV` — the JS `#ifdef`:
 
 - **Checked** (the default): caller misuse throws, invalid values latch —
-  the always-on form of the family's debug asserts. Develop and test here.
+  the always-on form of the family's checked-build assertions. Develop and
+  test here.
 - **Production** (`NODE_ENV=production`): the caller is trusted, exactly as
   a C/C++ release build trusts it. Per-operation caller validation is gone
   from `WriteStream`, `MeasureStream` and `BitWriter`; every write keeps

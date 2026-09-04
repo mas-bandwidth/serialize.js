@@ -2,15 +2,16 @@
 // (STANDARD.md "int_relative"). A difference of 1 costs a single bit, the
 // payload tiers cost 5/8/13/18/23 bits, and past the last tier six zero
 // flags carry current itself as 32 raw bits -- 38 bits, the ABSOLUTE form.
-// The semantics are pinned: strictly increasing in the unsigned 32-bit
-// domain, no wrapping (STANDARD.md, adopted 2026-08-15). Every pinned byte
-// vector below was produced by the canonical serialize.h reference itself
+// The semantics are pinned: strictly increasing, no wrapping (STANDARD.md,
+// adopted 2026-08-15), over the domain 0 to 2^31 - 1 inclusive
+// (STANDARD.md, adopted 2026-09-04). Every pinned byte vector below was
+// produced by the C++ implementation itself
 // (serialize_int_relative_internal over a WriteStream, uint32_t
 // instantiation) -- the same probe method as the compressed-float pins.
 //
-// Wrap-mirror cases follow serialize.h's own read-side reconstruction test
-// (test_int_relative_validation): a payload tier reconstructs
-// previous + difference mod 2^32, exactly the reference's uint32 arithmetic.
+// Reconstruction happens in a width that cannot wrap and is then checked
+// against the domain in EVERY tier; the shared corpus
+// (test/conformance.test.js) carries the accept/refuse twins for each one.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -64,11 +65,13 @@ test('tier edges: each boundary difference lands in its own tier', () => {
   roundTrip(100, 70015, 38); // 69915: the first difference past the ladder
 });
 
-test('the unsigned 32-bit domain is exact to its edges', () => {
+test('the domain is exact to its edges', () => {
+  // the domain is 0 to 2^31 - 1 inclusive (STANDARD.md, adopted
+  // 2026-09-04): both endpoints legal, nothing above
   roundTrip(0, 1, 1); // the smallest legal pair
-  roundTrip(0, 0xffffffff, 38); // the full span: absolute tier
-  roundTrip(0xfffffffe, 0xffffffff, 1); // difference 1 at the very top
-  roundTrip(0x7fffffff, 0x80000000, 1); // across the int32 sign boundary
+  roundTrip(0, 0x7fffffff, 38); // the full span: absolute tier
+  roundTrip(0x7ffffffe, 0x7fffffff, 1); // difference 1 at the domain top
+  roundTrip(0x7fffffff - 69914, 0x7fffffff, 23); // the last bounded tier, at the top
   roundTrip(0, 69915, 38); // gap wider than every payload tier
 });
 
@@ -83,7 +86,9 @@ test('pinned wire bytes: every tier, from the reference implementation', () => {
     [100, 1000, 18, [0x70, 0x4d, 0x00]],
     [100, 10000, 23, [0xa0, 0x64, 0x05]],
     [100, 100000, 38, [0x00, 0xa8, 0x61, 0x00, 0x00]],
-    [0, 0xffffffff, 38, [0xc0, 0xff, 0xff, 0xff, 0x3f]],
+    // the domain maximum through the absolute tier: the same bytes as the
+    // corpus's absolute-accept-domain-maximum vector
+    [0, 0x7fffffff, 38, [0xc0, 0xff, 0xff, 0xff, 0x1f]],
   ];
   for (const [previous, current, bits, bytes] of vectors) {
     const writer = new WriteStream(new Uint8Array(16));
@@ -116,26 +121,41 @@ test('the reference validation round trip: 100 to 100000 takes the absolute tier
   assert.equal(ref.value, 100000);
 });
 
-test('payload tiers reconstruct in the unsigned domain and wrap mod 2^32', () => {
-  // serialize.h's own read-side reconstruction test, at the uint32 top:
-  // write differences 1 and 5 from previous 10, read them back against
-  // previous 0xFFFFFFFF -- the reference wraps, and so does this port.
-  // (A conforming writer can never produce these pairs; the wrap is the
-  // reader mirroring the reference's uint32 arithmetic, not a wrapping
-  // sequence semantic -- STANDARD.md pins that none exists.)
-  const cases = [
-    [1, 0], // 0xFFFFFFFF + 1 wraps to 0
-    [5, 4], // 0xFFFFFFFF + 5 wraps to 4
+test('every tier reconstructs without wrapping and refuses past the domain', () => {
+  // The domain rule (STANDARD.md, adopted 2026-09-04): reconstruct in a
+  // width that cannot wrap, then refuse anything above 2^31 - 1. Read each
+  // tier's bytes against a previous whose reconstruction leaves the
+  // domain, and against the previous one step inside it -- the same bytes,
+  // so a reader that judged the bytes rather than the reconstructed value
+  // would pass one and fail the other.
+  const tiers = [
+    // [difference, consumed]
+    [1, 1],
+    [2, 5],
+    [7, 8],
+    [24, 13],
+    [281, 18],
+    [4378, 23],
   ];
-  for (const [difference, expected] of cases) {
+  for (const [difference, consumed] of tiers) {
     const writer = new WriteStream(new Uint8Array(8));
     assert.equal(writer.serializeIntRelative(10, { value: 10 + difference }), true);
     writer.flush();
+    const bytes = writer.data();
 
-    const reader = new ReadStream(writer.data());
-    const ref = {};
-    assert.equal(reader.serializeIntRelative(0xffffffff, ref), true);
-    assert.equal(ref.value, expected, `wrap of difference ${difference}`);
+    // one past the domain top: refused, and the destination untouched
+    const past = new ReadStream(bytes);
+    const refused = { value: -1 };
+    assert.equal(past.serializeIntRelative(0x7fffffff, refused), false, `refuse difference ${difference}`);
+    assert.equal(refused.value, -1, 'a refused read leaves the ref unmodified');
+
+    // the accept twin, sharing those bytes: the reconstruction lands
+    // exactly on the domain top
+    const inside = new ReadStream(bytes);
+    const accepted = {};
+    assert.equal(inside.serializeIntRelative(0x7fffffff - difference, accepted), true);
+    assert.equal(accepted.value, 0x7fffffff, `difference ${difference} at the domain top`);
+    assert.equal(inside.bitsProcessed(), consumed);
   }
 });
 

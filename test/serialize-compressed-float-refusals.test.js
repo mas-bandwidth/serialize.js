@@ -52,7 +52,7 @@ test('headroom smuggling refused, boundary neighbor accepted: [0,10] at 0.01', (
 });
 
 test('a non-finite write refused, the float32 edge accepted', () => {
-  // the checked runtime's always-on form of the family's debug assert:
+  // the checked runtime's always-on form of the family's checked-build assertion:
   // NaN and the infinities latch ValueOutOfRange and put nothing on the wire
   for (const value of [NaN, Infinity, -Infinity]) {
     const writer = new WriteStream(new Uint8Array(8));
@@ -162,7 +162,7 @@ test('an invalid declaration is caller misuse and throws on every stream', () =>
     assert.throws(() => stream.serializeCompressedFloat(ref, 1, 1 + 1e-8, 0.01), RangeError);
     // delta = max - min overflows float32 to infinity: non-conforming
     // (STANDARD.md, adopted 2026-08-15) -- the checked runtime throws
-    // where the debug-build family asserts
+    // where the family's checked builds assert
     assert.throws(() => stream.serializeCompressedFloat(ref, -3e38, 3e38, 1), RangeError);
     // values = delta / resolution overflows float32 to infinity
     assert.throws(() => stream.serializeCompressedFloat(ref, 0, 3e38, 1e-38), RangeError);

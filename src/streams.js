@@ -22,13 +22,13 @@
 //
 // The write side ships in two variants, selected once at module load on
 // NODE_ENV (see mode.js) -- the JS translation of the family's
-// debug-assert/release fork (STANDARD.md, "Writes assume trusted data"):
+// checked-build/release fork (STANDARD.md, "Writes assume trusted data"):
 //
 // - CHECKED (the development default): caller misuse throws -- an invalid
 //   bits count is a bug in the calling code, not data, and throws
 //   RangeError on every stream in every state -- and an invalid value
 //   latches ValueOutOfRange / InvalidString as the always-on form of the
-//   family's debug assert.
+//   family's checked-build assertion.
 // - PRODUCTION (NODE_ENV=production): the caller is trusted, exactly as a
 //   C/C++ release build trusts it. Per-op caller validation is gone; what
 //   remains on every write is the sticky-error gate and the buffer-end
@@ -56,7 +56,13 @@ const BUFFER_SIZE_MESSAGE = 'bufferSize must be an integer in [2,2^31-1]';
 const FLOAT_PARAMS_MESSAGE = 'min must be less than max and resolution must be positive, as float32 values';
 const FLOAT_DECLARATION_MESSAGE = 'compressed float declaration is not finite in float32: delta and delta / resolution must not overflow';
 
-const PREVIOUS_RANGE_MESSAGE = 'previous must be an integer in [0,2^32-1]';
+const PREVIOUS_RANGE_MESSAGE = 'previous must be an integer in [0,2^31-1]';
+
+// The int_relative domain: the non-negative int32 range, 0 to 2^31 - 1
+// inclusive (STANDARD.md "int_relative"). Both previous and current live in
+// it, on the write side as the caller's contract and on the read side as a
+// refusal rule the reader applies to EVERY tier's reconstruction.
+const RELATIVE_DOMAIN_MAX = 0x7fffffff;
 const FIXED_FORMAT_MESSAGE = 'integerBits must be an integer of at least 1, fractionBits an integer of at least 0, and their sum must be a storage width of 8, 16, 32, 64 or 128';
 const FIXED_NARROW_BOUNDS_MESSAGE = 'min and max must be integer Numbers in whole units for storage of 32 bits or fewer';
 const FIXED_CAPACITY_MESSAGE = 'min and max in whole units must fit the Q format';
@@ -136,7 +142,7 @@ export const SerializeError = Object.freeze({
    * holding a lone surrogate -- ill-formed UTF-16, the writer's contract
    * violated -- which the wide path cannot launder the way the narrow
    * encoder's U+FFFD replacement does, so the checked runtime latches it,
-   * its always-on form of the family's debug assert.
+   * its always-on form of the family's checked-build assertion.
    */
   InvalidString: 'invalid_string',
 });
@@ -183,13 +189,16 @@ function validateBufferSize(bufferSize) {
 
 /**
  * Validates the shared caller contract of serializeIntRelative: previous
- * lives in the unsigned 32-bit domain, the operation's pinned semantics
- * (STANDARD.md "int_relative": positive only, up to the uint32 maximum
- * only). It is the caller's own sequence state, never wire data, so
- * violating it is caller misuse and throws on every stream in every state.
+ * lives in the operation's domain, the non-negative int32 range 0 to
+ * 2^31 - 1 (STANDARD.md "int_relative"). The domain belongs to the
+ * operation, not to the caller's storage type, so a previous of 2^31 is
+ * caller error exactly as a negative one is. previous is the caller's own
+ * sequence state, never wire data, so violating it is caller misuse and
+ * throws on every stream in every state -- the checked runtime's always-on
+ * form of the family's checked-build assertion on previous.
  */
 function validatePrevious(previous) {
-  if (!Number.isInteger(previous) || previous < 0 || previous > 0xffffffff) {
+  if (!Number.isInteger(previous) || previous < 0 || previous > RELATIVE_DOMAIN_MAX) {
     throw new RangeError(PREVIOUS_RANGE_MESSAGE);
   }
 }
@@ -326,7 +335,7 @@ const floatParams = { min: 0, delta: 0, maxIntegerValue: 0, bits: 0 };
  * less than max and resolution positive (the !(<) forms also reject NaN),
  * and a declaration whose delta or values overflows float32 to infinity is
  * non-conforming (STANDARD.md, adopted 2026-08-15) -- the checked runtime
- * throws where the debug-build family asserts.
+ * throws where the family's checked builds assert.
  */
 function compressedFloatParams(min, max, resolution) {
   if (typeof min !== 'number' || typeof max !== 'number' || typeof resolution !== 'number') {
@@ -464,8 +473,8 @@ function fixedPointParams(integerBits, fractionBits, min, max) {
  *
  * This is the CHECKED variant (the development default): caller misuse
  * throws and invalid values latch, as the always-on form of the family's
- * debug asserts. ProductionWriteStream below is the same wire with the
- * caller validation removed; mode.js selects which one exports as
+ * checked-build assertions. ProductionWriteStream below is the same wire
+ * with the caller validation removed; mode.js selects which one exports as
  * WriteStream.
  */
 class CheckedWriteStream {
@@ -748,17 +757,19 @@ class CheckedWriteStream {
    * sequence numbers -- costs a single bit, small differences cost a few
    * flag bits plus a small ranged payload, and past the last tier six zero
    * flags are followed by current itself as 32 raw bits (the absolute form,
-   * not the difference). The semantics are pinned: strictly increasing in
-   * the unsigned 32-bit domain, NO wrapping (STANDARD.md, adopted
-   * 2026-08-15) -- both values are integers in [0,2^32-1] and ref.value
-   * must exceed previous. previous is the caller's own sequence state, part
-   * of the contract on both sides, so an invalid previous is caller misuse
-   * and throws; a ref.value that is not an integer in the uint32 domain
-   * above previous latches SerializeError.ValueOutOfRange and writes
-   * nothing -- the checked runtime's always-on form of the reference's
-   * ordering assert. The tier is checked against the buffer as one total
-   * width up front, so a refused write puts NOTHING on the wire.
-   * @param {number} previous the previous value, an integer in [0,2^32-1].
+   * not the difference). The semantics are pinned: strictly increasing over
+   * the domain, NO wrapping (STANDARD.md, adopted 2026-08-15). The domain
+   * is the non-negative int32 range, 0 to 2^31 - 1 inclusive (STANDARD.md,
+   * adopted 2026-09-04): both previous and ref.value lie in it, and
+   * ref.value must exceed previous. previous is the caller's own sequence
+   * state, part of the contract on both sides, so an invalid previous is
+   * caller misuse and throws; a ref.value that is not an integer in the
+   * domain above previous latches SerializeError.ValueOutOfRange and writes
+   * nothing -- the checked runtime's always-on form of the family's
+   * checked-build ordering assertion. The tier is checked against the
+   * buffer as one total width up front, so a refused write puts NOTHING on
+   * the wire.
+   * @param {number} previous the previous value, an integer in [0,2^31-1].
    * @param {{value: number}} ref holder of the current value to write.
    * @returns {boolean} true on success.
    */
@@ -771,7 +782,7 @@ class CheckedWriteStream {
     if (typeof current !== 'number') {
       throw new TypeError(VALUE_TYPE_MESSAGE);
     }
-    if (!Number.isInteger(current) || current <= previous || current > 0xffffffff) {
+    if (!Number.isInteger(current) || current <= previous || current > RELATIVE_DOMAIN_MAX) {
       return this.#fail(SerializeError.ValueOutOfRange);
     }
     // each tier is emitted as ONE fused group -- the zero flags in the low
@@ -1033,8 +1044,9 @@ class CheckedWriteStream {
    * (STANDARD.md pins vectors that discriminate). Writing a non-finite
    * value (NaN, +/-Infinity in float32) is non-conforming and latches
    * SerializeError.ValueOutOfRange -- the checked runtime's always-on form
-   * of the family's debug assert (ruled 2026-08-15). Lossy by construction:
-   * the reader recovers the nearest quantum, not the original value.
+   * of the family's checked-build assertion (ruled 2026-08-15). Lossy by
+   * construction: the reader recovers the nearest quantum, not the original
+   * value.
    * @param {{value: number}} ref holder of the value to write.
    * @param {number} min the minimum value, a float32.
    * @param {number} max the maximum value, a float32, greater than min.
@@ -1121,9 +1133,9 @@ class CheckedWriteStream {
    * terminator is transmitted. ref.value must be a string and bufferSize an
    * integer in [2,2^31-1] (misuse throws). A string of bufferSize or more
    * UTF-8 bytes latches SerializeError.ValueOutOfRange and writes nothing:
-   * the checked runtime's always-on form of the family's debug assert. A
-   * lone surrogate in the string -- ill-formed UTF-16, the writer's
-   * contract violated -- encodes as U+FFFD, the contract surfacing
+   * the checked runtime's always-on form of the family's checked-build
+   * assertion. A lone surrogate in the string -- ill-formed UTF-16, the
+   * writer's contract violated -- encodes as U+FFFD, the contract surfacing
    * JavaScript's way; the wire always carries well-formed UTF-8. Returns
    * false and latches Overflow if the string does not fit the buffer.
    * @param {{value: string}} ref holder of the string to write.
@@ -1167,11 +1179,11 @@ class CheckedWriteStream {
    * -- ill-formed UTF-16, the writer's contract violated, which the wide
    * wire cannot carry because conforming readers refuse it -- latches
    * SerializeError.InvalidString and writes nothing: the checked runtime's
-   * always-on form of the family's debug assert. A string of bufferSize or
-   * more units latches SerializeError.ValueOutOfRange and writes nothing.
-   * Returns false and latches Overflow if the groups would pass the end of
-   * the buffer, checked against the total width up front so a refused
-   * payload writes nothing after the length.
+   * always-on form of the family's checked-build assertion. A string of
+   * bufferSize or more units latches SerializeError.ValueOutOfRange and
+   * writes nothing. Returns false and latches Overflow if the groups would
+   * pass the end of the buffer, checked against the total width up front so
+   * a refused payload writes nothing after the length.
    * @param {{value: string}} ref holder of the string to write.
    * @param {number} bufferSize the agreed buffer size in wide characters;
    *   the string must fit in bufferSize - 1 UTF-16 code units.
@@ -1599,10 +1611,10 @@ class ProductionWriteStream {
 
   /**
    * serializeIntRelative, trusted: previous and ref.value integers in the
-   * uint32 domain with ref.value strictly above previous are the caller's
-   * contract. The fused tier groups are exactly the checked variant's;
-   * each tail's single overflow check latches.
-   * @param {number} previous the previous value, an integer in [0,2^32-1].
+   * int_relative domain, 0 to 2^31 - 1, with ref.value strictly above
+   * previous are the caller's contract. The fused tier groups are exactly
+   * the checked variant's; each tail's single overflow check latches.
+   * @param {number} previous the previous value, an integer in [0,2^31-1].
    * @param {{value: number}} ref holder of the current value to write.
    * @returns {boolean} true on success.
    */
@@ -1961,6 +1973,24 @@ class ProductionWriteStream {
  * range checking on every read, so maliciously crafted packets fail with
  * latched errors instead of throwing or smuggling out-of-range values.
  *
+ * There is ONE read stream: the mode fork in mode.js is a write-path fork,
+ * and every refusal rule STANDARD.md states binds here in every build mode.
+ *
+ * NON-MUTATION. A refused read leaves its destination exactly as it was
+ * (STANDARD.md, "Reader Obligations"): every scalar read checks before it
+ * assigns, so a caller that trusts the destination over the return code
+ * still never sees a value the stream did not carry. The rule reaches
+ * scalar destinations only: serializeBytes fills a caller-owned buffer,
+ * whose contents after a refusal are unspecified, and a composite read may
+ * leave members written by the primitive reads that succeeded before the
+ * one that failed.
+ *
+ * TERMINAL FAILURE. The stream takes the LATCH shape (STANDARD.md,
+ * "Failure is terminal"): the first refusal stores its error, every later
+ * read on the stream refuses without consuming bits or writing a
+ * destination, and the first error is the one that stands. The latch is
+ * cleared only by re-initialization, which here is reset().
+ *
  * The reader prices its windows INSIDE the buffer (see BitReader): any data
  * length is supported and no slack past the data is required -- the caller's
  * allocation contract is empty. STANDARD.md treats this as an implementation
@@ -2235,23 +2265,32 @@ export class ReadStream {
 
   /**
    * Reads a value written relative to previous with the int_relative flag
-   * ladder (STANDARD.md "int_relative"), mirroring serialize.h's reader
-   * step for step: flag bits are read one at a time until a tier claims the
-   * value; a payload tier reconstructs current = previous + difference in
-   * the unsigned 32-bit domain, wrapping mod 2^32 exactly as the reference
-   * does; the final tier -- six zero flags -- carries current itself as 32
-   * raw bits, the absolute form with no ordering guarantee of its own, so
-   * the reader checks current > previous and latches
-   * SerializeError.ValueOutOfRange otherwise (STANDARD.md: strictly
-   * increasing, no wrapping -- adopted 2026-08-15). A payload offset above
-   * its tier's range -- a difference smuggled into the bit headroom --
-   * latches ValueOutOfRange, and a read past the end of the data latches
-   * Overflow. previous must be an integer in [0,2^32-1], identical to the
-   * writer's: it is the caller's own sequence state, so violating that is
-   * caller misuse and throws. On success ref.value is an integer in
-   * [0,2^32-1]; on failure it is left unmodified, and hostile data never
+   * ladder (STANDARD.md "int_relative"): flag bits are read one at a time
+   * until a tier claims the value; a payload tier reconstructs
+   * current = previous + difference, and the final tier -- six zero flags
+   * -- carries current itself as 32 raw bits, the absolute form.
+   *
+   * EVERY tier's reconstruction is checked (STANDARD.md, adopted
+   * 2026-09-04). The reconstruction happens in a width that cannot wrap --
+   * a Number, exact to 2^53, so previous + 69914 and previous + 2^32 are
+   * both exact -- and the result is refused unless it lies in the domain,
+   * the non-negative int32 range 0 to 2^31 - 1, AND is strictly greater
+   * than previous. That binds in the one-bit tier, in each of the five
+   * bounded tiers, and in the absolute tier, whose 32 raw bits are read
+   * UNSIGNED: a group with the top bit set is above the domain and is
+   * refused, on every platform, rather than reappearing as a negative
+   * sequence number. Outside the domain or not increasing latches
+   * SerializeError.ValueOutOfRange.
+   *
+   * A payload offset above its tier's range -- a difference smuggled into
+   * the bit headroom -- latches ValueOutOfRange, and a read past the end of
+   * the data latches Overflow. previous must be an integer in [0,2^31-1],
+   * identical to the writer's: it is the caller's own sequence state, so
+   * violating that is caller misuse and throws. On success ref.value is an
+   * integer in [0,2^31-1] above previous; on failure it is left unmodified
+   * and the failure is terminal for the stream, and hostile data never
    * throws.
-   * @param {number} previous the previous value, an integer in [0,2^32-1].
+   * @param {number} previous the previous value, an integer in [0,2^31-1].
    * @param {{value: number}} ref holder the current value is assigned to.
    * @returns {boolean} true on success.
    */
@@ -2265,32 +2304,40 @@ export class ReadStream {
         return this.#fail(SerializeError.Overflow);
       }
       if (this.#reader.readBits(1) === 1) {
-        if (tier === 0) {
-          // a difference of exactly 1: no payload
-          ref.value = (previous + 1) >>> 0;
-          return true;
+        // a difference of exactly 1 carries no payload; the bounded tiers
+        // carry an offset below their base
+        let difference = 1;
+        if (tier !== 0) {
+          const bits = RELATIVE_TIER_BITS[tier];
+          if (this.#reader.wouldReadPastEnd(bits)) {
+            return this.#fail(SerializeError.Overflow);
+          }
+          const offset = this.#reader.readBits(bits);
+          if (offset > RELATIVE_TIER_RANGE[tier]) {
+            return this.#fail(SerializeError.ValueOutOfRange);
+          }
+          difference = RELATIVE_TIER_BASE[tier] + offset;
         }
-        const bits = RELATIVE_TIER_BITS[tier];
-        if (this.#reader.wouldReadPastEnd(bits)) {
-          return this.#fail(SerializeError.Overflow);
-        }
-        const offset = this.#reader.readBits(bits);
-        if (offset > RELATIVE_TIER_RANGE[tier]) {
+        // previous is in the domain and difference is at most 69914, so the
+        // sum is exact in a Number: no wrap to hide an out-of-domain value
+        const current = previous + difference;
+        if (current > RELATIVE_DOMAIN_MAX) {
           return this.#fail(SerializeError.ValueOutOfRange);
         }
-        // reconstruct in the unsigned domain: previous + difference wraps
-        // mod 2^32, exactly the reference's uint32 arithmetic
-        ref.value = (previous + RELATIVE_TIER_BASE[tier] + offset) >>> 0;
+        ref.value = current;
         return true;
       }
     }
     if (this.#reader.wouldReadPastEnd(32)) {
       return this.#fail(SerializeError.Overflow);
     }
+    // readBits returns the group UNSIGNED, so the top bit reads as 2^31 and
+    // the domain check below refuses it rather than a signed reading
+    // turning it into a negative sequence number
     const current = this.#reader.readBits(32);
-    if (current <= previous) {
-      // the absolute form carries no ordering guarantee of its own: the
-      // reader enforces strictly increasing here (STANDARD.md)
+    if (current > RELATIVE_DOMAIN_MAX || current <= previous) {
+      // the absolute form carries no ordering guarantee of its own, so the
+      // reader checks the domain and the ordering here (STANDARD.md)
       return this.#fail(SerializeError.ValueOutOfRange);
     }
     ref.value = current;
@@ -2548,8 +2595,11 @@ export class ReadStream {
    * count is not on the wire; passing an array of the agreed length IS the
    * agreement. A zero-length array still performs and verifies the align.
    * data must be a Uint8Array (misuse throws). Nonzero align padding latches
-   * SerializeError.Align; bytes past the end of the data latch Overflow. On
-   * refusal data is untouched. Hostile data never throws.
+   * SerializeError.Align; bytes past the end of the data latch Overflow.
+   * data is a CALLER-OWNED BUFFER, so its contents after a refusal are
+   * UNSPECIFIED (STANDARD.md, "Reader Obligations"): the non-mutation rule
+   * covers scalar destinations, and a caller must read data only after a
+   * true return. Hostile data never throws.
    * @param {Uint8Array} data destination; its length is the byte count.
    * @returns {boolean} true on success.
    */
@@ -2933,12 +2983,12 @@ class CheckedMeasureStream {
    * flag ladder: exactly the tier the write would emit -- 1, 5, 8, 13, 18
    * or 23 bits for the difference tiers, 38 bits for the absolute final
    * tier (int_relative never aligns, so the measure is exact, not a
-   * bound). Like a write, previous must be an integer in [0,2^32-1]
+   * bound). Like a write, previous must be an integer in [0,2^31-1]
    * (misuse throws, as is a non-number ref.value) and ref.value must be an
-   * integer in the uint32 domain above previous, or the measure latches
+   * integer in the same domain above previous, or the measure latches
    * SerializeError.ValueOutOfRange: a message that cannot be written
    * cannot be measured either.
-   * @param {number} previous the previous value, an integer in [0,2^32-1].
+   * @param {number} previous the previous value, an integer in [0,2^31-1].
    * @param {{value: number}} ref holder of the current value that would be
    * written.
    * @returns {boolean} true on success.
@@ -2952,7 +3002,7 @@ class CheckedMeasureStream {
     if (typeof current !== 'number') {
       throw new TypeError(VALUE_TYPE_MESSAGE);
     }
-    if (!Number.isInteger(current) || current <= previous || current > 0xffffffff) {
+    if (!Number.isInteger(current) || current <= previous || current > RELATIVE_DOMAIN_MAX) {
       return this.#fail(SerializeError.ValueOutOfRange);
     }
     const difference = current - previous;
@@ -3355,7 +3405,7 @@ class ProductionMeasureStream {
    * Measures a value written relative to previous: exactly the tier the
    * write would emit (int_relative never aligns, so the measure is exact).
    * The ordering and domain contracts are the caller's.
-   * @param {number} previous the previous value, an integer in [0,2^32-1].
+   * @param {number} previous the previous value, an integer in [0,2^31-1].
    * @param {{value: number}} ref holder of the current value that would be
    * written.
    * @returns {boolean} true, always.
