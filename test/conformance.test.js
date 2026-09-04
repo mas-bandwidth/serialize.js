@@ -20,7 +20,7 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { ReadStream } from '../src/index.js';
+import { MeasureStream, ReadStream, WriteStream } from '../src/index.js';
 
 const CORPUS_DIR = fileURLToPath(new URL('../conformance/', import.meta.url));
 
@@ -87,6 +87,15 @@ function parseVectors(text, file) {
 // parameters, drives the reader once, and returns what came back: the
 // vector runner owns the accept/refuse and bit-count assertions, so an
 // operation entry never decides whether a vector passed.
+//
+// An entry may also return `reencode`, a function that writes the decoded
+// value back through a write or measure stream with the same parameters.
+// The runner then holds the accepted vector to a byte-for-byte round trip.
+// It is per operation because an accepted vector is not always the minimal
+// encoding of its value: int_relative accepts a tier wider than the one a
+// writer would choose (the reader checks ordering and the domain, not tier
+// minimality), so several of its accept vectors legitimately re-encode to
+// fewer bits, and it declares no reencode.
 const OPERATIONS = {
   int_relative(stream, record) {
     const previous = Number(record.params.get('previous'));
@@ -98,7 +107,12 @@ const OPERATIONS = {
     const min = BigInt(record.params.get('min'));
     const max = BigInt(record.params.get('max'));
     const ref = {};
-    return { accepted: stream.serializeInt128(ref, min, max), ref, decode: BigInt };
+    return {
+      accepted: stream.serializeInt128(ref, min, max),
+      ref,
+      decode: BigInt,
+      reencode: (out, value) => out.serializeInt128({ value }, min, max),
+    };
   },
 };
 
@@ -133,7 +147,7 @@ for (const file of files) {
 
       const stream = new ReadStream(record.bytes);
       const sentinel = Symbol('untouched');
-      const { accepted, ref, decode } = run(stream, record);
+      const { accepted, ref, decode, reencode } = run(stream, record);
 
       if (record.refused) {
         assert.equal(accepted, false, 'must be refused');
@@ -150,6 +164,20 @@ for (const file of files) {
       assert.equal(accepted, true, `must be accepted (error ${stream.error})`);
       assert.equal(ref.value, decode(record.expected), 'decodes its value');
       assert.equal(stream.bitsProcessed(), record.consumed, 'consumes its stated bits');
+
+      if (reencode) {
+        // the value goes back out as the vector's own bytes, and the
+        // measure prices it at the vector's own bit count
+        const writer = new WriteStream(new Uint8Array(64));
+        assert.equal(reencode(writer, ref.value), true, 'writes back');
+        assert.equal(writer.bitsProcessed(), record.consumed, 'writes its stated bits');
+        writer.flush();
+        assert.deepEqual(Array.from(writer.data()), Array.from(record.bytes), 'writes its bytes');
+
+        const measure = new MeasureStream();
+        assert.equal(reencode(measure, ref.value), true, 'measures');
+        assert.equal(measure.bitsProcessed(), record.consumed, 'measures its stated bits');
+      }
     });
   }
 }

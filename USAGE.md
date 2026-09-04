@@ -77,6 +77,17 @@ r.serializeBits({}, 1); // -> false: the error is latched
 r.reset(Uint8Array.of(0x00)); // clears state AND the latched error
 ```
 
+A refused read leaves its destination **exactly as it was**: every scalar
+read checks before it assigns, so a caller that reads `ref.value` after a
+`false` sees what was there before the call, never a value the stream did
+not carry. The exception is `serializeBytes`, which fills a caller-owned
+buffer whose contents after a refusal are unspecified.
+
+And the failure is **terminal**: nothing after a failing read has a defined
+position, so the stream itself refuses everything that follows rather than
+leaving that to your discipline. `reset()` — pointing the stream at a new
+buffer — is what clears it.
+
 The error codes: `Overflow` (past the end of data or buffer),
 `ValueOutOfRange` (a value outside its declared range, on either side of
 the wire), `Align` (nonzero alignment padding — the serialize functions
@@ -94,10 +105,11 @@ see the next section.
 
 ## The two modes: checked and production
 
-The family standard makes the caller responsible for well-formed writes —
-writer contracts are debug asserts in the languages that can compile them
-out. JavaScript can't strip code at compile time, so the write path forks
-**once, at module load**, on `NODE_ENV`:
+The family standard makes the caller responsible for well-formed writes.
+Writer contracts are assertions in a **checked build** — the standard's
+term for a build with assertions enabled — and the languages that can
+compile those out do. JavaScript can't strip code at compile time, so the
+write path forks **once, at module load**, on `NODE_ENV`:
 
 ```sh
 node app.js                       # checked: the development default
@@ -105,8 +117,8 @@ NODE_ENV=production node app.js   # production: the caller-trust release shape
 ```
 
 **Checked** is everything described above: caller misuse throws, invalid
-values latch — the always-on form of the family's debug asserts. Develop
-and test here.
+values latch — the always-on form of the family's checked-build
+assertions. Develop and test here.
 
 **Production** removes the per-operation caller validation from
 `WriteStream`, `MeasureStream` and `BitWriter`, exactly as a C/C++ release
@@ -170,6 +182,14 @@ message format, not the wire.
 w2.serializeInt({ value: -37 }, -100, 100); // 8 bits
 w2.serializeInt({ value: 7 }, 7, 7); // degenerate range: ZERO bits
 ```
+
+`min <= max` is the legal relation for every ranged operation —
+`serializeInt`, `serializeInt64`, `serializeInt128` and `serializeFixed`,
+on every storage width. The **degenerate** `min === max` range is a field
+you may declare, not misuse: the writer emits nothing, the reader consumes
+nothing and takes the value from `min`, and a measure adds zero bits.
+(`serializeCompressedFloat` is not a ranged operation and is the one
+exception: it quantizes across its bounds, so it requires `min < max`.)
 
 Reads refuse values smuggled into the bit headroom of a range (an offset
 above `max - min` latches `ValueOutOfRange` — reject, never clamp).
@@ -253,7 +273,9 @@ quantization ceiling.
 `serializeBytes(data)` aligns to the byte boundary (the alignment is part
 of the format, padding verified on read) and then bulk-copies. The count
 is never transmitted: both sides agree by passing arrays of the same
-length. On read, the array you pass is filled in place.
+length. On read, the array you pass is filled in place — and if the read
+refuses, its contents are unspecified, so check the return before you use
+it.
 
 ```js
 w6.serializeBytes(Uint8Array.of(0xde, 0xad, 0xbe, 0xef));
@@ -305,12 +327,12 @@ NUL groups, and unpaired, misordered or dangling surrogates.
 
 ## The relative integer
 
-`serializeIntRelative(previous, ref)` prices strictly increasing unsigned
-32-bit sequences — sequence numbers, ack chains. `current > previous`
+`serializeIntRelative(previous, ref)` prices strictly increasing sequences
+— sequence numbers, ack chains — over the operation's domain, the
+non-negative int32 range **0 to 2^31 − 1 inclusive**. `current > previous`
 always, no wrapping. A difference of 1 costs a single bit; small
 differences ride payload tiers of 5/8/13/18/23 bits; past the ladder, six
-zero flags carry `current` itself as 32 raw bits, and the reader enforces
-the ordering on that absolute form too.
+zero flags carry `current` itself as 32 raw bits.
 
 ```js
 w9.serializeIntRelative(100, { value: 101 }); // 1 bit
@@ -319,9 +341,18 @@ w9.serializeIntRelative(100, { value: 2100 }); // the mid-ladder tier
 r9.serializeIntRelative(100, seq); // seq.value === 101
 ```
 
-`previous` is caller state, not wire: both sides already know it (a
-non-uint32 `previous` throws as misuse). Writing `current <= previous`
+`previous` is caller state, not wire: both sides already know it, and a
+`previous` outside the domain throws as misuse — the domain belongs to the
+operation, not to your storage type, so `2**31` is caller error exactly as
+`-1` is. Writing a `current` at or below `previous`, or above the domain,
 latches `ValueOutOfRange`.
+
+On read, **every tier's reconstruction is checked**: the reader rebuilds
+`current` in a width that cannot wrap and refuses the read unless the
+result is inside the domain and above `previous`. The absolute tier's 32
+raw bits are read unsigned, so a group with the top bit set is refused
+rather than arriving as a negative sequence number. A refused read leaves
+`ref.value` untouched and is terminal for the stream.
 
 ## Fixed point
 
@@ -396,15 +427,17 @@ supported and no slack past the data is required.
 
 ## Wire compatibility
 
-The same values produce the same bytes in all six family implementations.
-This is not aspiration but pinned fact: the test suite carries the
-family's golden vectors — including serialize.h's 112-byte golden wire
-message covering every operation class, byte for byte — plus the
-discriminating float vectors, the string and wide-string pins, every
-relative-integer tier, and the fixed point shapes at every group count,
-all minted from the canonical C++ reference's own output. If your message
-serializes with the same declarations on both ends, a stream written by
-any family implementation reads in any other.
+The same values produce the same bytes across the family, which implements
+**format version 1.1** of the standard. This is not aspiration but pinned
+fact: the suite runs the family's shared conformance corpus
+(`conformance/`, vendored from mas-bandwidth/serialize) and carries the
+golden vectors — including serialize.h's 112-byte golden wire message
+covering every operation class, byte for byte — plus the discriminating
+float vectors, the string and wide-string pins, every relative-integer
+tier, and the fixed point shapes at every group count, all minted from the
+C++ implementation's own output. If your message serializes with the same
+declarations on both ends, a stream written by any family implementation
+reads in any other.
 
 Two doctrines worth knowing at the edges:
 

@@ -22,13 +22,13 @@
 //
 // The write side ships in two variants, selected once at module load on
 // NODE_ENV (see mode.js) -- the JS translation of the family's
-// debug-assert/release fork (STANDARD.md, "Writes assume trusted data"):
+// checked-build/release fork (STANDARD.md, "Writes assume trusted data"):
 //
 // - CHECKED (the development default): caller misuse throws -- an invalid
 //   bits count is a bug in the calling code, not data, and throws
 //   RangeError on every stream in every state -- and an invalid value
 //   latches ValueOutOfRange / InvalidString as the always-on form of the
-//   family's debug assert.
+//   family's checked-build assertion.
 // - PRODUCTION (NODE_ENV=production): the caller is trusted, exactly as a
 //   C/C++ release build trusts it. Per-op caller validation is gone; what
 //   remains on every write is the sticky-error gate and the buffer-end
@@ -142,7 +142,7 @@ export const SerializeError = Object.freeze({
    * holding a lone surrogate -- ill-formed UTF-16, the writer's contract
    * violated -- which the wide path cannot launder the way the narrow
    * encoder's U+FFFD replacement does, so the checked runtime latches it,
-   * its always-on form of the family's debug assert.
+   * its always-on form of the family's checked-build assertion.
    */
   InvalidString: 'invalid_string',
 });
@@ -335,7 +335,7 @@ const floatParams = { min: 0, delta: 0, maxIntegerValue: 0, bits: 0 };
  * less than max and resolution positive (the !(<) forms also reject NaN),
  * and a declaration whose delta or values overflows float32 to infinity is
  * non-conforming (STANDARD.md, adopted 2026-08-15) -- the checked runtime
- * throws where the debug-build family asserts.
+ * throws where the family's checked builds assert.
  */
 function compressedFloatParams(min, max, resolution) {
   if (typeof min !== 'number' || typeof max !== 'number' || typeof resolution !== 'number') {
@@ -473,8 +473,8 @@ function fixedPointParams(integerBits, fractionBits, min, max) {
  *
  * This is the CHECKED variant (the development default): caller misuse
  * throws and invalid values latch, as the always-on form of the family's
- * debug asserts. ProductionWriteStream below is the same wire with the
- * caller validation removed; mode.js selects which one exports as
+ * checked-build assertions. ProductionWriteStream below is the same wire
+ * with the caller validation removed; mode.js selects which one exports as
  * WriteStream.
  */
 class CheckedWriteStream {
@@ -1044,8 +1044,9 @@ class CheckedWriteStream {
    * (STANDARD.md pins vectors that discriminate). Writing a non-finite
    * value (NaN, +/-Infinity in float32) is non-conforming and latches
    * SerializeError.ValueOutOfRange -- the checked runtime's always-on form
-   * of the family's debug assert (ruled 2026-08-15). Lossy by construction:
-   * the reader recovers the nearest quantum, not the original value.
+   * of the family's checked-build assertion (ruled 2026-08-15). Lossy by
+   * construction: the reader recovers the nearest quantum, not the original
+   * value.
    * @param {{value: number}} ref holder of the value to write.
    * @param {number} min the minimum value, a float32.
    * @param {number} max the maximum value, a float32, greater than min.
@@ -1132,9 +1133,9 @@ class CheckedWriteStream {
    * terminator is transmitted. ref.value must be a string and bufferSize an
    * integer in [2,2^31-1] (misuse throws). A string of bufferSize or more
    * UTF-8 bytes latches SerializeError.ValueOutOfRange and writes nothing:
-   * the checked runtime's always-on form of the family's debug assert. A
-   * lone surrogate in the string -- ill-formed UTF-16, the writer's
-   * contract violated -- encodes as U+FFFD, the contract surfacing
+   * the checked runtime's always-on form of the family's checked-build
+   * assertion. A lone surrogate in the string -- ill-formed UTF-16, the
+   * writer's contract violated -- encodes as U+FFFD, the contract surfacing
    * JavaScript's way; the wire always carries well-formed UTF-8. Returns
    * false and latches Overflow if the string does not fit the buffer.
    * @param {{value: string}} ref holder of the string to write.
@@ -1178,11 +1179,11 @@ class CheckedWriteStream {
    * -- ill-formed UTF-16, the writer's contract violated, which the wide
    * wire cannot carry because conforming readers refuse it -- latches
    * SerializeError.InvalidString and writes nothing: the checked runtime's
-   * always-on form of the family's debug assert. A string of bufferSize or
-   * more units latches SerializeError.ValueOutOfRange and writes nothing.
-   * Returns false and latches Overflow if the groups would pass the end of
-   * the buffer, checked against the total width up front so a refused
-   * payload writes nothing after the length.
+   * always-on form of the family's checked-build assertion. A string of
+   * bufferSize or more units latches SerializeError.ValueOutOfRange and
+   * writes nothing. Returns false and latches Overflow if the groups would
+   * pass the end of the buffer, checked against the total width up front so
+   * a refused payload writes nothing after the length.
    * @param {{value: string}} ref holder of the string to write.
    * @param {number} bufferSize the agreed buffer size in wide characters;
    *   the string must fit in bufferSize - 1 UTF-16 code units.
@@ -1972,6 +1973,24 @@ class ProductionWriteStream {
  * range checking on every read, so maliciously crafted packets fail with
  * latched errors instead of throwing or smuggling out-of-range values.
  *
+ * There is ONE read stream: the mode fork in mode.js is a write-path fork,
+ * and every refusal rule STANDARD.md states binds here in every build mode.
+ *
+ * NON-MUTATION. A refused read leaves its destination exactly as it was
+ * (STANDARD.md, "Reader Obligations"): every scalar read checks before it
+ * assigns, so a caller that trusts the destination over the return code
+ * still never sees a value the stream did not carry. The rule reaches
+ * scalar destinations only: serializeBytes fills a caller-owned buffer,
+ * whose contents after a refusal are unspecified, and a composite read may
+ * leave members written by the primitive reads that succeeded before the
+ * one that failed.
+ *
+ * TERMINAL FAILURE. The stream takes the LATCH shape (STANDARD.md,
+ * "Failure is terminal"): the first refusal stores its error, every later
+ * read on the stream refuses without consuming bits or writing a
+ * destination, and the first error is the one that stands. The latch is
+ * cleared only by re-initialization, which here is reset().
+ *
  * The reader prices its windows INSIDE the buffer (see BitReader): any data
  * length is supported and no slack past the data is required -- the caller's
  * allocation contract is empty. STANDARD.md treats this as an implementation
@@ -2576,8 +2595,11 @@ export class ReadStream {
    * count is not on the wire; passing an array of the agreed length IS the
    * agreement. A zero-length array still performs and verifies the align.
    * data must be a Uint8Array (misuse throws). Nonzero align padding latches
-   * SerializeError.Align; bytes past the end of the data latch Overflow. On
-   * refusal data is untouched. Hostile data never throws.
+   * SerializeError.Align; bytes past the end of the data latch Overflow.
+   * data is a CALLER-OWNED BUFFER, so its contents after a refusal are
+   * UNSPECIFIED (STANDARD.md, "Reader Obligations"): the non-mutation rule
+   * covers scalar destinations, and a caller must read data only after a
+   * true return. Hostile data never throws.
    * @param {Uint8Array} data destination; its length is the byte count.
    * @returns {boolean} true on success.
    */

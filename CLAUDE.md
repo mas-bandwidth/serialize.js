@@ -1,12 +1,9 @@
 # serialize.js — house rules
 
-This repository is the **sixth implementation** of the serialize family
-([C++](https://github.com/mas-bandwidth/serialize),
-[C](https://github.com/mas-bandwidth/serialize.c),
-[Go](https://github.com/mas-bandwidth/serialize.go),
-[C#](https://github.com/mas-bandwidth/serialize.cs),
-[Rust](https://github.com/mas-bandwidth/serialize.rs)), a **hand-port to
-native JavaScript** — no wasm in the product. All six speak ONE wire.
+This repository is one of the **nine implementations** of the serialize
+family (C, C++, C#, Dart, Elixir, Go, Java, JavaScript and Rust), a
+**hand-port to native JavaScript** — no wasm in the product. All nine speak
+ONE wire.
 
 ## The law
 
@@ -15,6 +12,14 @@ specification in mas-bandwidth/serialize. It is normative. Never edit it by
 hand except to resync it byte-for-byte with upstream main; CI diffs it against
 upstream on every push. Where this document and any code comment disagree,
 STANDARD.md wins.
+
+`conformance/` is the same: a verbatim vendored copy of the family's shared
+conformance corpus, diffed recursively against upstream by the same CI job.
+Never hand-edit a vector and never regenerate one from this port's output —
+a suite that writes its own expectations proves only that the port agrees
+with itself. `test/conformance.test.js` runs every vector through
+`ReadStream` on both legs; a vector file carrying an operation its table
+does not know fails the run rather than being skipped.
 
 ## Platform crystal
 
@@ -36,7 +41,8 @@ so `src/mode.js` reads NODE_ENV **once at module load** and the write-path
 classes export in one of two variants — the JS #ifdef:
 
 - **CHECKED** (default): caller misuse throws, invalid write values latch —
-  the always-on form of the family's debug asserts. Develop and test here.
+  the always-on form of the family's checked-build assertions. Develop and
+  test here.
 - **PRODUCTION** (`NODE_ENV=production`): per-op caller validation removed
   from WriteStream/MeasureStream/BitWriter, the C/C++ release shape. Every
   write keeps the sticky-error gate and the buffer-end check (its false
@@ -92,8 +98,12 @@ Document it wherever the read API is described.
 - Commit as Rowan:
   `git -c user.name="Rowan" -c user.email="rowan@mas-bandwidth.com" commit ...`
 - Run `node --test` before every commit.
-- Reference implementations (READ-ONLY): the C++ repo's `serialize.h` is
-  canonical and its tests hold the pinned vectors; serialize.go and
-  serialize.cs show the checked-runtime family shape.
+- `package.json`'s `version` is the one place this repository carries its
+  version, and it must equal the tag the commit ships in: bump it in the
+  release PR, before the tag is cut.
+- Sibling implementations (READ-ONLY): where STANDARD.md is silent the C++
+  repo's `serialize.h` breaks the tie and its tests hold the pinned
+  vectors; serialize.go and serialize.cs show the checked-runtime family
+  shape. A sibling is never a source for anything the standard states.
 - Documentation is present-state only: README is a tight hub, no roadmaps,
   no promises — describe what exists now.

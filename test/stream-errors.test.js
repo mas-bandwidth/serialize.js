@@ -158,6 +158,80 @@ test('hostile input never throws: every 1-byte doctoring of a valid packet', () 
   }
 });
 
+test('every read failure is terminal: the next valid read fails and writes nothing', () => {
+  // STANDARD.md, "Failure is terminal": nothing after a failing operation
+  // has a defined position, and the STREAM enforces that rather than the
+  // caller's discipline. ReadStream takes the latch shape. One case per
+  // refusal class, each one a stream whose remaining bytes would satisfy
+  // the follow-up read if the latch were not there.
+  const cases = [
+    {
+      what: 'before any consumption',
+      expect: SerializeError.Overflow,
+      // empty data: the first read cannot start
+      data: [],
+      fail: (s) => s.serializeBits({}, 1),
+    },
+    {
+      what: 'after partial consumption',
+      expect: SerializeError.Overflow,
+      // one byte read, then a 32-bit field that runs past the end
+      data: [0xab, 0xcd],
+      fail: (s) => s.serializeBits({}, 8) && s.serializeBits({}, 32),
+    },
+    {
+      what: 'on range headroom',
+      expect: SerializeError.ValueOutOfRange,
+      // 0..5 needs 3 bits; the byte carries 7, smuggled into the headroom
+      data: [0x07, 0xab, 0xcd, 0xef],
+      fail: (s) => s.serializeInt({}, 0, 5),
+    },
+    {
+      what: 'on alignment',
+      expect: SerializeError.Align,
+      // a set padding bit after a 1-bit field
+      data: [0x81, 0xab, 0xcd, 0xef],
+      fail: (s) => s.serializeBits({}, 1) && s.serializeAlign(),
+    },
+    {
+      what: 'on a malformed string',
+      expect: SerializeError.InvalidString,
+      // length 2 over bufferSize 8 (3 bits), aligned, then a lone 0xC3
+      // continuation-less lead byte and a stray 0x28: invalid UTF-8
+      data: [0x02, 0xc3, 0x28, 0xab, 0xcd, 0xef],
+      fail: (s) => s.serializeString({}, 8),
+    },
+    {
+      what: 'on int_relative',
+      expect: SerializeError.ValueOutOfRange,
+      // the absolute tier carrying the domain maximum, against a previous
+      // it does not exceed
+      data: [0xc0, 0xff, 0xff, 0xff, 0x1f, 0xab, 0xcd, 0xef],
+      fail: (s) => s.serializeIntRelative(0x7fffffff, {}),
+    },
+  ];
+
+  for (const { what, data, fail, expect } of cases) {
+    const stream = new ReadStream(Uint8Array.from(data));
+    assert.equal(fail(stream), false, `${what}: the read must fail`);
+    assert.equal(stream.error, expect, `${what}: the failure latches its own class`);
+
+    // the follow-up would succeed on a healthy stream over these bytes;
+    // on this one it must fail, leave the ref untouched, and not replace
+    // the first error
+    const ref = { value: 'untouched' };
+    assert.equal(stream.serializeBits(ref, 1), false, `${what}: the next read must fail`);
+    assert.equal(ref.value, 'untouched', `${what}: the next read writes nothing`);
+    assert.equal(stream.error, expect, `${what}: the first error stands`);
+
+    // and the failure persists until re-initialization, which is reset()
+    stream.reset(Uint8Array.from([0x01]));
+    assert.equal(stream.ok, true, `${what}: reset re-initializes`);
+    assert.equal(stream.serializeBits(ref, 1), true);
+    assert.equal(ref.value, 1);
+  }
+});
+
 test('reset clears a latched error on every stream', () => {
   const writer = new WriteStream(new Uint8Array(8));
   writer.serializeBits({ value: 0 }, 32);

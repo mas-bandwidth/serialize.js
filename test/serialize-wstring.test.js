@@ -175,7 +175,7 @@ test('the longest legal string is bufferSize - 1 units; one more refused as Valu
   assert.equal(readWideString(wire, 8), longest);
 
   // one unit too many is the writer's contract violation: the checked
-  // runtime latches where the family's debug build asserts, and nothing
+  // runtime latches where the family's checked build asserts, and nothing
   // lands on the wire
   const refused = new WriteStream(new Uint8Array(512));
   assert.equal(refused.serializeWideString({ value: 'a'.repeat(8) }, 8), false);

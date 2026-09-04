@@ -1,7 +1,7 @@
 {
   "name": "serialize",
-  "version": "1.2.0",
-  "description": "A bitpacking serialization library for JavaScript. Wire compatible with the C++, C, C#, Go and Rust serialize libraries.",
+  "version": "1.4.0",
+  "description": "A bitpacking serialization library for JavaScript. Wire compatible with the C, C++, C#, Dart, Elixir, Go, Java and Rust serialize libraries.",
   "type": "module",
   "license": "BSD-3-Clause",
   "exports": "./src/index.js",

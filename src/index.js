@@ -1,11 +1,13 @@
 // serialize.js — a bitpacking serialization library for JavaScript.
 //
-// The sixth implementation of the serialize family, wire compatible with the
-// C++, C, C#, Go and Rust libraries: the same values produce the same bytes
-// in all six, so a stream written by one reads in any other.
+// One of the nine implementations of the serialize family -- C, C++, C#,
+// Dart, Elixir, Go, Java, JavaScript and Rust -- which all speak one wire:
+// the same values produce the same bytes in every one, so a stream written
+// by one reads in any other.
 //
 // The wire format is defined by STANDARD.md at the repository root, vendored
-// verbatim from mas-bandwidth/serialize. That document is the law.
+// verbatim from mas-bandwidth/serialize. That document is the authority, and
+// this library implements format version 1.1 of it.
 //
 // This module is the package entry point.
 

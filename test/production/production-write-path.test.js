@@ -137,7 +137,7 @@ spine('a wrong-typed value that throws in dev passes through in production', gat
 
 spine('the wstring well-formedness scan is gone: the writer trusts, the reader refuses', gate, () => {
   // dev: a lone surrogate latches InvalidString on write -- the checked
-  // form of the family's debug assert over the standard's named type case,
+  // form of the family's checked-build assertion over the standard's named type case,
   // the O(n) scan no release path carries
   // (serialize-wstring-refusals.test.js proves it). production: the writer
   // trusts the caller and the ill-formed unit reaches the wire -- where a
