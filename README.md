@@ -98,6 +98,15 @@ vector in it through this reader on both legs — an accepted vector must
 yield its value and consume its stated bits, a refused vector must refuse.
 Nothing there is regenerated from this port's own codec.
 
+[`interop/`](interop) takes it further: the CI `interop` job builds the C++
+reference at a pinned release and runs it head to head with this port. Both
+halves write the same boundary message — every operation the standard
+defines, at its boundary values — and the files must be byte identical;
+each then decodes the other's bytes and re-encodes them exactly; both must
+refuse every truncation of the other's stream; and both run the corpus. The
+release candidate in this repository exchanges bytes with the reference on
+every push, so wire compatibility is measured rather than asserted.
+
 Around the corpus the suite pins the family's golden vectors byte for
 byte, all minted from the C++ implementation's own output: the
 112-byte golden wire message covering every operation class in one

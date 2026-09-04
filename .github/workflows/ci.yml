@@ -55,3 +55,87 @@ jobs:
           echo "upstream: mas-bandwidth/serialize@$(git -C /tmp/upstream rev-parse HEAD)"
           diff -u /tmp/upstream/STANDARD.md STANDARD.md
           diff -ru /tmp/upstream/conformance conformance
+
+  # The port exists to be wire compatible; everything else is detail. This job is
+  # the only place that claim is MEASURED against the reference itself: the exact
+  # release candidate in this repository exchanges bytes with the exact C++
+  # library, in both directions, on every push and pull request. Nothing here is a
+  # local one-off, and no expectation is regenerated from this port's own codec.
+  #
+  # What is exchanged: interop/interop.mjs and interop/interop.cpp serialize the
+  # SAME boundary message -- every operation STANDARD.md defines, at the values
+  # where implementations disagree. Both halves write it and the files must be
+  # byte identical; each half then decodes the other's file, checks every value
+  # and re-encodes it byte for byte. Then the hostile half: every proper prefix of
+  # the other's stream is a truncated stream and both must refuse it, and both run
+  # the shared conformance corpus, where the refusal vectors are the point.
+  #
+  # THE FAMILY PIN -- ONE POLICY, ONE VERSION. The C++ checkout is pinned to a
+  # RELEASED tag of mas-bandwidth/serialize, never main, and to the SAME tag in
+  # every port's wire-compat gate, so "compatible with C++" means the same thing
+  # in all of them. Never main, because an upstream merge mid-day must not change
+  # what a commit's CI proves. Find the newest tag with:
+  #   gh release list --repo mas-bandwidth/serialize --limit 1
+  # Bump family-wide, deliberately, in its own commit per repo. SERIALIZE_TAG
+  # below is the ONE place this repository names a version of the reference.
+  # (The spec-sync job above deliberately stays on upstream main: drift DETECTION
+  # is that job's whole purpose.)
+  interop:
+    name: interop with the C++ reference
+    runs-on: ubuntu-24.04
+    env:
+      SERIALIZE_TAG: v1.16.0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check out the C++ reference at the pinned release
+        run: git clone --quiet --depth 1 --branch "$SERIALIZE_TAG" https://github.com/mas-bandwidth/serialize.git /tmp/cpp-serialize
+
+      # Asserts stay ON (no -DNDEBUG): they are the C++ half of "API misuse
+      # panics", and the degenerate ranges the message carries must pass with the
+      # library's own checks enabled rather than around them. No -ffp-contract=off
+      # either: the compressed float arithmetic is pinned in the library's source,
+      # and building with default flags proves that rather than masking it.
+      - name: Build the C++ halves against the pinned library
+        run: |
+          c++ -O2 -std=c++17 -Wall -I /tmp/cpp-serialize -o /tmp/cpp_interop interop/interop.cpp
+          c++ -O2 -std=c++17 -Wall -I /tmp/cpp-serialize -o /tmp/cpp_conformance /tmp/cpp-serialize/conformance.cpp
+
+      - name: Both halves write byte identical wire data
+        run: |
+          /tmp/cpp_interop write /tmp/cpp.bin
+          node interop/interop.mjs write /tmp/js.bin
+          cmp /tmp/cpp.bin /tmp/js.bin
+
+      # The write path forks at module load on NODE_ENV (src/mode.js), so "this
+      # port is wire compatible" is a claim about BOTH variants. The production
+      # variant carries no per-operation caller validation; its bytes must still
+      # be the reference's bytes, or the release shape of this library speaks a
+      # different wire from the one the dev shape is gated on.
+      - name: The production write path writes the same bytes
+        run: |
+          NODE_ENV=production node interop/interop.mjs write /tmp/js-production.bin
+          cmp /tmp/cpp.bin /tmp/js-production.bin
+
+      - name: Each half decodes the other's bytes and re-encodes them exactly
+        run: |
+          node interop/interop.mjs read /tmp/cpp.bin
+          /tmp/cpp_interop read /tmp/js.bin
+
+      - name: Both halves refuse every truncation of the other's stream
+        run: |
+          node interop/interop.mjs refuse /tmp/cpp.bin
+          /tmp/cpp_interop refuse /tmp/js.bin
+
+      # The corpus is the family's one conformance instrument, and its refusal
+      # vectors are what this step is for: the pinned reference reader and this
+      # port's reader are held to the same accepts and the same refusals, from the
+      # same vendored files. The standard job above proves those files match
+      # upstream.
+      - name: Both halves run the shared conformance corpus
+        run: |
+          /tmp/cpp_conformance conformance/*.txt
+          node test/conformance.test.js
