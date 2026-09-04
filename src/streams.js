@@ -51,7 +51,7 @@ const VALUE_TYPE_MESSAGE = 'value must be a number';
 const BIGINT_VALUE_MESSAGE = 'value must be a BigInt';
 const BYTES_TYPE_MESSAGE = 'data must be a Uint8Array';
 const STRING_VALUE_MESSAGE = 'value must be a string';
-const BUFFER_SIZE_MESSAGE = 'bufferSize must be an integer in [2,2^31-1]';
+const BUFFER_SIZE_MESSAGE = 'bufferSize must be an integer in [1,2^31-1]';
 
 const FLOAT_PARAMS_MESSAGE = 'min must be less than max and resolution must be positive, as float32 values';
 const FLOAT_DECLARATION_MESSAGE = 'compressed float declaration is not finite in float32: delta and delta / resolution must not overflow';
@@ -176,13 +176,16 @@ function validateIntRange(min, max) {
 /**
  * Validates the shared caller contract of serializeString: bufferSize is
  * part of the message format -- it prices the length field, so both sides
- * must agree on it -- and must be an integer in [2,2^31-1]: at least one
- * payload byte's worth of range plus the empty string, within the int32
- * domain the length is serialized in. Violating it is caller misuse and
- * throws on every stream in every state.
+ * must agree on it -- and must be an integer in [1,2^31-1], the domain the
+ * length field's range admits: STANDARD.md prices the length as
+ * serialize_int( length, 0, buffer_size - 1 ), so a buffer_size of 1 is the
+ * degenerate range carrying only the empty string in ZERO bits, and a
+ * buffer_size of 0 is the empty range no ranged int can express. The upper
+ * bound is the int32 domain the length is serialized in. Violating it is
+ * caller misuse and throws on every stream in every state.
  */
 function validateBufferSize(bufferSize) {
-  if (!Number.isInteger(bufferSize) || bufferSize < 2 || bufferSize > 0x7fffffff) {
+  if (!Number.isInteger(bufferSize) || bufferSize < 1 || bufferSize > 0x7fffffff) {
     throw new RangeError(BUFFER_SIZE_MESSAGE);
   }
 }
@@ -1131,7 +1134,7 @@ class CheckedWriteStream {
    * it, and the same string against different buffer sizes produces
    * different bytes -- then the payload as serializeBytes, WHICH ALIGNS. No
    * terminator is transmitted. ref.value must be a string and bufferSize an
-   * integer in [2,2^31-1] (misuse throws). A string of bufferSize or more
+   * integer in [1,2^31-1] (misuse throws). A string of bufferSize or more
    * UTF-8 bytes latches SerializeError.ValueOutOfRange and writes nothing:
    * the checked runtime's always-on form of the family's checked-build
    * assertion. A lone surrogate in the string -- ill-formed UTF-16, the
@@ -1175,7 +1178,7 @@ class CheckedWriteStream {
    * anywhere -- deliberately unlike the narrow path, which aligns via
    * serializeBytes (STANDARD.md: an implementation that mirrors the narrow
    * path here produces the wrong bytes). ref.value must be a string and
-   * bufferSize an integer in [2,2^31-1] (misuse throws). A lone surrogate
+   * bufferSize an integer in [1,2^31-1] (misuse throws). A lone surrogate
    * -- ill-formed UTF-16, the writer's contract violated, which the wide
    * wire cannot carry because conforming readers refuse it -- latches
    * SerializeError.InvalidString and writes nothing: the checked runtime's
@@ -2638,7 +2641,7 @@ export class ReadStream {
    * A length that overruns the data latches Overflow; nonzero align padding
    * latches Align. On success ref.value is the decoded string; on any
    * refusal ref.value is left unmodified, and hostile data never throws.
-   * bufferSize must be an integer in [2,2^31-1] (misuse throws).
+   * bufferSize must be an integer in [1,2^31-1] (misuse throws).
    * @param {{value: string}} ref holder the string read is assigned to.
    * @param {number} bufferSize the agreed buffer size; the payload is at
    *   most bufferSize - 1 bytes.
@@ -2702,7 +2705,7 @@ export class ReadStream {
    * latches Overflow, checked against the total width up front. On success
    * ref.value is the decoded string; on any refusal ref.value is left
    * unmodified, and hostile data never throws. bufferSize must be an
-   * integer in [2,2^31-1] (misuse throws).
+   * integer in [1,2^31-1] (misuse throws).
    * @param {{value: string}} ref holder the string read is assigned to.
    * @param {number} bufferSize the agreed buffer size in wide characters;
    *   the payload is at most bufferSize - 1 UTF-16 code units.
@@ -3193,7 +3196,7 @@ class CheckedMeasureStream {
   /**
    * Measures a string: the length prefix (bitsRequired(0, bufferSize - 1)
    * bits), a worst case 7-bit align, and the UTF-8 payload bytes. ref.value
-   * must be a string and bufferSize an integer in [2,2^31-1] (misuse
+   * must be a string and bufferSize an integer in [1,2^31-1] (misuse
    * throws). Like a write, a string of bufferSize or more UTF-8 bytes
    * latches SerializeError.ValueOutOfRange: a message that cannot be
    * written cannot be measured either.
@@ -3229,7 +3232,7 @@ class CheckedMeasureStream {
    * (STANDARD.md, "wstring", adopted 2026-08-15) -- and NO alignment
    * anywhere in the operation, so unlike the narrow path this measure
    * carries no 7-bit align bound: measure and write agree bit for bit.
-   * ref.value must be a string and bufferSize an integer in [2,2^31-1]
+   * ref.value must be a string and bufferSize an integer in [1,2^31-1]
    * (misuse throws). Like a write, a lone surrogate latches
    * SerializeError.InvalidString and a string of bufferSize or more units
    * latches SerializeError.ValueOutOfRange: a message that cannot be
