@@ -3,7 +3,7 @@
 [![CI](https://github.com/mas-bandwidth/serialize.js/actions/workflows/ci.yml/badge.svg)](https://github.com/mas-bandwidth/serialize.js/actions/workflows/ci.yml)
 [![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE)
 
-If this library helps you, please support it: **[Become a supporter](https://www.patreon.com/MasBandwidth/membership)**
+![serialize.js logo with a packed row of colored blocks](images/serialize.png)
 
 A bitpacking serialization library for **JavaScript**. One of the nine
 implementations of the serialize family, wire compatible with the
@@ -17,6 +17,8 @@ implementations of the serialize family, wire compatible with the
 [Rust](https://github.com/mas-bandwidth/serialize.rs) libraries — the same
 values produce the same bytes in every one, so a stream written by one reads
 in any other.
+
+If this library helps you, **[please support it](https://www.patreon.com/MasBandwidth/membership)**
 
 ## Getting it
 
