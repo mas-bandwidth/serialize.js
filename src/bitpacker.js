@@ -695,10 +695,9 @@ export const BitWriter = PRODUCTION ? ProductionBitWriter : CheckedBitWriter;
  * front from the bytes that are there, and every read in the last 8 bytes
  * shifts that instead. THE CALLER'S ALLOCATION CONTRACT IS THEREFORE EMPTY:
  * no slack past the data is required, unlike the C++ reader, which loads
- * unconditionally and demands 8 bytes beyond the data. STANDARD.md declares
- * both stances conforming, because loaded-but-uninterpreted bytes can never
- * influence a decoded value or an accept/reject decision -- here nothing past
- * the data is even loaded.
+  * unconditionally and demands 8 bytes beyond the data. STANDARD.md:915 says
+  * zero-slack machinery is conforming on the wire, refused as an implementation choice by the speed rule. Here nothing past
+  * the data is even loaded.
  *
  * The wire is a trust boundary. The refusal surface -- wouldReadPastEnd(),
  * tryReadBits(), readAlign() -- never throws on hostile data: past-end reads
