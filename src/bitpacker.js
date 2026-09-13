@@ -699,11 +699,13 @@ export const BitWriter = PRODUCTION ? ProductionBitWriter : CheckedBitWriter;
  * calls the zero-slack machinery conforming on the wire and, as an
  * implementation choice, refused by the speed rule in favour of the 8-byte
  * slack contract the C and C++ readers demand. This port takes the
- * zero-slack option deliberately: a typed array cannot be loaded past its
- * buffer without a copy, so the slack contract is not something a JS caller
- * could honour; the cost is paid once at reset, where the final 8 bytes are
- * pre-assembled into tailLo/tailHi, plus a compare per window load, and
- * nothing past the data is ever loaded.
+ * zero-slack option today: it reads only the view it is given (byteOffset
+ * to byteLength), never the ArrayBuffer's spare capacity; the cost is paid
+ * once at reset, where the final 8 bytes are pre-assembled into
+ * tailLo/tailHi, plus a compare per window load, and nothing past the data
+ * is ever loaded. A capacity-reading variant, which would offer the 8-byte
+ * slack contract the way the Go port reads cap(), is possible and
+ * unmeasured; see https://github.com/mas-bandwidth/serialize.js/issues/22.
  *
  * The wire is a trust boundary. The refusal surface -- wouldReadPastEnd(),
  * tryReadBits(), readAlign() -- never throws on hostile data: past-end reads
