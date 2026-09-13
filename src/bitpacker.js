@@ -695,9 +695,15 @@ export const BitWriter = PRODUCTION ? ProductionBitWriter : CheckedBitWriter;
  * front from the bytes that are there, and every read in the last 8 bytes
  * shifts that instead. THE CALLER'S ALLOCATION CONTRACT IS THEREFORE EMPTY:
  * no slack past the data is required, unlike the C++ reader, which loads
-  * unconditionally and demands 8 bytes beyond the data. STANDARD.md:915 says
-  * zero-slack machinery is conforming on the wire, refused as an implementation choice by the speed rule. Here nothing past
-  * the data is even loaded.
+ * unconditionally and demands 8 bytes beyond the data. STANDARD.md:912-915
+ * calls the zero-slack machinery conforming on the wire and, as an
+ * implementation choice, refused by the speed rule in favour of the 8-byte
+ * slack contract the C and C++ readers demand. This port takes the
+ * zero-slack option deliberately: a typed array cannot be loaded past its
+ * buffer without a copy, so the slack contract is not something a JS caller
+ * could honour; the cost is paid once at reset, where the final 8 bytes are
+ * pre-assembled into tailLo/tailHi, plus a compare per window load, and
+ * nothing past the data is ever loaded.
  *
  * The wire is a trust boundary. The refusal surface -- wouldReadPastEnd(),
  * tryReadBits(), readAlign() -- never throws on hostile data: past-end reads
