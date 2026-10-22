@@ -243,7 +243,8 @@ async function sabotagedStreams(control) {
   mkdirSync(dir, { recursive: true });
   const sources = new Map();
   for (const file of readdirSync(SRC_DIR).filter((name) => name.endsWith('.js'))) {
-    sources.set(file, readFileSync(SRC_DIR + file, 'utf8'));
+    // a checkout with CRLF line endings (Windows) still matches the needles
+    sources.set(file, readFileSync(SRC_DIR + file, 'utf8').replace(/\r\n/g, '\n'));
   }
   for (const { file, needle, patch } of control.patches) {
     const text = sources.get(file);
