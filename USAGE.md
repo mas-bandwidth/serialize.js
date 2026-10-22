@@ -33,6 +33,11 @@ function serializePlayer(stream, player) {
   );
 }
 
+// the packet: its top-level object, then its end
+function serializePacket(stream, player) {
+  return serializePlayer(stream, player) && stream.serializeEnd();
+}
+
 // write
 const player = {
   health: { value: 87 },
@@ -40,21 +45,29 @@ const player = {
   heading: { value: Math.fround(1.25) },
 };
 const writer = new WriteStream(new Uint8Array(64)); // length a multiple of 8
-serializePlayer(writer, player); // -> true
+serializePacket(writer, player); // -> true
 writer.flush(); // ALWAYS flush before touching the bytes
 const wire = writer.data(); // a 5-byte Uint8Array: 7 + 1 + 32 bits
 
 // read
-const reader = new ReadStream(wire); // any length, no slack required
+const reader = new ReadStream(wire); // exactly the packet: no slack required
 const decoded = { health: {}, alive: {}, heading: {} };
-serializePlayer(reader, decoded); // -> true
+serializePacket(reader, decoded); // -> true
 decoded.health.value; // 87
 
 // measure
 const measure = new MeasureStream();
-serializePlayer(measure, player); // -> true
+serializePacket(measure, player); // -> true
 measure.bitsProcessed(); // 40
 ```
+
+**A packet reader reads the end.** `serializeEnd()` goes after the last
+field of the packet's top-level object (STANDARD.md, "end"). On read it
+refuses a whole byte or more left over as `TrailingData` and a set bit in
+the final byte's unused bits as `NonzeroPadding`, so the buffer you hand
+`ReadStream` must be exactly the bytes the writer reported, and one value
+is always one byte sequence. On write and measure it emits nothing. A
+nested object never calls it: only the packet ends.
 
 `WriteStream` needs a buffer whose length is a multiple of 8 (the writer
 works in 64-bit words). `ReadStream` accepts any data length and never
@@ -75,7 +88,7 @@ later call returns `false` without disturbing it.
 ```js
 const r = new ReadStream(Uint8Array.of(0x00)); // 8 bits of data
 r.serializeBits({}, 32); // -> false: past the end
-r.error; // SerializeError.Overflow
+r.error; // SerializeError.PastEnd
 r.ok; // false
 r.serializeBits({}, 1); // -> false: the error is latched
 r.reset(Uint8Array.of(0x00)); // clears state AND the latched error
@@ -92,12 +105,24 @@ position, so the stream itself refuses everything that follows rather than
 leaving that to your discipline. `reset()` — pointing the stream at a new
 buffer — is what clears it.
 
-The error codes: `Overflow` (past the end of data or buffer),
-`ValueOutOfRange` (a value outside its declared range, on either side of
-the wire), `Align` (nonzero alignment padding — the serialize functions
-don't match), `InvalidString` (a malformed string payload). A healthy
-stream's `error` is `SerializeError.None`, which is `null`, so
-`if (stream.error)` reads naturally.
+The errors are the standard's closed list of refusal reasons, and
+`SerializeError`'s values are spelled exactly as the standard spells them:
+
+| `SerializeError.` | value | the rule |
+|---|---|---|
+| `PastEnd` | `'past_end'` | a read past the end of the data (or a write past the end of the buffer) |
+| `ValueOutOfRange` | `'value_out_of_range'` | a value outside its declared range or domain, on either side of the wire |
+| `NonzeroPadding` | `'nonzero_padding'` | a set bit in an align's padding, or in the final byte's padding at the end |
+| `TrailingData` | `'trailing_data'` | a whole byte or more after the end of the object |
+| `NonFiniteFloat` | `'non_finite_float'` | a NaN or an infinity, or a compressed float decode that is not finite |
+| `InvalidUtf8` | `'invalid_utf8'` | a string payload that is not well-formed UTF-8 (or a lone surrogate handed to the checked writer) |
+| `EmbeddedNul` | `'embedded_nul'` | a zero byte among a string's bytes (or a U+0000 handed to the checked writer) |
+| `NonCanonical` | `'non_canonical'` | the int_relative absolute tier carrying a difference a bounded tier carries |
+
+The reason that stands is the **first** refusal's: later refusals on a
+failed stream are echoes. A healthy stream's `error` is
+`SerializeError.None`, which is `null`, so `if (stream.error)` reads
+naturally.
 
 Broken *code* is different from hostile *data*: misusing the API — bits
 out of `[1,32]`, a non-BigInt where the domain is BigInt, an invalid
@@ -134,15 +159,16 @@ modes identically: the sticky-error gate and the buffer-end check —
 const w = new WriteStream(new Uint8Array(8));
 const big = { value: 1n };
 w.serializeUint64(big); // -> true: 64 bits, the buffer is full
-w.serializeUint64(big); // -> false: SerializeError.Overflow, latched
+w.serializeUint64(big); // -> false: SerializeError.PastEnd, latched
 w.ok; // false, and every later call keeps returning false
 ```
 
 — because overflow is a runtime condition, not a caller bug. Everything
 else on the write side is your contract in production: a value outside its
 declared range goes out as deterministic garbage (which conforming readers
-refuse), a lone surrogate reaches the wide-string wire (where conforming
-readers refuse it), and nothing is validated for you. Misuse never
+refuse), a NaN or a U+0000 reaches the wire (where conforming readers
+refuse it), a lone surrogate becomes U+FFFD, and nothing is validated for
+you. Misuse never
 corrupts memory — JavaScript's own bounds semantics are the backstop — it
 corrupts your message. The wire for *conforming* writes is byte identical
 in both modes: `npm run test:production` re-runs the golden pins and the
@@ -173,7 +199,7 @@ w.flush();
 
 `serializeAlign` writes zero bits up to the next byte boundary (nothing if
 already aligned); the reader verifies the padding is zero and latches
-`Align` otherwise.
+`NonzeroPadding` otherwise.
 
 ## Ranged integers
 
@@ -237,19 +263,23 @@ w3.serializeUint128({ value: (1n << 100n) + 1n });
 w3.serializeBool({ value: true });
 ```
 
-## Floats and doubles: bit transparent
+## Floats and doubles: finite values, bit exact
 
-`serializeFloat` (32 bits) and `serializeDouble` (64 bits) reproduce the
-transmitted pattern exactly — every pattern is legal on the wire: NaNs
-with any payload, signaling NaNs, infinities, negative zero, denormals.
-Float32 values ride a software narrowing/widening that never sets the
-quiet bit. Note that a float is 32 bits on the wire: write
-`Math.fround`ed values or you'll be surprised by the read-back.
+`serializeFloat` (32 bits) and `serializeDouble` (64 bits) carry **finite**
+values. A reader refuses a pattern whose exponent is all ones — NaN with any
+payload, either sign, signaling or quiet, and both infinities — as
+`NonFiniteFloat`, testing the raw bits before any conversion and leaving the
+destination untouched. The checked writer latches the same reason for a NaN
+or an infinity, including a finite double above the float32 range, which
+narrows to an infinity. Every finite pattern travels bit exact: negative zero
+and the subnormals are never flushed or re-signed. A float is 32 bits on the
+wire: write `Math.fround`ed values or you'll be surprised by the read-back.
 
 ```js
 w4.serializeFloat({ value: Math.fround(3.1415926) });
 w4.serializeDouble({ value: 1.0 / 3.0 });
 w4.serializeFloat({ value: -0 }); // -0 round trips as -0
+w4.serializeFloat({ value: NaN }); // -> false: SerializeError.NonFiniteFloat
 ```
 
 ## The compressed float
@@ -269,8 +299,11 @@ w5.serializeCompressedFloat({ value: 5.0 }, 0.0, 10.0, 0.01); // 10 bits
 ```
 
 Finite values outside `[min, max]` clamp on write; a non-finite value
-latches `ValueOutOfRange`; reads refuse integers smuggled above the
-quantization ceiling.
+latches `NonFiniteFloat`; reads refuse integers smuggled above the
+quantization ceiling as `ValueOutOfRange`, and a decode that is not finite
+as `NonFiniteFloat`. A declaration whose top, `min + delta` in float32,
+rounds to an infinity is non-conforming: the checked writer and measure
+throw on it, and a reader refuses its non-finite decodes.
 
 ## Raw bytes
 
@@ -304,30 +337,18 @@ const s = {};
 r7.serializeString(s, 16); // s.value === 'golden'
 ```
 
-Reads validate the payload in every build: malformed UTF-8 (overlongs,
-surrogate code points, values above U+10FFFF, truncated sequences, stray
-continuations) and interior NULs latch `InvalidString`. A lone surrogate
-in a *written* string — ill-formed UTF-16, the writer's contract
-violated — encodes as U+FFFD, the contract surfacing JavaScript's way.
+Reads validate the payload in every build. A zero byte anywhere in the
+payload latches `EmbeddedNul`, checked over the whole payload first; then
+malformed UTF-8 (overlongs, encoded surrogates, values above U+10FFFF,
+truncated sequences, stray continuations) latches `InvalidUtf8`, through a
+fatal decoder that never substitutes U+FFFD. Every well-formed payload comes
+back exactly: no normalization (`'e\u0301'` stays three bytes), no stripped
+byte order mark, every plane.
 
-## Wide strings: UTF-16 code units
-
-`serializeWideString(ref, bufferSize)` sends the unit count, then one
-32-bit group per UTF-16 code unit — never a code point — with no
-alignment anywhere: the one place the wide path deliberately differs from
-its narrow counterpart. A JavaScript string *is* a sequence of UTF-16
-code units, so astral characters are two groups on the wire, exactly as
-the family's 2-byte-wchar_t ports split them. `bufferSize` counts wide
-characters.
-
-```js
-w8.serializeWideString({ value: '\u{1f600}A' }, 8); // 3 units: 99 bits
-```
-
-Writes refuse over-long strings (`ValueOutOfRange`) and lone surrogates
-(`InvalidString` — the wide wire cannot carry ill-formed UTF-16, because
-conforming readers refuse it). Reads refuse groups above 0xFFFF, interior
-NUL groups, and unpaired, misordered or dangling surrogates.
+The checked writer refuses what a reader would: a U+0000 latches
+`EmbeddedNul`, and a lone surrogate — ill-formed UTF-16, which
+`TextEncoder` would silently turn into U+FFFD — latches `InvalidUtf8`.
+Text is UTF-8 on the wire; there is no wide-string operation.
 
 ## The relative integer
 
@@ -352,11 +373,14 @@ operation, not to your storage type, so `2**31` is caller error exactly as
 latches `ValueOutOfRange`.
 
 On read, **every tier's reconstruction is checked**: the reader rebuilds
-`current` in a width that cannot wrap and refuses the read unless the
-result is inside the domain and above `previous`. The absolute tier's 32
-raw bits are read unsigned, so a group with the top bit set is refused
-rather than arriving as a negative sequence number. A refused read leaves
-`ref.value` untouched and is terminal for the stream.
+`current` in a width that cannot wrap and refuses the read as
+`ValueOutOfRange` unless the result is inside the domain and above
+`previous`. The absolute tier's 32 raw bits are read unsigned, so a group
+with the top bit set is refused rather than arriving as a negative sequence
+number. And the absolute tier is canonical: a `current` no more than 69914
+above `previous` has a bounded encoding, so its absolute encoding is refused
+as `NonCanonical`. A refused read leaves `ref.value` untouched and is
+terminal for the stream.
 
 ## Fixed point
 
@@ -432,20 +456,21 @@ supported and no slack past the data is required.
 ## Wire compatibility
 
 The same values produce the same bytes across the family, which implements
-**format version 1.1** of the standard. This is not aspiration but pinned
-fact: the suite runs the family's shared conformance corpus
-(`conformance/`, vendored from mas-bandwidth/serialize) and carries the
-golden vectors — including serialize.h's 112-byte golden wire message
-covering every operation class, byte for byte — plus the discriminating
-float vectors, the string and wide-string pins, every relative-integer
-tier, and the fixed point shapes at every group count, all minted from the
-C++ implementation's own output. If your message serializes with the same
-declarations on both ends, a stream written by any family implementation
-reads in any other.
+**format version 2.0** of the standard: the wire carries only integers and
+bytes, and every value has exactly one encoding. This is not aspiration but
+pinned fact: the suite runs the family's shared conformance corpus
+(`conformance/`, vendored from mas-bandwidth/serialize), requiring every
+refusal's stated reason, and carries the golden vectors — including the
+106-byte golden message STANDARD.md prints, covering every operation class,
+byte for byte — plus the discriminating float vectors, the string pins,
+every relative-integer tier, and the fixed point shapes at every group
+count. If your message serializes with the same declarations on both ends, a
+stream written by any family implementation reads in any other.
 
 Two doctrines worth knowing at the edges:
 
-- **Trailing bits**: writers zero the unused bits of the final byte;
-  readers never reject a stream for their contents.
+- **Trailing bits**: writers zero the unused bits of the final byte; a field
+  read never looks at them, and the packet's `serializeEnd` refuses a set
+  one.
 - **Past-end data**: bytes past the end of the data you hand `ReadStream`
   are never read, let alone interpreted.

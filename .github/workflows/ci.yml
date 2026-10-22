@@ -35,9 +35,23 @@ jobs:
       - name: Test (production write path)
         run: node production-tests.mjs
 
-  # STANDARD.md and conformance/ here are VERBATIM VENDORED COPIES of the
-  # specification and the shared conformance corpus in
-  # mas-bandwidth/serialize. A duplicated normative document is the same
+  # Lint is a failing check, warnings included. ESLint is not a dependency of
+  # the package: the one pinned release runs through npx (package.json's
+  # lint script), and eslint.config.js imports nothing.
+  lint:
+    name: lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: ESLint, zero warnings
+        run: npm run lint
+
+  # STANDARD.md, conformance/ and conformance-controls/ here are VERBATIM
+  # VENDORED COPIES of the specification, the shared conformance corpus and
+  # the negative controls' .expected lists in mas-bandwidth/serialize. A duplicated normative document is the same
   # failure as a duplicated constant, except it drifts silently, and the
   # corpus is normative the same way: STANDARD.md makes it the family's one
   # conformance instrument. This job mirrors serialize.c's: fetch upstream,
@@ -45,7 +59,7 @@ jobs:
   # against. The corpus diff is recursive, so a vector file added upstream
   # and not vendored here is red, not silent coverage loss.
   standard:
-    name: STANDARD.md and conformance/ match upstream
+    name: STANDARD.md, conformance/ and conformance-controls/ match upstream
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -55,6 +69,7 @@ jobs:
           echo "upstream: mas-bandwidth/serialize@$(git -C /tmp/upstream rev-parse HEAD)"
           diff -u /tmp/upstream/STANDARD.md STANDARD.md
           diff -ru /tmp/upstream/conformance conformance
+          diff -ru /tmp/upstream/conformance-controls conformance-controls
 
   # The port exists to be wire compatible; everything else is detail. This job is
   # the only place that claim is MEASURED against the reference itself: the exact
@@ -67,8 +82,10 @@ jobs:
   # where implementations disagree. Both halves write it and the files must be
   # byte identical; each half then decodes the other's file, checks every value
   # and re-encodes it byte for byte. Then the hostile half: every proper prefix of
-  # the other's stream is a truncated stream and both must refuse it, and both run
-  # the shared conformance corpus, where the refusal vectors are the point.
+  # the other's stream is a truncated stream and both must refuse it, the stream
+  # with one byte more is trailing data after the end and both must refuse that
+  # too, and both run the shared conformance corpus, where the refusal vectors
+  # are the point.
   #
   # THE FAMILY PIN -- ONE POLICY, ONE VERSION. The C++ checkout is pinned to a
   # RELEASED tag of mas-bandwidth/serialize, never main, and to the SAME tag in
@@ -89,7 +106,7 @@ jobs:
     name: interop with the C++ reference
     runs-on: ubuntu-24.04
     env:
-      SERIALIZE_TAG: v1.16.2
+      SERIALIZE_TAG: v2.0.0
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -104,8 +121,11 @@ jobs:
       # reader older than the corpus cannot drive vectors whose operations it has
       # no code for. STANDARD.md requires that to be red rather than skipped, so
       # it is checked here rather than assumed.
-      - name: The vendored corpus is the pinned release's corpus
-        run: diff -ru /tmp/cpp-serialize/conformance conformance
+      - name: The vendored corpus and controls are the pinned release's
+        run: |
+          diff -u /tmp/cpp-serialize/STANDARD.md STANDARD.md
+          diff -ru /tmp/cpp-serialize/conformance conformance
+          diff -ru /tmp/cpp-serialize/conformance-controls conformance-controls
 
       # Asserts stay ON (no -DNDEBUG): they are the C++ half of "API misuse
       # panics", and the degenerate ranges the message carries must pass with the
@@ -138,7 +158,7 @@ jobs:
           node interop/interop.mjs read /tmp/cpp.bin
           /tmp/cpp_interop read /tmp/js.bin
 
-      - name: Both halves refuse every truncation of the other's stream
+      - name: Both halves refuse every truncation of the other's stream, and a byte more
         run: |
           node interop/interop.mjs refuse /tmp/cpp.bin
           /tmp/cpp_interop refuse /tmp/js.bin
