@@ -123,7 +123,8 @@ export function parseVectors(text, file) {
   const lines = text.split('\n');
 
   const finish = () => {
-    if (current !== null && current.operation !== undefined) {
+    if (current !== null) {
+      assert.notEqual(current.operation, undefined, `${current.where}: a record states its operation`);
       records.push(current);
     }
     current = null;
@@ -163,11 +164,14 @@ export function parseVectors(text, file) {
         }
         break;
       }
-      case 'bytes':
-        current.bytes = Uint8Array.from(
-          value === '' ? [] : value.split(/\s+/).map((pair) => Number.parseInt(pair, 16)),
-        );
+      case 'bytes': {
+        const pairs = value === '' ? [] : value.split(/\s+/);
+        for (const pair of pairs) {
+          assert.ok(/^[0-9a-fA-F]{2}$/.test(pair), `${where}: '${pair}' is not a hexadecimal byte pair`);
+        }
+        current.bytes = Uint8Array.from(pairs.map((pair) => Number.parseInt(pair, 16)));
         break;
+      }
       case 'expect':
         if (value === 'refused' || value.startsWith('refused ')) {
           const reason = value.slice('refused'.length).trim();
@@ -506,7 +510,9 @@ function stepPattern(step) {
  * match any expectation.
  */
 function float32Pattern(value) {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
+  // a value that is not exactly a float32 -- a decode that skipped its
+  // final rounding -- has no float32 pattern either
+  if (typeof value !== 'number' || !Number.isFinite(value) || Math.fround(value) !== value) {
     return -1n;
   }
   SCRATCH.setFloat32(0, value, true);
@@ -610,13 +616,22 @@ function runVectorWith(record, ReadStream, WriteStream, MeasureStream) {
     // Failure is terminal, and a sequence states its own successors: every
     // step after the failing one must fail too, however many readable bits
     // the stream still holds.
+    // Each one consumes no bits and writes no destination, zero-bit reads
+    // included (STANDARD.md, "Failure is terminal").
     for (let i = stoppedAt + stepSpan(steps, stoppedAt); i < steps.length; i += stepSpan(steps, i)) {
       const successor = steps.slice(i, i + stepSpan(steps, i));
+      const bitsBeforeSuccessor = stream.bitsProcessed();
       assert.equal(
         runSteps(stream, successor).ok,
         false,
         `step ${i + 1} succeeded after step ${stoppedAt + 1} was refused; failure must be terminal`,
       );
+      assert.equal(stream.bitsProcessed(), bitsBeforeSuccessor, `step ${i + 1} consumed bits after a refusal`);
+      for (const step of successor) {
+        if (SCALAR_KINDS.has(step.kind)) {
+          assert.equal(step.ref.value, UNTOUCHED, `step ${i + 1} wrote its destination after a refusal`);
+        }
+      }
     }
 
     // and the same rule against a read the vector does not name, checked by
@@ -639,7 +654,11 @@ function runVectorWith(record, ReadStream, WriteStream, MeasureStream) {
   // so the list aligns to the END of the step list.
   const entries = record.expected.split('|').map((entry) => entry.trim());
   const offset = steps.length - entries.length;
-  assert.ok(offset >= 0, 'the expect list states more values than the vector has steps');
+  assert.equal(
+    offset,
+    record.params.has('preceding_bits') && steps[0].kind === 'bits' && steps.length > 1 ? 1 : 0,
+    'the expect list states exactly one entry per step the vector names',
+  );
   for (let i = 0; i < entries.length; i++) {
     if (entries[i] === '-') {
       continue;

@@ -23,10 +23,11 @@
 // directly -- the control patches both, so the rule deleted is the same
 // rule the .expected list names.
 //
-// string-utf8-surrogate is the one reference control this port does not
-// carry: its UTF-8 validation is the platform's fatal TextDecoder, which has
-// no separable encoded-surrogate clause to delete. string-utf8 deletes the
-// whole validation and covers those vectors.
+// This port's UTF-8 validation is the platform's fatal TextDecoder, which
+// has no separable encoded-surrogate clause, so string-utf8-surrogate
+// deletes that one clause the only way it can: a payload holding an encoded
+// surrogate lead (ED A0 to ED BF) is decoded non-fatally, so that clause
+// alone stops refusing.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -188,6 +189,16 @@ const CONTROLS = [
       file: 'streams.js',
       needle: "const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });",
       patch: `const UTF8_DECODER = new TextDecoder('utf-8', { fatal: false, ignoreBOM: true });${MARK}`,
+    }],
+  },
+  {
+    name: 'string-utf8-surrogate',
+    rule: 'a string read refuses an encoded surrogate code point',
+    patches: [{
+      file: 'streams.js',
+      needle: '      decoded = UTF8_DECODER.decode(payload);',
+      patch: '      decoded = (payload.some((byte, i) => byte === 0xed && payload[i + 1] >= 0xa0 && payload[i + 1] <= 0xbf) ' +
+        '? new TextDecoder() : UTF8_DECODER).decode(payload); // NEGATIVE CONTROL: this clause is deleted on purpose',
     }],
   },
   {

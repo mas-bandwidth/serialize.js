@@ -191,3 +191,38 @@ test('set padding is refused before a payload length that runs past the end', ()
   assert.equal(clean.error, SerializeError.PastEnd);
   assert.equal(ref.value, 'sentinel');
 });
+
+test('a huge claimed length on a tiny stream is past_end before any payload is taken', async () => {
+  // the length field is checked against the bytes that remain BEFORE the
+  // payload is read, copied or decoded: a few bytes claiming 2^31 - 2 must
+  // cost nothing. BitReader.readBytes is the one place the payload is taken,
+  // so it is made to throw here: reaching it at all is the defect.
+  const { BitReader } = await import('../src/index.js');
+  const huge = 0x7ffffffe;
+  const writer = new WriteStream(new Uint8Array(16));
+  assert.equal(writer.serializeInt({ value: huge }, 0, 0x7ffffffe), true);
+  assert.equal(writer.serializeBytes(Uint8Array.from([0x61, 0x62])), true);
+  writer.flush();
+
+  const readBytes = BitReader.prototype.readBytes;
+  BitReader.prototype.readBytes = () => {
+    throw new Error('the payload was taken before its length was checked');
+  };
+  try {
+    const reader = new ReadStream(writer.data());
+    const ref = { value: 'sentinel' };
+    assert.equal(reader.serializeString(ref, 0x7fffffff), false);
+    assert.equal(reader.error, SerializeError.PastEnd);
+    assert.equal(ref.value, 'sentinel');
+  } finally {
+    BitReader.prototype.readBytes = readBytes;
+  }
+
+  // the accept neighbour: the honest length takes its payload
+  const honest = new WriteStream(new Uint8Array(16));
+  assert.equal(honest.serializeString({ value: 'ab' }, 0x7fffffff), true);
+  honest.flush();
+  const ref = {};
+  assert.equal(new ReadStream(honest.data()).serializeString(ref, 0x7fffffff), true);
+  assert.equal(ref.value, 'ab');
+});

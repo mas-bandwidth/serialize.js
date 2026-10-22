@@ -125,7 +125,7 @@ this port's own codec.
 
 [`conformance-controls/`](conformance-controls) is vendored the same way,
 and `test/conformance-controls.test.js` proves the runner responds: a
-vector whose operation has no runner must be red, and for each of fourteen
+vector whose operation has no runner must be red, and for each of fifteen
 refusal rules a copy of the library with that one rule deleted must fail
 exactly the vectors the rule's `.expected` list names, no more and no
 fewer.
