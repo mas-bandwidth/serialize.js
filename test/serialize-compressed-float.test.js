@@ -219,7 +219,7 @@ const CLAMP_WITNESSES = [
 ];
 
 test('the normative integer clamp: top-of-range round-trips in both witness declarations', () => {
-  for (const { declaration, maxIntegerValue, bits } of CLAMP_WITNESSES) {
+  for (const { declaration, bits } of CLAMP_WITNESSES) {
     const [min, max] = declaration;
     const label = `[${min}, ${max}] resolution 1`;
 

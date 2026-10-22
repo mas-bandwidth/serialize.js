@@ -155,7 +155,7 @@ test('wide values carry no alignment: a bool shifts a 64-bit field', () => {
   assert.equal(wide.value, 0xffff_ffff_ffff_ffffn);
 });
 
-test('truncated data refused as Overflow with NOTHING consumed', () => {
+test('truncated data refused as PastEnd with NOTHING consumed', () => {
   // 63 bits of data cannot carry a 64-bit read... but the data is 8 bytes,
   // so consume one bit first to leave 63
   const data = new Uint8Array(8);
@@ -163,7 +163,7 @@ test('truncated data refused as Overflow with NOTHING consumed', () => {
   refused.serializeBits({ value: 0 }, 1);
   const ref = { value: 999n };
   assert.equal(refused.serializeBits64(ref, 64), false);
-  assert.equal(refused.error, SerializeError.Overflow);
+  assert.equal(refused.error, SerializeError.PastEnd);
   assert.equal(ref.value, 999n); // ref untouched
   // the refusal happened BEFORE the low dword was read: checked against
   // the total width up front, so nothing was consumed
@@ -177,13 +177,13 @@ test('truncated data refused as Overflow with NOTHING consumed', () => {
   assert.equal(accepted.bitsProcessed(), 64);
 });
 
-test('a write past the end latches Overflow with NOTHING written', () => {
+test('a write past the end latches PastEnd with NOTHING written', () => {
   // 62 bits available, a 33-bit write would dangle its low dword without
   // the up-front total check
   const overflows = new WriteStream(new Uint8Array(8));
   overflows.serializeBits({ value: 0 }, 31);
   assert.equal(overflows.serializeBits64({ value: 0n }, 34), false);
-  assert.equal(overflows.error, SerializeError.Overflow);
+  assert.equal(overflows.error, SerializeError.PastEnd);
   assert.equal(overflows.bitsProcessed(), 31); // nothing written
 
   // the accept-boundary neighbor: 33 bits fit exactly
@@ -197,15 +197,15 @@ test('a write past the end latches Overflow with NOTHING written', () => {
 test('a latched stream refuses the wide operations without touching refs', () => {
   const writer = new WriteStream(new Uint8Array(8));
   writer.serializeBits64({ value: 0n }, 64);
-  writer.serializeBool({ value: true }); // latches Overflow
-  assert.equal(writer.error, SerializeError.Overflow);
+  writer.serializeBool({ value: true }); // latches PastEnd
+  assert.equal(writer.error, SerializeError.PastEnd);
   assert.equal(writer.serializeBits64({ value: 1n }, 1), false);
   assert.equal(writer.serializeUint64({ value: 1n }), false);
-  assert.equal(writer.error, SerializeError.Overflow);
+  assert.equal(writer.error, SerializeError.PastEnd);
 
   const reader = new ReadStream(new Uint8Array(0));
   const ref = { value: 999n };
-  reader.serializeBool(ref); // latches Overflow
+  reader.serializeBool(ref); // latches PastEnd
   assert.equal(reader.serializeBits64(ref, 1), false);
   assert.equal(reader.serializeUint64(ref), false);
   assert.equal(ref.value, 999n);

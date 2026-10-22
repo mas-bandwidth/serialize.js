@@ -134,7 +134,7 @@ function processPrefix(stream, n) {
   }
 }
 
-test('truncated data refused as Overflow, the exact fit accepted', () => {
+test('truncated data refused as PastEnd, the exact fit accepted', () => {
   const cases = [
     ['serializeUint8', 8],
     ['serializeUint16', 16],
@@ -148,7 +148,7 @@ test('truncated data refused as Overflow, the exact fit accepted', () => {
     processPrefix(refused, data.length * 8 - bits + 1);
     const ref = { value: 999 };
     assert.equal(refused[method](ref), false, `${method} refused when short`);
-    assert.equal(refused.error, SerializeError.Overflow);
+    assert.equal(refused.error, SerializeError.PastEnd);
     assert.equal(ref.value, 999);
 
     // the exact fit: accepted
@@ -159,7 +159,7 @@ test('truncated data refused as Overflow, the exact fit accepted', () => {
   }
 });
 
-test('a write past the end latches Overflow, the exact fit succeeds', () => {
+test('a write past the end latches PastEnd, the exact fit succeeds', () => {
   const cases = [
     ['serializeUint8', 8, { value: 0 }],
     ['serializeUint16', 16, { value: 0 }],
@@ -175,7 +175,7 @@ test('a write past the end latches Overflow, the exact fit succeeds', () => {
     const overflows = new WriteStream(new Uint8Array(8));
     processPrefix(overflows, 64 - bits + 1);
     assert.equal(overflows[method](ref), false, `${method} overflows`);
-    assert.equal(overflows.error, SerializeError.Overflow);
+    assert.equal(overflows.error, SerializeError.PastEnd);
     assert.equal(overflows.bitsProcessed(), 64 - bits + 1); // nothing written
   }
 });
@@ -196,16 +196,16 @@ test('a latched stream refuses every helper without touching refs', () => {
   const writer = new WriteStream(new Uint8Array(8));
   writer.serializeBits({ value: 0 }, 32);
   writer.serializeBits({ value: 0 }, 32);
-  writer.serializeUint8({ value: 1 }); // latches Overflow
-  assert.equal(writer.error, SerializeError.Overflow);
+  writer.serializeUint8({ value: 1 }); // latches PastEnd
+  assert.equal(writer.error, SerializeError.PastEnd);
   assert.equal(writer.serializeUint16({ value: 2 }), false);
   assert.equal(writer.serializeUint32({ value: 3 }), false);
   assert.equal(writer.serializeBool({ value: true }), false);
-  assert.equal(writer.error, SerializeError.Overflow);
+  assert.equal(writer.error, SerializeError.PastEnd);
 
   const reader = new ReadStream(new Uint8Array(0));
   const ref = { value: 999 };
-  reader.serializeBool(ref); // latches Overflow
+  reader.serializeBool(ref); // latches PastEnd
   assert.equal(reader.serializeUint8(ref), false);
   assert.equal(reader.serializeUint16(ref), false);
   assert.equal(reader.serializeUint32(ref), false);

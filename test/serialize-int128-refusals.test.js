@@ -111,12 +111,12 @@ test('the full range has no headroom: every corner pattern decodes', () => {
   }
 });
 
-test('truncated data refused as Overflow with NOTHING consumed', () => {
+test('truncated data refused as PastEnd with NOTHING consumed', () => {
   // a full-range read needs 128 bits; 64 bits of data refuse up front
   const refused = new ReadStream(new Uint8Array(8));
   const ref = { value: 999n };
   assert.equal(refused.serializeInt128(ref, INT128_MIN, INT128_MAX), false);
-  assert.equal(refused.error, SerializeError.Overflow);
+  assert.equal(refused.error, SerializeError.PastEnd);
   assert.equal(ref.value, 999n);
   assert.equal(refused.bitsProcessed(), 0);
 
@@ -128,14 +128,14 @@ test('truncated data refused as Overflow with NOTHING consumed', () => {
   assert.equal(accepted.bitsProcessed(), 64);
 });
 
-test('a write past the end latches Overflow with NOTHING written', () => {
+test('a write past the end latches PastEnd with NOTHING written', () => {
   // a 102-bit range cannot fit an 8-byte buffer
   const overflows = new WriteStream(new Uint8Array(8));
   assert.equal(
     overflows.serializeInt128({ value: 0n }, -(2n ** 100n), 2n ** 100n),
     false,
   );
-  assert.equal(overflows.error, SerializeError.Overflow);
+  assert.equal(overflows.error, SerializeError.PastEnd);
   assert.equal(overflows.bitsProcessed(), 0); // nothing written
 
   // the exact fit succeeds: a 64-bit range in the same buffer

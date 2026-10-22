@@ -6,7 +6,7 @@
 // WAYS: a doctored vector that is refused, and an accept-boundary neighbor
 // that is accepted. The write side carries the checked runtime's form of the
 // family's non-finite assert: writing NaN or an infinity latches
-// ValueOutOfRange (ruled 2026-08-15), while every finite float32 value --
+// NonFiniteFloat (format 2.0), while every finite float32 value --
 // however far outside [min,max] -- clamps and writes. A non-conforming
 // DECLARATION is different in kind: the declaration is part of the message
 // format, never data, so it throws as caller misuse on every stream in every
@@ -53,11 +53,11 @@ test('headroom smuggling refused, boundary neighbor accepted: [0,10] at 0.01', (
 
 test('a non-finite write refused, the float32 edge accepted', () => {
   // the checked runtime's always-on form of the family's checked-build assertion:
-  // NaN and the infinities latch ValueOutOfRange and put nothing on the wire
+  // NaN and the infinities latch NonFiniteFloat and put nothing on the wire
   for (const value of [NaN, Infinity, -Infinity]) {
     const writer = new WriteStream(new Uint8Array(8));
     assert.equal(writer.serializeCompressedFloat({ value }, 0, 10, 0.01), false, `${value}`);
-    assert.equal(writer.error, SerializeError.ValueOutOfRange);
+    assert.equal(writer.error, SerializeError.NonFiniteFloat);
     assert.equal(writer.bitsProcessed(), 0, 'the refused write consumed nothing');
   }
 
@@ -66,7 +66,7 @@ test('a non-finite write refused, the float32 edge accepted', () => {
   // even though the double is finite...
   const overflowed = new WriteStream(new Uint8Array(8));
   assert.equal(overflowed.serializeCompressedFloat({ value: 3.5e38 }, 0, 10, 0.01), false);
-  assert.equal(overflowed.error, SerializeError.ValueOutOfRange);
+  assert.equal(overflowed.error, SerializeError.NonFiniteFloat);
 
   // ...while the largest finite float32 is the accept boundary: far outside
   // [0,10], so it clamps to max and writes -- clamping is never a refusal
@@ -80,13 +80,13 @@ test('a non-finite write refused, the float32 edge accepted', () => {
   assert.equal(ref.value, 10, 'the clamped edge decodes to max');
 });
 
-test('a write that does not fit latches Overflow and writes nothing', () => {
+test('a write that does not fit latches PastEnd and writes nothing', () => {
   const writer = new WriteStream(new Uint8Array(8));
   assert.equal(writer.serializeBits({ value: 0 }, 32), true);
   assert.equal(writer.serializeBits({ value: 0 }, 23), true);
   // 9 bits left: the 10-bit declaration does not fit
   assert.equal(writer.serializeCompressedFloat({ value: 5 }, 0, 10, 0.01), false);
-  assert.equal(writer.error, SerializeError.Overflow);
+  assert.equal(writer.error, SerializeError.PastEnd);
   assert.equal(writer.bitsProcessed(), 55, 'the refused write consumed nothing');
 
   // the accept boundary: with exactly 10 bits left the write succeeds
@@ -97,11 +97,11 @@ test('a write that does not fit latches Overflow and writes nothing', () => {
   assert.equal(exact.ok, true);
 });
 
-test('a truncated read latches Overflow and leaves the ref alone', () => {
+test('a truncated read latches PastEnd and leaves the ref alone', () => {
   const reader = new ReadStream(new Uint8Array(1)); // 8 bits: 10 needed
   const ref = { value: 42 };
   assert.equal(reader.serializeCompressedFloat(ref, 0, 10, 0.01), false);
-  assert.equal(reader.error, SerializeError.Overflow);
+  assert.equal(reader.error, SerializeError.PastEnd);
   assert.equal(ref.value, 42, 'ref untouched on refusal');
   assert.equal(reader.bitsProcessed(), 0, 'the refused read consumed nothing');
 
@@ -115,7 +115,7 @@ test('measure refuses a non-finite value like the write it stands in for', () =>
   // a message that cannot be written cannot be measured either
   const measure = new MeasureStream();
   assert.equal(measure.serializeCompressedFloat({ value: NaN }, 0, 10, 0.01), false);
-  assert.equal(measure.error, SerializeError.ValueOutOfRange);
+  assert.equal(measure.error, SerializeError.NonFiniteFloat);
   assert.equal(measure.bitsProcessed(), 0);
 
   // the accept boundary: the largest finite float32 clamps on write, so it
@@ -178,4 +178,47 @@ test('an invalid declaration is caller misuse and throws on every stream', () =>
   assert.throws(() => measure.serializeCompressedFloat({ value: 5n }, 0, 10, 0.01), TypeError);
   assert.equal(writer.ok, true, 'value misuse latches nothing');
   assert.equal(measure.ok, true, 'value misuse latches nothing');
+});
+
+// The declaration STANDARD.md names: [3 * 2^103, FLT_MAX] at resolution
+// 2^104 passes every check on delta and values, and still its top integer
+// (2^24 - 2, 24 bits) decodes to min + delta rounded once, which is 2^128:
+// +Infinity. The integer one below the top decodes finite.
+const TOP_MIN = 3 * 2 ** 103;
+const TOP_MAX = 3.4028234663852886e38; // FLT_MAX
+const TOP_RES = 2 ** 104;
+
+test('a decode that rounds to infinity is refused as non_finite_float, the integer below it accepted', () => {
+  const reader = new ReadStream(Uint8Array.from([0xfe, 0xff, 0xff]));
+  const ref = { value: 42 };
+  assert.equal(reader.serializeCompressedFloat(ref, TOP_MIN, TOP_MAX, TOP_RES), false);
+  assert.equal(reader.error, SerializeError.NonFiniteFloat);
+  assert.equal(ref.value, 42, 'ref untouched on refusal');
+
+  const below = new ReadStream(Uint8Array.from([0xfd, 0xff, 0xff]));
+  assert.equal(below.serializeCompressedFloat(ref, TOP_MIN, TOP_MAX, TOP_RES), true);
+  const dv = new DataView(new ArrayBuffer(4));
+  dv.setFloat32(0, ref.value, true);
+  assert.equal(dv.getUint32(0, true), 0x7f7ffffe, 'the integer below the top decodes finite');
+});
+
+test('a declaration whose top decodes to infinity throws on write and measure, never on read', () => {
+  // non-conforming as a whole: even a value that would decode finite throws,
+  // because a writer handed max would emit a code every reader refuses
+  for (const stream of [new WriteStream(new Uint8Array(8)), new MeasureStream()]) {
+    assert.throws(() => stream.serializeCompressedFloat({ value: TOP_MIN }, TOP_MIN, TOP_MAX, TOP_RES), RangeError);
+    assert.equal(stream.ok, true, 'misuse latches nothing');
+  }
+  // the reader refuses at runtime instead (above), and reads finite integers
+  const reader = new ReadStream(new Uint8Array(3));
+  assert.equal(reader.serializeCompressedFloat({}, TOP_MIN, TOP_MAX, TOP_RES), true);
+
+  // the accept-boundary neighbour: [2^127, FLT_MAX] at the same resolution
+  // has a top of exactly FLT_MAX, finite, and writes
+  const writer = new WriteStream(new Uint8Array(8));
+  assert.equal(writer.serializeCompressedFloat({ value: TOP_MAX }, 2 ** 127, TOP_MAX, TOP_RES), true);
+  writer.flush();
+  const ref = {};
+  assert.equal(new ReadStream(writer.data()).serializeCompressedFloat(ref, 2 ** 127, TOP_MAX, TOP_RES), true);
+  assert.equal(ref.value, TOP_MAX, 'the top decodes to FLT_MAX');
 });

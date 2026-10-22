@@ -1,6 +1,6 @@
 // Load-time mode selection: the JavaScript #ifdef.
 //
-// The family's check model (STANDARD.md, "Writes assume trusted data") makes
+// The family's check model (STANDARD.md, "Writers are trusted; readers are not") makes
 // the caller responsible for well-formed writes: writer contracts are
 // assertions in a CHECKED BUILD -- the standard's term for a build with
 // assertions enabled -- and release builds carry zero caller validation on

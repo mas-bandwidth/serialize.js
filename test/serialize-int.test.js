@@ -12,7 +12,6 @@ import {
   WriteStream,
   ReadStream,
   MeasureStream,
-  SerializeError,
   bitsRequired,
 } from '../src/index.js';
 

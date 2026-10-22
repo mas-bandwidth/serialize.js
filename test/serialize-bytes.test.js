@@ -88,7 +88,7 @@ test('bytes round-trip at every starting bit offset', () => {
 
 test('doctored align padding before the bytes refused, clean neighbor accepted', () => {
   // clean wire from the unaligned pin: 01 EF BE 0F. Doctor a padding bit
-  // (bits 1..7 of byte 0): the align refuses and latches Align.
+  // (bits 1..7 of byte 0): the align refuses and latches NonzeroPadding.
   for (let p = 1; p <= 7; p++) {
     const doctored = Uint8Array.from([0x01 | (1 << p), 0xef, 0xbe, 0x0f]);
     const reader = new ReadStream(doctored);
@@ -96,7 +96,7 @@ test('doctored align padding before the bytes refused, clean neighbor accepted',
     const data = Uint8Array.from([0x77, 0x77]);
     assert.equal(reader.serializeBits(head, 1), true);
     assert.equal(reader.serializeBytes(data), false, `padding bit ${p} refused`);
-    assert.equal(reader.error, SerializeError.Align);
+    assert.equal(reader.error, SerializeError.NonzeroPadding);
     assert.deepEqual(Array.from(data), [0x77, 0x77]); // untouched on refusal
   }
   // accept neighbor: the clean wire reads through
@@ -108,7 +108,7 @@ test('doctored align padding before the bytes refused, clean neighbor accepted',
   assert.deepEqual(Array.from(data), [0xef, 0xbe]);
 });
 
-test('truncated data refused as Overflow, exact-fit neighbor accepted', () => {
+test('truncated data refused as PastEnd, exact-fit neighbor accepted', () => {
   // three bytes on the wire: asking for four must refuse, asking for three
   // must accept -- the boundary proven from both sides
   const wire = Uint8Array.from([0x11, 0x22, 0x33]);
@@ -116,7 +116,7 @@ test('truncated data refused as Overflow, exact-fit neighbor accepted', () => {
   const refused = new ReadStream(wire);
   const four = Uint8Array.from([0xaa, 0xbb, 0xcc, 0xdd]);
   assert.equal(refused.serializeBytes(four), false);
-  assert.equal(refused.error, SerializeError.Overflow);
+  assert.equal(refused.error, SerializeError.PastEnd);
   assert.deepEqual(Array.from(four), [0xaa, 0xbb, 0xcc, 0xdd]); // untouched
 
   const accepted = new ReadStream(wire);
@@ -126,10 +126,10 @@ test('truncated data refused as Overflow, exact-fit neighbor accepted', () => {
   assert.equal(accepted.ok, true);
 });
 
-test('write past the end of the buffer latches Overflow, exact fit accepted', () => {
+test('write past the end of the buffer latches PastEnd, exact fit accepted', () => {
   const refused = new WriteStream(new Uint8Array(8));
   assert.equal(refused.serializeBytes(new Uint8Array(9)), false);
-  assert.equal(refused.error, SerializeError.Overflow);
+  assert.equal(refused.error, SerializeError.PastEnd);
 
   const accepted = new WriteStream(new Uint8Array(8));
   assert.equal(accepted.serializeBytes(new Uint8Array(8)), true);
@@ -140,13 +140,13 @@ test('write past the end of the buffer latches Overflow, exact fit accepted', ()
 
 test('a latched stream refuses serializeBytes without touching anything', () => {
   const writer = new WriteStream(new Uint8Array(8));
-  assert.equal(writer.serializeBytes(new Uint8Array(9)), false); // latch Overflow
+  assert.equal(writer.serializeBytes(new Uint8Array(9)), false); // latch PastEnd
   assert.equal(writer.serializeBytes(new Uint8Array(1)), false); // still refused
-  assert.equal(writer.error, SerializeError.Overflow);
+  assert.equal(writer.error, SerializeError.PastEnd);
 
   const reader = new ReadStream(Uint8Array.from([0x01]));
   const big = new Uint8Array(2);
-  assert.equal(reader.serializeBytes(big), false); // latch Overflow
+  assert.equal(reader.serializeBytes(big), false); // latch PastEnd
   const one = Uint8Array.from([0x99]);
   assert.equal(reader.serializeBytes(one), false); // still refused
   assert.deepEqual(Array.from(one), [0x99]);

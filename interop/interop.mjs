@@ -10,21 +10,17 @@
 //     node interop/interop.mjs read   <file>   decode the other half's bytes, check every
 //                                              value, re-encode, require byte identity
 //     node interop/interop.mjs refuse <file>   every proper prefix of a valid stream is a
-//                                              truncated stream, and every one must be REFUSED
+//                                              truncated stream, and every one must be REFUSED,
+//                                              and so must the stream with a byte more
 //
 // THE MESSAGE is the boundary set: every operation STANDARD.md defines, at the
 // values where implementations disagree. Zero bit ranges on all three ranged
 // widths and on fixed point; the domain edges of int, int64, int128 and
 // int_relative; the maximum widths of bits, uint128 and the four group fixed
 // point path; both sides of the alignment rule, including the align inside a
-// zero length bytes; empty and full strings; and the wide string cases the
-// surrogate rule governs, up to the largest code unit.
-//
-// WHAT IT DELIBERATELY DOES NOT CARRY: a NaN payload. STANDARD.md's bit
-// transparency claim covers it, but a NaN's payload bits do not survive every
-// language's float type on the way to the wire, so a difference here would say
-// nothing about the wire format. This port pins its own NaN patterns in its own
-// suite, where the claim can be tested honestly.
+// zero length bytes; the finite float edges, negative zero and the subnormals;
+// empty and full strings and real text in several scripts; and the end, which
+// requires the stream to stop exactly where the message does.
 //
 // Any change to the sequence below must be mirrored in interop/interop.cpp, and
 // never changes the wire format.
@@ -116,8 +112,8 @@ const RELATIVE_VECTORS = [
 const FLOAT_BITS = [
   0x00000000,   // +0
   0x80000000,   // -0
-  0x7f800000,   // +infinity
-  0xff800000,   // -infinity
+  0xff7fffff,   // the most negative finite float32
+  0x807fffff,   // the largest negative subnormal
   0x7f7fffff,   // the largest finite float32
   0x00800000,   // the smallest normal
   0x00000001,   // the smallest subnormal
@@ -128,8 +124,8 @@ const FLOAT_BITS = [
 const DOUBLE_BITS = [
   0x0000000000000000n,   // +0
   0x8000000000000000n,   // -0
-  0x7ff0000000000000n,   // +infinity
-  0xfff0000000000000n,   // -infinity
+  0xffefffffffffffffn,   // the most negative finite float64
+  0x800fffffffffffffn,   // the largest negative subnormal
   0x7fefffffffffffffn,   // the largest finite float64
   0x0010000000000000n,   // the smallest normal
   0x0000000000000001n,   // the smallest subnormal
@@ -163,18 +159,12 @@ const STRING_BUFFER_SIZE = 16;
 const STRINGS = [
   '',                                       // empty
   '0123456789abcde',                        // fifteen bytes: the most buffer size 16 carries
-  '\u043C\u0438\u0440',                     // "\u043C\u0438\u0440", six UTF-8 bytes: explicit code points, so no
+  '\u043C\u0438\u0440',                     // cyrillic, six UTF-8 bytes: explicit code points, so no
                                             // source file encoding can reach the wire
-];
-
-const WSTRING_BUFFER_SIZE = 8;
-const WIDE_STRINGS = [
-  '',                                       // empty
-  '\u043C\u0438\u0440',                     // basic plane
-  '\uE000',                                 // the first code unit above the surrogate block
-  '\uFFFF',                                 // the largest code unit there is
-  'A\uD83D\uDE00B',                          // U+1F600 as its surrogate pair: four code units
-  'abcdefg',                                // seven code units, the most buffer size 8 carries
+  '\u7881\u77F3',                           // CJK, go stones: two three byte characters
+  'A\u{1F600}B',                            // an astral emoji between two ASCII bytes: six bytes
+  'e\u0301\uFEFF\uFFFF',                    // a combining mark, a byte order mark and a
+                                            // noncharacter: none normalized, stripped or replaced
 ];
 
 // --------------------------------------------------------------------------
@@ -234,7 +224,6 @@ function interopData() {
     filler: { value: 5 },
     bytes: BYTES_VECTORS.map((vector) => new Uint8Array(vector.length).fill(vector.fill)),
     strings: STRINGS.map((value) => ({ value })),
-    wideStrings: WIDE_STRINGS.map((value) => ({ value })),
   };
 }
 
@@ -309,7 +298,7 @@ function interopSerialize(stream, data) {
     if (!stream.serializeIntRelative(RELATIVE_VECTORS[i].previous, data.relative[i])) return false;
   }
 
-  // ----- float and double, bit transparent at the domain edges
+  // ----- float and double, bit exact at the finite edges
   for (const ref of data.floats) if (!stream.serializeFloat(ref)) return false;
   for (const ref of data.doubles) if (!stream.serializeDouble(ref)) return false;
 
@@ -328,17 +317,13 @@ function interopSerialize(stream, data) {
     if (!stream.serializeBytes(block)) return false;
   }
 
-  // ----- string: empty, full, and multi-byte UTF-8
+  // ----- string: empty, full, and real text in several scripts
   for (const ref of data.strings) {
     if (!stream.serializeString(ref, STRING_BUFFER_SIZE)) return false;
   }
 
-  // ----- wstring: empty, basic plane, the code unit boundaries, a surrogate pair, full
-  for (const ref of data.wideStrings) {
-    if (!stream.serializeWideString(ref, WSTRING_BUFFER_SIZE)) return false;
-  }
-
-  return true;
+  // ----- the end: the packet's top-level object ends here, and so does the stream
+  return stream.serializeEnd();
 }
 
 /**
@@ -397,7 +382,6 @@ function interopCheck(data) {
     }
   }
   for (let i = 0; i < STRINGS.length; i++) equal(`string[${i}]`, data.strings[i].value, STRINGS[i]);
-  for (let i = 0; i < WIDE_STRINGS.length; i++) equal(`wstring[${i}]`, data.wideStrings[i].value, WIDE_STRINGS[i]);
 
   return problems;
 }
@@ -444,24 +428,33 @@ function read(path) {
 }
 
 // The hostile half: every proper prefix of a valid stream is a truncated stream,
-// and a conforming reader refuses every one of them without ever throwing.
+// and the stream with one zero byte more is trailing data after the end. A
+// conforming reader refuses every one of them without ever throwing.
 function refuse(path) {
   const input = new Uint8Array(readFileSync(path));
-  for (let length = 0; length < input.length; length++) {
-    const truncated = input.subarray(0, length);
-    const data = readData();
-    const stream = new ReadStream(truncated);
+  const attempt = (bytes, label) => {
+    const stream = new ReadStream(bytes);
     let accepted;
     try {
-      accepted = interopSerialize(stream, data);
+      accepted = interopSerialize(stream, readData());
     } catch (error) {
-      throw new Error(`interop js refuse: the ${length} byte prefix of ${path} THREW: ${error}`);
+      throw new Error(`interop js refuse: ${label} of ${path} THREW: ${error}`);
     }
     if (accepted) {
-      throw new Error(`interop js refuse: the ${length} byte prefix of ${path} was ACCEPTED`);
+      throw new Error(`interop js refuse: ${label} of ${path} was ACCEPTED`);
     }
+    return stream.error;
+  };
+  for (let length = 0; length < input.length; length++) {
+    attempt(input.subarray(0, length), `the ${length} byte prefix`);
   }
-  console.log(`interop js: refused all ${input.length} truncated prefixes of ${path}`);
+  const longer = new Uint8Array(input.length + 1);
+  longer.set(input);
+  const reason = attempt(longer, 'the stream with a byte more');
+  if (reason !== 'trailing_data') {
+    throw new Error(`interop js refuse: the stream with a byte more was refused as ${reason}, not trailing_data`);
+  }
+  console.log(`interop js: refused all ${input.length} truncated prefixes of ${path}, and the stream with a byte more`);
 }
 
 const [mode, path] = process.argv.slice(2);

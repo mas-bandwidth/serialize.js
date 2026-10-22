@@ -83,12 +83,12 @@ test('a full-coverage range has no headroom: every pattern decodes: [-4,3]', () 
   }
 });
 
-test('truncated data refused as Overflow, exact fit accepted', () => {
+test('truncated data refused as PastEnd, exact fit accepted', () => {
   // [0,7] needs 3 bits: empty data refuses...
   const empty = new ReadStream(new Uint8Array(0));
   const ref = { value: 999 };
   assert.equal(empty.serializeInt(ref, 0, 7), false);
-  assert.equal(empty.error, SerializeError.Overflow);
+  assert.equal(empty.error, SerializeError.PastEnd);
   assert.equal(ref.value, 999);
 
   // ...one byte accepts
@@ -101,7 +101,7 @@ test('truncated data refused as Overflow, exact fit accepted', () => {
   const refuses = new ReadStream(packet);
   refuses.serializeBits({}, 6);
   assert.equal(refuses.serializeInt({}, 0, 7), false); // 6 + 3 > 8
-  assert.equal(refuses.error, SerializeError.Overflow);
+  assert.equal(refuses.error, SerializeError.PastEnd);
 
   // its neighbor: a 2-bit read fits exactly
   const accepts = new ReadStream(packet);
@@ -111,7 +111,7 @@ test('truncated data refused as Overflow, exact fit accepted', () => {
   assert.equal(accepts.ok, true);
 });
 
-test('a write past the end latches Overflow, the exact fit succeeds', () => {
+test('a write past the end latches PastEnd, the exact fit succeeds', () => {
   // 61 + 3 = 64 bits: exact fit succeeds
   const fits = new WriteStream(new Uint8Array(8));
   fits.serializeBits({ value: 0 }, 32);
@@ -125,7 +125,7 @@ test('a write past the end latches Overflow, the exact fit succeeds', () => {
   overflows.serializeBits({ value: 0 }, 32);
   overflows.serializeBits({ value: 0 }, 30);
   assert.equal(overflows.serializeInt({ value: 3 }, 0, 7), false);
-  assert.equal(overflows.error, SerializeError.Overflow);
+  assert.equal(overflows.error, SerializeError.PastEnd);
   assert.equal(overflows.bitsProcessed(), 62); // nothing was written
 });
 
