@@ -22,9 +22,9 @@ test('write overflow latches as a value, boundary fill accepted', () => {
   assert.equal(exact.ok, true);
   assert.equal(exact.bitsAvailable(), 0);
 
-  // one more bit does not fit: false and Overflow, not a throw
+  // one more bit does not fit: false and PastEnd, not a throw
   assert.equal(exact.serializeBits({ value: 1 }, 1), false);
-  assert.equal(exact.error, SerializeError.Overflow);
+  assert.equal(exact.error, SerializeError.PastEnd);
   assert.equal(exact.ok, false);
   assert.equal(exact.bitsProcessed(), 64);
 });
@@ -40,10 +40,10 @@ test('a latched write error is sticky: later calls no-op', () => {
   assert.equal(writer.serializeBits({ value: 0x42 }, 8), false);
   assert.equal(writer.serializeAlign(), false);
   assert.equal(writer.bitsProcessed(), 64);
-  assert.equal(writer.error, SerializeError.Overflow);
+  assert.equal(writer.error, SerializeError.PastEnd);
 });
 
-test('read past the end latches Overflow and leaves the ref unmodified', () => {
+test('read past the end latches PastEnd and leaves the ref unmodified', () => {
   // accept neighbor: a 1-byte packet read to exactly its end
   const reader = new ReadStream(new Uint8Array([0xab]));
   const ref = { value: 12345 };
@@ -56,7 +56,7 @@ test('read past the end latches Overflow and leaves the ref unmodified', () => {
   ref.value = 12345;
   assert.equal(reader.serializeBits(ref, 1), false);
   assert.equal(ref.value, 12345);
-  assert.equal(reader.error, SerializeError.Overflow);
+  assert.equal(reader.error, SerializeError.PastEnd);
   assert.equal(reader.bitsProcessed(), 8);
 
   // sticky: an in-range-looking call after the latch also refuses
@@ -89,7 +89,7 @@ test('a truncated packet refuses mid-message, its full neighbor accepts', () => 
     result = readSequence(reader, refs);
   });
   assert.equal(result, false);
-  assert.equal(reader.error, SerializeError.Overflow);
+  assert.equal(reader.error, SerializeError.PastEnd);
   assert.equal(refs.a.value, 21); // read before the truncation point
   assert.equal(refs.b.value, undefined); // never assigned
   assert.equal(refs.d.value, undefined); // short-circuited after the latch
@@ -99,19 +99,19 @@ test('a truncated packet refuses mid-message, its full neighbor accepts', () => 
   assert.equal(acceptRefs.b.value, 0xdeadbeef);
 });
 
-test('nonzero align padding latches Align, and the first error wins', () => {
+test('nonzero align padding latches NonzeroPadding, and the first error wins', () => {
   // known sequence D doctored: 01 AB with a padding bit set -> 81 AB
   const doctored = new Uint8Array([0x81, 0xab]);
   const reader = new ReadStream(doctored);
   const ref = {};
   assert.equal(reader.serializeBits(ref, 1), true);
   assert.equal(reader.serializeAlign(), false);
-  assert.equal(reader.error, SerializeError.Align);
+  assert.equal(reader.error, SerializeError.NonzeroPadding);
 
   // the stream has failed: a read that would ALSO overflow does not
   // overwrite the first error
   assert.equal(reader.serializeBits(ref, 32), false);
-  assert.equal(reader.error, SerializeError.Align);
+  assert.equal(reader.error, SerializeError.NonzeroPadding);
 
   // accept neighbor: clean padding reads through
   const clean = new ReadStream(new Uint8Array([0x01, 0xab]));
@@ -167,14 +167,14 @@ test('every read failure is terminal: the next valid read fails and writes nothi
   const cases = [
     {
       what: 'before any consumption',
-      expect: SerializeError.Overflow,
+      expect: SerializeError.PastEnd,
       // empty data: the first read cannot start
       data: [],
       fail: (s) => s.serializeBits({}, 1),
     },
     {
       what: 'after partial consumption',
-      expect: SerializeError.Overflow,
+      expect: SerializeError.PastEnd,
       // one byte read, then a 32-bit field that runs past the end
       data: [0xab, 0xcd],
       fail: (s) => s.serializeBits({}, 8) && s.serializeBits({}, 32),
@@ -188,14 +188,14 @@ test('every read failure is terminal: the next valid read fails and writes nothi
     },
     {
       what: 'on alignment',
-      expect: SerializeError.Align,
+      expect: SerializeError.NonzeroPadding,
       // a set padding bit after a 1-bit field
       data: [0x81, 0xab, 0xcd, 0xef],
       fail: (s) => s.serializeBits({}, 1) && s.serializeAlign(),
     },
     {
       what: 'on a malformed string',
-      expect: SerializeError.InvalidString,
+      expect: SerializeError.InvalidUtf8,
       // length 2 over bufferSize 8 (3 bits), aligned, then a lone 0xC3
       // continuation-less lead byte and a stray 0x28: invalid UTF-8
       data: [0x02, 0xc3, 0x28, 0xab, 0xcd, 0xef],
@@ -236,7 +236,7 @@ test('reset clears a latched error on every stream', () => {
   const writer = new WriteStream(new Uint8Array(8));
   writer.serializeBits({ value: 0 }, 32);
   writer.serializeBits({ value: 0 }, 32);
-  writer.serializeBits({ value: 0 }, 1); // latches Overflow
+  writer.serializeBits({ value: 0 }, 1); // latches PastEnd
   assert.equal(writer.ok, false);
   writer.reset(new Uint8Array(8));
   assert.equal(writer.ok, true);
@@ -244,7 +244,7 @@ test('reset clears a latched error on every stream', () => {
 
   const reader = new ReadStream(new Uint8Array([0x81]));
   reader.serializeBits({}, 1);
-  reader.serializeAlign(); // latches Align
+  reader.serializeAlign(); // latches NonzeroPadding
   assert.equal(reader.ok, false);
   reader.reset(new Uint8Array([0x01]));
   assert.equal(reader.ok, true);

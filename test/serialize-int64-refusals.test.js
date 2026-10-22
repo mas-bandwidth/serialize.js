@@ -95,13 +95,13 @@ test('the full range has no headroom: every corner pattern decodes', () => {
   }
 });
 
-test('truncated data refused as Overflow with NOTHING consumed', () => {
+test('truncated data refused as PastEnd with NOTHING consumed', () => {
   // a full-range read needs 64 bits; 32 bits of data refuse -- before the
   // low dword is read, so nothing is consumed
   const refused = new ReadStream(new Uint8Array(4));
   const ref = { value: 999n };
   assert.equal(refused.serializeInt64(ref, INT64_MIN, INT64_MAX), false);
-  assert.equal(refused.error, SerializeError.Overflow);
+  assert.equal(refused.error, SerializeError.PastEnd);
   assert.equal(ref.value, 999n);
   assert.equal(refused.bitsProcessed(), 0);
 
@@ -113,7 +113,7 @@ test('truncated data refused as Overflow with NOTHING consumed', () => {
   assert.equal(accepted.bitsProcessed(), 32);
 });
 
-test('a write past the end latches Overflow with NOTHING written', () => {
+test('a write past the end latches PastEnd with NOTHING written', () => {
   // 33 bits available, a 34-bit range write refuses up front
   const overflows = new WriteStream(new Uint8Array(8));
   overflows.serializeBits({ value: 0 }, 31);
@@ -121,7 +121,7 @@ test('a write past the end latches Overflow with NOTHING written', () => {
     overflows.serializeInt64({ value: 0n }, -5000000000n, 5000000000n),
     false,
   );
-  assert.equal(overflows.error, SerializeError.Overflow);
+  assert.equal(overflows.error, SerializeError.PastEnd);
   assert.equal(overflows.bitsProcessed(), 31); // nothing written
 
   // the exact fit succeeds: 30 + 34 = 64

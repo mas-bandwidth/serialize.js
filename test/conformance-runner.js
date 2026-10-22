@@ -1,5 +1,8 @@
-// The shared conformance corpus, run through this port's reader, writer and
-// measure.
+// The conformance runner: the shared corpus, run through a reader, writer
+// and measure. test/conformance.test.js runs it over this port's own
+// streams, and test/conformance-controls.test.js runs it over sabotaged
+// copies of them, so the instrument and the controls that prove it
+// responds are one piece of code.
 //
 // conformance/ is a VERBATIM VENDORED COPY of the directory of the same
 // name in mas-bandwidth/serialize, vendored the way STANDARD.md is and
@@ -35,17 +38,32 @@
 //   - a vector carrying `measure_at_least` additionally runs the measure
 //     stream over the same steps and requires at least that many bits, a
 //     floor and never an equality;
-//   - a REFUSED vector is refused, leaves the caller's scalar destination
-//     exactly as it was, and leaves the stream terminal.
+//   - a vector carrying `writer_input` hands the writer that float32 and
+//     requires the record's bytes exactly, on refused vectors too;
+//   - a REFUSED vector is refused for the reason it states -- the FIRST
+//     refusal's, which the stream latches -- leaves the caller's scalar
+//     destination exactly as it was, and leaves the stream terminal.
 
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { MeasureStream, ReadStream, WriteStream } from '../src/index.js';
+export const CORPUS_DIR = fileURLToPath(new URL('../conformance/', import.meta.url));
+export const CONTROLS_DIR = fileURLToPath(new URL('../conformance-controls/', import.meta.url));
 
-const CORPUS_DIR = fileURLToPath(new URL('../conformance/', import.meta.url));
+// The closed list of refusal reasons (STANDARD.md, "Refusal reasons"). A
+// refused vector states one of these, and a missing or unknown reason makes
+// the vector malformed: red, never a refusal of any kind.
+export const REASONS = new Set([
+  'past_end',
+  'value_out_of_range',
+  'nonzero_padding',
+  'trailing_data',
+  'non_finite_float',
+  'invalid_utf8',
+  'embedded_nul',
+  'non_canonical',
+]);
 
 // The buffer contract. This port's reader prices its windows inside the
 // buffer and requires no slack past the data (src/streams.js, ReadStream),
@@ -99,7 +117,7 @@ function parseNumber(text, where) {
  * repeats, once per parameter, and `param step` repeats once per step of a
  * sequence.
  */
-function parseVectors(text, file) {
+export function parseVectors(text, file) {
   const records = [];
   let current = null;
   const lines = text.split('\n');
@@ -151,8 +169,11 @@ function parseVectors(text, file) {
         );
         break;
       case 'expect':
-        if (value === 'refused') {
+        if (value === 'refused' || value.startsWith('refused ')) {
+          const reason = value.slice('refused'.length).trim();
+          assert.ok(REASONS.has(reason), `${where}: a refusal states one reason from the closed list, not '${reason}'`);
           current.expectKind = 'refused';
+          current.reason = reason;
         } else {
           const equals = value.indexOf('=');
           assert.notEqual(equals, -1, `${where}: expect needs 'refused' or '<kind> = ...'`);
@@ -172,6 +193,12 @@ function parseVectors(text, file) {
         assert.equal(value, 'canonical', `${where}: unknown writer mode '${value}'`);
         current.writerCanonical = true;
         break;
+      case 'writer_input': {
+        const match = /^bits\s*=\s*(\S+)$/.exec(value);
+        assert.ok(match, `${where}: malformed writer_input line`);
+        current.writerInputBits = Number(BigInt.asUintN(32, parseNumber(match[1], where)));
+        break;
+      }
       default:
         assert.fail(`${where}: unknown key '${key}'`);
     }
@@ -188,7 +215,7 @@ const OPERATION_PARAMS = {
   preceding_bits: ['align', 'bytes'],
   bits: ['bits'],
   count: ['bytes'],
-  buffer_size: ['string', 'wstring'],
+  buffer_size: ['string'],
   previous: ['int_relative'],
   res: ['compressed_float'],
   integer_bits: ['fixed'],
@@ -204,10 +231,10 @@ const OPERATION_PARAMS = {
 const PATTERN_KINDS = new Set(['bits', 'uint128', 'float', 'double', 'compressed_float']);
 const NUMBER_KINDS = new Set(['int', 'int64', 'int128', 'int_relative', 'fixed']);
 
-// The destinations "a refused primitive read must leave its destination
-// unwritten" reaches. STANDARD.md leaves a read into a caller-owned buffer
-// -- bytes, string and wstring -- UNSPECIFIED after a refusal, in as many
-// words, so those kinds are not checked here.
+// The destinations "a refused read must leave its destination unwritten"
+// reaches. STANDARD.md leaves a read into a caller-owned buffer -- bytes and
+// string -- UNSPECIFIED after a refusal, in as many words, so those kinds
+// are not checked here.
 const SCALAR_KINDS = new Set([...PATTERN_KINDS, ...NUMBER_KINDS, 'bool']);
 
 /** Builds a step from a `param step` spelling, per the head of sequence.txt. */
@@ -244,8 +271,8 @@ function stepFromWords(text, where) {
       return { kind: 'bytes', count: Number(number(1)) };
     case 'string/2':
       return { kind: 'string', bufferSize: Number(number(1)) };
-    case 'wstring/2':
-      return { kind: 'wstring', bufferSize: Number(number(1)) };
+    case 'end/1':
+      return { kind: 'end' };
     case 'int/3':
       return { kind: 'int', min: Number(number(1)), max: Number(number(2)) };
     case 'int64/3':
@@ -319,6 +346,7 @@ function buildSteps(record) {
     case 'bool':
     case 'uint128':
     case 'align':
+    case 'end':
     case 'float':
     case 'double':
       steps.push({ kind: record.operation });
@@ -345,8 +373,7 @@ function buildSteps(record) {
       steps.push({ kind: 'bytes', count: Number(numberParam('count')) });
       break;
     case 'string':
-    case 'wstring':
-      steps.push({ kind: record.operation, bufferSize: Number(numberParam('buffer_size')) });
+      steps.push({ kind: 'string', bufferSize: Number(numberParam('buffer_size')) });
       break;
     case 'fixed':
       steps.push(fixedStep(
@@ -385,6 +412,8 @@ function runStep(stream, step) {
       return stream.serializeUint128(ref);
     case 'align':
       return stream.serializeAlign();
+    case 'end':
+      return stream.serializeEnd();
     case 'int':
       return stream.serializeInt(ref, step.min, step.max);
     case 'int64':
@@ -403,8 +432,6 @@ function runStep(stream, step) {
       return stream.serializeBytes(step.buffer);
     case 'string':
       return stream.serializeString(ref, step.bufferSize);
-    case 'wstring':
-      return stream.serializeWideString(ref, step.bufferSize);
     case 'fixed':
       return stream.serializeFixed(ref, step.integerBits, step.fractionBits, step.min, step.max);
     default:
@@ -460,6 +487,9 @@ function stepPattern(step) {
     case 'compressed_float':
       return float32Pattern(value);
     case 'double':
+      if (typeof value !== 'number' || !Number.isFinite(value)) {
+        return -1n;
+      }
       SCRATCH.setFloat64(0, value, true);
       return SCRATCH.getBigUint64(0, true);
     default:
@@ -469,20 +499,24 @@ function stepPattern(step) {
 
 /**
  * The IEEE-754 single-precision bits of a decoded float. A float32 travels
- * through this port as a JavaScript number, so a non-NaN value's pattern is
- * the hardware narrowing, and a NaN's payload rides the top 23 bits of the
- * number's float64 mantissa, where serializeFloat's bit-transparent read
- * placed it. This is reinterpretation and not a codec: the read path is what
- * the vectors judge, and this inverse is independent of it.
+ * through this port as a JavaScript number, so its pattern is the hardware
+ * narrowing, exact for every float32 value. This is reinterpretation and not
+ * a codec: the read path is what the vectors judge. A non-finite value has
+ * no pattern the format carries, so a reader that hands one back cannot
+ * match any expectation.
  */
 function float32Pattern(value) {
-  if (!Number.isNaN(value)) {
-    SCRATCH.setFloat32(0, value, true);
-    return BigInt(SCRATCH.getUint32(0, true));
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return -1n;
   }
-  SCRATCH.setFloat64(0, value, true);
-  const bits = SCRATCH.getBigUint64(0, true);
-  return ((bits >> 63n) << 31n) | 0x7f800000n | ((bits >> 29n) & 0x7fffffn);
+  SCRATCH.setFloat32(0, value, true);
+  return BigInt(SCRATCH.getUint32(0, true));
+}
+
+/** The number whose float32 pattern is the given uint32: a writer_input. */
+function numberFromFloat32Pattern(bits) {
+  SCRATCH.setUint32(0, bits, true);
+  return SCRATCH.getFloat32(0, true);
 }
 
 function toHexBytes(bytes) {
@@ -497,8 +531,9 @@ function renderStepValue(step) {
   switch (step.kind) {
     case 'object':
     case 'align':
-      // neither has a value of its own; for align the corpus states the
-      // padding it consumed, which a conforming read always finds zero
+    case 'end':
+      // none has a value of its own; for align and end the corpus states
+      // the padding consumed, which a conforming read always finds zero
       return '0';
     case 'bool':
       return step.ref.value ? 'true' : 'false';
@@ -506,16 +541,6 @@ function renderStepValue(step) {
       return toHexBytes(step.buffer);
     case 'string':
       return toHexBytes(UTF8.encode(step.ref.value));
-    case 'wstring': {
-      // per CODE UNIT, never per code point: a surrogate pair is two
-      // transmitted groups and the corpus states both
-      const text = step.ref.value;
-      const units = [];
-      for (let i = 0; i < text.length; i++) {
-        units.push(text.charCodeAt(i).toString(16).padStart(4, '0').toUpperCase());
-      }
-      return units.join(' ');
-    }
     default:
       throw new Error(`no rendering for step kind '${step.kind}'`);
   }
@@ -545,7 +570,18 @@ function streamData(record) {
   return backing.subarray(0, record.bytes.length);
 }
 
-function runVector(record) {
+/**
+ * Builds the vector runner over a set of streams: this port's own, or a
+ * sabotaged copy of them. The returned function throws on any disagreement
+ * with the vector and returns quietly on agreement.
+ */
+export function makeRunner({ ReadStream, WriteStream, MeasureStream }) {
+  return function runVector(record) {
+    runVectorWith(record, ReadStream, WriteStream, MeasureStream);
+  };
+}
+
+function runVectorWith(record, ReadStream, WriteStream, MeasureStream) {
   for (const name of record.params.keys()) {
     const takers = OPERATION_PARAMS[name];
     assert.ok(
@@ -562,7 +598,10 @@ function runVector(record) {
 
   if (record.expectKind === 'refused') {
     assert.equal(ok, false, 'the read succeeded, the corpus requires refusal');
-    assert.notEqual(stream.error, null, 'a refusal latches an error');
+    // the reason is part of the format: a refusal under any other rule is a
+    // disagreement however red the stream ends up, and the reason the
+    // stream reports is the FIRST refusal's
+    assert.equal(stream.error, record.reason, `refused as '${stream.error}', the corpus states '${record.reason}'`);
 
     if (failedStep && SCALAR_KINDS.has(failedStep.kind)) {
       assert.equal(failedStep.ref.value, UNTOUCHED, 'the refused read wrote to its destination');
@@ -587,6 +626,8 @@ function runVector(record) {
     assert.equal(stream.serializeBits(after, 8), false, 'a further read must fail');
     assert.equal(after.value, UNTOUCHED, 'a read after a refusal writes nothing');
     assert.equal(stream.bitsProcessed(), bitsBefore, 'a read after a refusal consumes no bits');
+    assert.equal(stream.error, record.reason, 'a later refusal is an echo: the first reason stands');
+    runWriterInput(record, WriteStream);
     return;
   }
 
@@ -611,6 +652,8 @@ function runVector(record) {
   }
 
   assert.equal(stream.bitsProcessed(), record.consumed, 'consumes its stated bits');
+
+  runWriterInput(record, WriteStream);
 
   if (record.writerCanonical) {
     // The writer leg re-emits the decoded values and the comparison covers
@@ -642,31 +685,46 @@ function runVector(record) {
   }
 }
 
-const files = readdirSync(CORPUS_DIR).filter((name) => name.endsWith('.txt')).sort();
-const corpus = files.map((file) => [file, parseVectors(readFileSync(CORPUS_DIR + file, 'utf8'), file)]);
-
-test('the corpus is present and every file parses into records', () => {
-  assert.ok(files.length > 0, 'conformance/ holds at least one vector file');
-  for (const [file, records] of corpus) {
-    assert.ok(records.length > 0, `${file} holds at least one vector`);
-    for (const record of records) {
-      assert.ok(record.operation, `${record.where}: no operation`);
-      assert.ok(record.name, `${record.where}: no name`);
-      assert.ok(record.bytes, `${record.where}: no bytes`);
-      assert.notEqual(record.expectKind, undefined, `${record.where}: no expect`);
-      assert.equal(
-        record.consumed === undefined,
-        record.expectKind === 'refused',
-        `${record.where}: consumed is stated on accepted reads and only there`,
-      );
-    }
+/**
+ * The writer input leg (STANDARD.md, "What a runner checks"): a canonical
+ * vector can only re-emit the value it decoded, which lands on a quantum
+ * where every plausible arithmetic agrees, so a compressed_float vector
+ * carrying `writer_input` hands the writer the value a caller would have --
+ * between quanta, or in the fusion band -- and the emission must be the
+ * vector's bytes exactly. Its input is the record's and not the decode, so
+ * it runs on refused vectors too.
+ */
+function runWriterInput(record, WriteStream) {
+  if (record.writerInputBits === undefined) {
+    return;
   }
-});
+  const steps = buildSteps(record);
+  assert.ok(
+    steps.length === 1 && steps[0].kind === 'compressed_float',
+    'writer_input is only meaningful on a single compressed_float',
+  );
+  steps[0].ref = { value: numberFromFloat32Pattern(record.writerInputBits) };
+  const capacity = Math.ceil((record.bytes.length + 64) / 8) * 8;
+  const writer = new WriteStream(new Uint8Array(capacity).fill(SLACK_FILL));
+  assert.equal(runSteps(writer, steps).ok, true, 'the writer refused its input');
+  writer.flush();
+  assert.deepEqual(
+    Array.from(writer.data()),
+    Array.from(record.bytes),
+    'the writer handed its input emits the bytes the corpus states',
+  );
+}
 
-// One node:test case per vector, so a red run names every vector that
-// disagrees with the standard rather than stopping at the first.
-for (const [file, records] of corpus) {
-  for (const record of records) {
-    test(`conformance/${file}: ${record.name}`, () => runVector(record));
-  }
+/** Every vector file in a directory, parsed: the directory is discovered, never named. */
+export function loadCorpus(dir = CORPUS_DIR) {
+  const files = readdirSync(dir).filter((name) => name.endsWith('.txt')).sort();
+  return files.map((file) => [file, parseVectors(readFileSync(dir + file, 'utf8'), file)]);
+}
+
+/** The vector names a control's .expected file lists, in file order. */
+export function loadExpectedFailures(control) {
+  return readFileSync(`${CONTROLS_DIR}${control}.expected`, 'utf8')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '' && !line.startsWith('#'));
 }

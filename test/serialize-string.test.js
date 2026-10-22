@@ -130,13 +130,50 @@ test('a leading U+FEFF is a code point, not a BOM: it survives the round trip', 
   assert.equal(readString(wire, 16), text);
 });
 
-test('a lone surrogate encodes as U+FFFD: the writer contract surfacing as replacement', () => {
-  // ill-formed UTF-16 input violates the writer's contract; WHATWG UTF-8
-  // encodes the lone surrogate as U+FFFD, so the wire stays well-formed
-  // and the round trip returns the replacement character, not the surrogate
-  const wire = writeString('\ud800', 16);
-  assert.deepEqual(Array.from(wire), [0x03, 0xef, 0xbf, 0xbd]);
-  assert.equal(readString(wire, 16), '\uFFFD');
+test('the checked writer refuses a lone surrogate as invalid_utf8, before the encoder can launder it', () => {
+  // ill-formed UTF-16 has no UTF-8 encoding at all; TextEncoder would
+  // silently write U+FFFD, a character the caller never handed in. The
+  // checked writer latches InvalidUtf8 and puts nothing on the wire
+  for (const value of ['\ud800', 'a\udc00', 'ab\ud83d', '\ude00\ud83d']) {
+    for (const stream of [new WriteStream(new Uint8Array(64)), new MeasureStream()]) {
+      assert.equal(stream.serializeString({ value }, 16), false, `${JSON.stringify(value)} refused`);
+      assert.equal(stream.error, SerializeError.InvalidUtf8);
+      assert.equal(stream.bitsProcessed(), 0, 'nothing written');
+    }
+  }
+  // the accept-boundary neighbour: the same surrogates, paired
+  const wire = writeString('\ud83d\ude00', 16);
+  assert.deepEqual(Array.from(wire), [0x04, 0xf0, 0x9f, 0x98, 0x80]);
+  assert.equal(readString(wire, 16), '\u{1F600}');
+});
+
+test('the checked writer refuses U+0000 as embedded_nul at every position', () => {
+  for (const value of ['\0', '\0ab', 'a\0b', 'ab\0']) {
+    for (const stream of [new WriteStream(new Uint8Array(64)), new MeasureStream()]) {
+      assert.equal(stream.serializeString({ value }, 16), false, `${JSON.stringify(value)} refused`);
+      assert.equal(stream.error, SerializeError.EmbeddedNul);
+      assert.equal(stream.bitsProcessed(), 0, 'nothing written');
+    }
+  }
+  // the accept-boundary neighbour: U+0001, the nearest character that is not NUL
+  assert.deepEqual(Array.from(writeString('a\u0001b', 16)), [0x03, 0x61, 0x01, 0x62]);
+});
+
+test('real text round trips byte for byte: no normalization, no replacement, every plane', () => {
+  // combining acute stays three bytes, distinct from the precomposed form;
+  // a byte order mark, a noncharacter, right-to-left text and four-byte
+  // characters all travel unchanged
+  const cases = [
+    'e\u0301', '\u00E9', '\uFEFF\u7881', '\uFFFF', '\u0628\u0627\u062F\u0648\u0642',
+    '\u{1F600}', '\u{20000}', '\u{10FFFF}', '\uBC14\uB451', '\u56F2\u7881',
+  ];
+  for (const text of cases) {
+    const wire = writeString(text, 64);
+    const bytes = new TextEncoder().encode(text);
+    assert.deepEqual(Array.from(wire.subarray(1)), Array.from(bytes), `${JSON.stringify(text)} writes its UTF-8`);
+    assert.equal(readString(wire, 64), text, `${JSON.stringify(text)} reads back exactly`);
+  }
+  assert.notEqual(readString(writeString('e\u0301', 64), 64), '\u00E9', 'never normalized');
 });
 
 test('too-long string refused as ValueOutOfRange, the boundary length accepted', () => {
@@ -162,11 +199,11 @@ test('the length check counts UTF-8 bytes, not UTF-16 code units', () => {
   assert.equal(refused.error, SerializeError.ValueOutOfRange);
 });
 
-test('a string that does not fit the write buffer latches Overflow', () => {
+test('a string that does not fit the write buffer latches PastEnd', () => {
   // 10 payload bytes cannot fit an 8-byte buffer whatever the bufferSize
   const writer = new WriteStream(new Uint8Array(8));
   assert.equal(writer.serializeString({ value: 'abcdefghij' }, 16), false);
-  assert.equal(writer.error, SerializeError.Overflow);
+  assert.equal(writer.error, SerializeError.PastEnd);
 });
 
 test('bufferSize 1 is the degenerate length field: the empty string in zero bits', () => {

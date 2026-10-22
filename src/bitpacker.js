@@ -15,10 +15,10 @@
 // (see mode.js): CheckedBitWriter -- the development default -- validates
 // every caller contract and throws on caller error, and ProductionBitWriter
 // carries the family's release shape: the caller is responsible for
-// well-formed writes (STANDARD.md, "Writes assume trusted data"), so the
+// well-formed writes (STANDARD.md, "Writers are trusted; readers are not"), so the
 // per-operation caller validation is gone and only tryWriteBits's buffer-end
 // check remains -- the one write-path check the writer-trusted model keeps,
-// because its false is the stream layer's sticky Overflow. The read side is
+// because its false is the stream layer's sticky PastEnd. The read side is
 // different in EVERY mode: the wire is a trust boundary, and hostile input
 // never throws. See BitReader.
 //
@@ -177,7 +177,7 @@ class CheckedBitWriter {
    * success, or false -- writing nothing -- if the write would go past the
    * end of the buffer. The write-side mirror of tryReadBits, and the single
    * bounds check on the stream layer's hot path: the stream refuses the
-   * false as its Overflow without a second check anywhere. bits must be in
+   * false as its PastEnd without a second check anywhere. bits must be in
    * [1,32] and value a number -- caller contracts, and violating them
    * throws.
    *
@@ -383,7 +383,7 @@ class CheckedBitWriter {
 /**
  * The PRODUCTION variant of the bit writer: the same wire as
  * CheckedBitWriter with the caller validation removed -- the family's
- * release shape (STANDARD.md, "Writes assume trusted data": the caller is
+ * release shape (STANDARD.md, "Writers are trusted; readers are not": the caller is
  * responsible for well-formed writes, and release builds carry zero caller
  * validation on the write path). mode.js selects this class as BitWriter
  * when NODE_ENV is 'production' at module load.
@@ -391,7 +391,7 @@ class CheckedBitWriter {
  * What remains is exactly what the writer-trusted model keeps hard:
  *
  * - tryWriteBits keeps its buffer-end check. Its false is the stream
- *   layer's sticky Overflow refusal: a message that does not fit the buffer
+ *   layer's sticky PastEnd refusal: a message that does not fit the buffer
  *   is a runtime condition, not a caller bug, so the overflow contract
  *   latches identically in both modes.
  * - The value mask stays in both entries: bits of the value above the count
@@ -491,7 +491,7 @@ class ProductionBitWriter {
    * Writes bits, refusing a past-end write as a value: returns true on
    * success, or false -- writing nothing -- if the write would go past the
    * end of the buffer. THE RETAINED HARD CHECK of the production write
-   * path: the stream layer's sticky Overflow latches off this false, in
+   * path: the stream layer's sticky PastEnd latches off this false, in
    * both modes identically. bits in [1,32] and a Number value remain the
    * caller's contract, unvalidated here.
    *

@@ -7,7 +7,7 @@
 //
 // The wire format is defined by STANDARD.md at the repository root, vendored
 // verbatim from mas-bandwidth/serialize. That document is the authority, and
-// this library implements format version 1.1 of it.
+// this library implements format version 2.0 of it.
 //
 // This module is the package entry point.
 

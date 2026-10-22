@@ -85,14 +85,14 @@ test('truncated data refuses cleanly, checked against the total width up front',
   const reader = new ReadStream(new Uint8Array(2));
   const ref = { value: 'untouched' };
   assert.equal(reader.serializeFixed(ref, 48, 16, -100000000000n, 100000000000n), false);
-  assert.equal(reader.error, SerializeError.Overflow);
+  assert.equal(reader.error, SerializeError.PastEnd);
   assert.equal(ref.value, 'untouched');
   assert.equal(reader.bitsProcessed(), 0, 'a refused wide read consumes nothing');
 
   // empty data refuses the narrow lane too
   const empty = new ReadStream(new Uint8Array(0));
   assert.equal(empty.serializeFixed({}, 8, 8, -100, 100), false);
-  assert.equal(empty.error, SerializeError.Overflow);
+  assert.equal(empty.error, SerializeError.PastEnd);
 });
 
 test('writes and measures refuse raw values outside the raw bounds as latched errors', () => {
@@ -151,7 +151,7 @@ test('a refused wide write puts nothing on the wire', () => {
   assert.equal(writer.serializeBits({ value: 0 }, 32), true);
   assert.equal(writer.serializeBits({ value: 0 }, 8), true);
   assert.equal(writer.serializeFixed({ value: 0n }, 48, 16, -100000n, 100000n), false);
-  assert.equal(writer.error, SerializeError.Overflow);
+  assert.equal(writer.error, SerializeError.PastEnd);
   assert.equal(writer.bitsProcessed(), 40, 'nothing written on refusal');
 });
 
@@ -236,7 +236,7 @@ test('a latched stream refuses fixed serializes without touching state', () => {
   assert.equal(writer.bitsProcessed(), 0);
 
   const reader = new ReadStream(new Uint8Array(0));
-  assert.equal(reader.serializeBits({}, 1), false); // latch Overflow
+  assert.equal(reader.serializeBits({}, 1), false); // latch PastEnd
   const ref = { value: 'untouched' };
   assert.equal(reader.serializeFixed(ref, 8, 8, -100, 100), false);
   assert.equal(ref.value, 'untouched');
