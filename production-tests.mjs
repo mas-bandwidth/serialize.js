@@ -32,6 +32,7 @@ const files = [
   'test/bits-required-wide.test.js',
   'test/bits-required.test.js',
   'test/conformance-controls.test.js',
+  'test/conformance-dir.test.js',
   'test/conformance.test.js',
   'test/golden-wire.test.js',
   'test/measure.test.js',

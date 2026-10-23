@@ -46,10 +46,30 @@
 
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
+import { resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const CORPUS_DIR = fileURLToPath(new URL('../conformance/', import.meta.url));
-export const CONTROLS_DIR = fileURLToPath(new URL('../conformance-controls/', import.meta.url));
+/**
+ * The directory a run reads: the vendored one, unless the environment names
+ * another. The nightly functional test (.github/workflows/nightly-conformance.yml)
+ * names mas-bandwidth/serialize's own conformance/ and conformance-controls/
+ * at main HEAD, so the port is held to the current C/C++ data and not only
+ * to the copy vendored here. An unset or empty variable is the vendored
+ * path. The result always ends in a separator: callers append file names.
+ */
+export function conformanceDir(override, vendored) {
+  const dir = override === undefined || override === '' ? vendored : resolve(override);
+  return dir.endsWith(sep) ? dir : dir + sep;
+}
+
+export const CORPUS_DIR = conformanceDir(
+  process.env.SERIALIZE_CONFORMANCE_DIR,
+  fileURLToPath(new URL('../conformance/', import.meta.url)),
+);
+export const CONTROLS_DIR = conformanceDir(
+  process.env.SERIALIZE_CONFORMANCE_CONTROLS_DIR,
+  fileURLToPath(new URL('../conformance-controls/', import.meta.url)),
+);
 
 // The closed list of refusal reasons (STANDARD.md, "Refusal reasons"). A
 // refused vector states one of these, and a missing or unknown reason makes
