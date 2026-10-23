@@ -46,7 +46,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Runner
-        run: echo "runner: $RUNNER_NAME"
+        run: |
+          echo "runner: $RUNNER_NAME"
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4
 
@@ -58,7 +59,8 @@ jobs:
           path: upstream
 
       - name: Record the upstream commit
-        run: echo "upstream: mas-bandwidth/serialize@$(git -C upstream rev-parse HEAD) (committed corpus, no generator upstream)"
+        run: |
+          echo "upstream: mas-bandwidth/serialize@$(git -C upstream rev-parse HEAD) (committed corpus, no generator upstream)"
 
       # The reference's own build and ctest: its conformance runner over the
       # corpus and its negative controls, so the data this port is held to
