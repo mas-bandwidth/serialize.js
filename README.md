@@ -209,6 +209,31 @@ is proven **absent**: calls that throw or latch in dev pass through in
 production, and overflow still latches. CI runs both legs on every OS and
 Node version, and lint as its own failing check.
 
+### Fuzzing
+
+`fuzz/` holds a coverage-guided fuzz harness on [Jazzer.js](https://github.com/CodeIntelligenceTesting/jazzer.js),
+the two passes of the reference's `fuzz.cpp`. Jazzer.js is pinned in
+`fuzz/package.json` and its own lockfile, so the library package itself
+keeps zero dependencies.
+
+```
+cd fuzz && npm ci
+npx jazzer read.fuzz.js corpus/read --sync -- -max_total_time=60
+npx jazzer roundtrip.fuzz.js corpus/roundtrip --sync -- -max_total_time=60
+```
+
+`read.fuzz.js` feeds arbitrary bytes through every read primitive: each read
+returns true with a value inside its contract, or false with a reason from
+the closed list, its destination untouched and every later call an echo;
+nothing throws, and the same bytes read through a view over a larger buffer
+give identical results. `roundtrip.fuzz.js` writes values generated from the
+input, measures and reads them back: any asymmetry, or a measure below the
+bits written, is a finding. `SERIALIZE_FUZZ_SABOTAGE=int-relative-tier`
+fuzzes a copy of `src/` with a planted writer asymmetry instead, the
+negative control. CI runs both targets for 60 s and requires the negative
+control to be caught on every push; `nightly-fuzz.yml` runs them for an hour
+a day on a cached corpus, the round trip under both write-path variants.
+
 Benchmarking for the serialize family lives in [mas-bandwidth/schema](https://github.com/mas-bandwidth/schema)'s data-driven bench, which measures the generated codecs across every language on one corpus.
 
 ## License

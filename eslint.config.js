@@ -34,7 +34,7 @@ const RECOMMENDED = [
 ];
 
 export default [
-  { ignores: ['.controls/**', 'node_modules/**'] },
+  { ignores: ['.controls/**', 'node_modules/**', 'fuzz/node_modules/**', 'fuzz/.sabotage/**'] },
   {
     files: ['**/*.js', '**/*.mjs'],
     languageOptions: {
