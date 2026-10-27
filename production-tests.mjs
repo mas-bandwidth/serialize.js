@@ -34,6 +34,7 @@ const files = [
   'test/conformance-controls.test.js',
   'test/conformance-dir.test.js',
   'test/conformance.test.js',
+  'test/consumer/package-consumer.test.js',
   'test/golden-wire.test.js',
   'test/measure.test.js',
   'test/property-sweep.test.js',
@@ -46,6 +47,7 @@ const files = [
   'test/stream-errors.test.js',
   'test/uint-helpers.test.js',
   'test/writer-tail-span.test.js',
+  'test/production/production-operation-parity.test.js',
   'test/production/production-write-path.test.js',
 ];
 

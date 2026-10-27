@@ -69,6 +69,14 @@ the final byte's unused bits as `NonzeroPadding`, so the buffer you hand
 is always one byte sequence. On write and measure it emits nothing. A
 nested object never calls it: only the packet ends.
 
+**A nested object goes through `serializeObject`.**
+`stream.serializeObject((s) => serializePlayer(s, player))` calls the
+function inline and adds no bits of its own (STANDARD.md, "object"). A
+stream that has already failed refuses before the function runs, so even
+an object that reads nothing refuses after a refusal, and a function that
+returns `false`, or returns `true` over a refusal it ignored, refuses the
+whole.
+
 `WriteStream` needs a buffer whose length is a multiple of 8 (the writer
 works in 64-bit words). `ReadStream` accepts any data length and never
 reads outside it. `MeasureStream` touches no memory at all — it prices a

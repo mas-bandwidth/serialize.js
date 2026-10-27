@@ -115,6 +115,36 @@ const CONTROLS = [
     }],
   },
   {
+    // The reference's control swaps serialize_object back to a bare call,
+    // deleting the check on entry and the latch on exit together; either
+    // one alone is enough for these vectors, so both go.
+    name: 'object-terminal',
+    rule: 'a nested object on a failed stream refuses before its callback runs',
+    patches: [{
+      file: 'streams.js',
+      needle: [
+        '   * @param {(stream: ReadStream) => boolean} serialize the object\'s serialize function.',
+        '   * @returns {boolean} true on success.',
+        '   */',
+        '  serializeObject(serialize) {',
+        '    if (this.#error !== SerializeError.None) {',
+        '      return false;',
+        '    }',
+        '    return serialize(this) === true && this.#error === SerializeError.None;',
+      ].join('\n'),
+      patch: [
+        '   * @param {(stream: ReadStream) => boolean} serialize the object\'s serialize function.',
+        '   * @returns {boolean} true on success.',
+        '   */',
+        '  serializeObject(serialize) {',
+        `    if (this.#error !== SerializeError.None && serialize === undefined) {${MARK}`,
+        '      return false;',
+        '    }',
+        `    return serialize(this) === true;${MARK}`,
+      ].join('\n'),
+    }],
+  },
+  {
     name: 'float-finite',
     rule: 'a float read refuses NaN and the infinities',
     patches: [{
