@@ -43,6 +43,7 @@ const files = [
   'test/serialize-int-relative.test.js',
   'test/serialize-string-refusals.test.js',
   'test/serialize-uint128.test.js',
+  'test/serialize-reject.test.js',
   'test/smoke.test.js',
   'test/stream-errors.test.js',
   'test/uint-helpers.test.js',

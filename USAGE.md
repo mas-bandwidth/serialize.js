@@ -75,7 +75,17 @@ function inline and adds no bits of its own (STANDARD.md, "object"). A
 stream that has already failed refuses before the function runs, so even
 an object that reads nothing refuses after a refusal, and a function that
 returns `false`, or returns `true` over a refusal it ignored, refuses the
-whole.
+whole. A function that returns `false` with nothing refused inside it is
+your own refusal, and latches `rejected`; a refusal inside it keeps its own
+reason.
+
+**Your own refusal goes through `stream.reject()`.** When the bytes are well
+formed but the value they carry is one you refuse, `return stream.reject()`
+from the serialize function: it latches `rejected` (STANDARD.md, "Refusal
+reasons") through the same latch as every wire refusal, so it is terminal
+and a stream that already failed keeps its first reason. It is read only:
+on a `WriteStream` or `MeasureStream` the checked runtime throws, and the
+production variant returns `false`.
 
 `WriteStream` needs a buffer whose length is a multiple of 8 (the writer
 works in 64-bit words). `ReadStream` accepts any data length and never
@@ -126,6 +136,7 @@ The errors are the standard's closed list of refusal reasons, and
 | `InvalidUtf8` | `'invalid_utf8'` | a string payload that is not well-formed UTF-8 (or a lone surrogate handed to the checked writer) |
 | `EmbeddedNul` | `'embedded_nul'` | a zero byte among a string's bytes (or a U+0000 handed to the checked writer) |
 | `NonCanonical` | `'non_canonical'` | the int_relative absolute tier carrying a difference a bounded tier carries |
+| `Rejected` | `'rejected'` | the bytes were well formed, and the caller refused the value they carry |
 
 The reason that stands is the **first** refusal's: later refusals on a
 failed stream are echoes. A healthy stream's `error` is

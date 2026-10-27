@@ -98,15 +98,17 @@ ESM, zero dependencies, no build step, Node 20+.
 
 Every refusal has a reason from the standard's closed list — `past_end`,
 `value_out_of_range`, `nonzero_padding`, `trailing_data`,
-`non_finite_float`, `invalid_utf8`, `embedded_nul`, `non_canonical` — the
-values of `SerializeError`, and `stream.error` holds the first one.
+`non_finite_float`, `invalid_utf8`, `embedded_nul`, `non_canonical`, and
+`rejected` for the caller's own refusal (`stream.reject()`, or a nested
+object whose function returns `false`) — the values of `SerializeError`,
+and `stream.error` holds the first one.
 
 ## Conformance
 
 [STANDARD.md](STANDARD.md) — vendored verbatim from
 [mas-bandwidth/serialize](https://github.com/mas-bandwidth/serialize) and
 diffed against upstream by CI on every push — is the authority. This
-library implements **format version 2.0**: the wire carries only integers
+library implements **format version 2.0**, standard revision 2.1: the wire carries only integers
 and bytes, and every value has exactly one encoding.
 
 [`conformance/`](conformance) is vendored and diffed the same way: it is
