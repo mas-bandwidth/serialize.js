@@ -258,3 +258,56 @@ test('reset clears a latched error on every stream', () => {
   assert.equal(measure.ok, true);
   assert.equal(measure.bitsProcessed(), 0);
 });
+
+test('a failed read stream refuses a nested object on entry, an empty one included', () => {
+  // accept neighbor: a healthy empty object at the exact end of the stream
+  // runs, reads nothing, and the end still accepts
+  const healthy = new ReadStream(new Uint8Array([0x5a]));
+  const byte = { value: 0 };
+  assert.equal(healthy.serializeBits(byte, 8), true);
+  let called = false;
+  assert.equal(healthy.serializeObject(() => (called = true)), true);
+  assert.equal(called, true);
+  assert.equal(healthy.ok, true);
+  assert.equal(healthy.serializeEnd(), true);
+
+  // refused: after a past-end refusal the empty object is never called,
+  // consumes nothing and leaves the first reason standing
+  const reader = new ReadStream(new Uint8Array([0xff]));
+  assert.equal(reader.serializeBits({ value: 0 }, 16), false);
+  const bits = reader.bitsProcessed();
+  called = false;
+  assert.equal(reader.serializeObject(() => (called = true)), false);
+  assert.equal(called, false);
+  assert.equal(reader.bitsProcessed(), bits);
+  assert.equal(reader.error, SerializeError.PastEnd);
+});
+
+test('a nested object that swallows a refusal still refuses the whole', () => {
+  // accept neighbor: the same object over an in-range byte
+  const accepted = new ReadStream(new Uint8Array([0x0a]));
+  const ok = { value: -77 };
+  assert.equal(accepted.serializeObject((s) => (s.serializeInt(ok, 0, 10), true)), true);
+  assert.equal(ok.value, 10);
+
+  // refused: the int is out of range, the callback returns true anyway
+  const reader = new ReadStream(new Uint8Array([0x0b]));
+  const value = { value: -77 };
+  assert.equal(reader.serializeObject((s) => (s.serializeInt(value, 0, 10), true)), false);
+  assert.equal(value.value, -77);
+  assert.equal(reader.error, SerializeError.ValueOutOfRange);
+  assert.equal(reader.serializeObject(() => true), false);
+  assert.equal(reader.error, SerializeError.ValueOutOfRange);
+});
+
+test('a nested object adds no bits and its refusal is the whole refusal, on every stream', () => {
+  const writer = new WriteStream(new Uint8Array(8));
+  assert.equal(writer.serializeObject((s) => s.serializeBits({ value: 0xab }, 8)), true);
+  assert.equal(writer.bitsProcessed(), 8);
+  assert.equal(writer.serializeObject(() => false), false);
+
+  const measure = new MeasureStream();
+  assert.equal(measure.serializeObject((s) => s.serializeBits({ value: 0xab }, 8)), true);
+  assert.equal(measure.bitsProcessed(), 8);
+  assert.equal(measure.serializeObject(() => false), false);
+});

@@ -1257,6 +1257,21 @@ class CheckedWriteStream {
   }
 
   /**
+   * Writes a nested object (STANDARD.md, "object"): calls serialize(this)
+   * inline and adds no bytes of its own. A latched error refuses before the
+   * callback runs, and a callback that returns false, or leaves an error
+   * latched, refuses the whole.
+   * @param {(stream: CheckedWriteStream) => boolean} serialize the object's serialize function.
+   * @returns {boolean} true on success.
+   */
+  serializeObject(serialize) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    return serialize(this) === true && this.#error === SerializeError.None;
+  }
+
+  /**
    * Flushes the last word of bits to memory. Always call this after you
    * finish writing and before you use data(), or you risk truncating the
    * last word. The flush ends the write: do not serialize more values
@@ -1909,6 +1924,19 @@ class ProductionWriteStream {
    */
   serializeEnd() {
     return this.#error === SerializeError.None;
+  }
+
+  /**
+   * serializeObject: calls serialize(this) inline, exactly as the checked
+   * variant.
+   * @param {(stream: ProductionWriteStream) => boolean} serialize the object's serialize function.
+   * @returns {boolean} true on success.
+   */
+  serializeObject(serialize) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    return serialize(this) === true && this.#error === SerializeError.None;
   }
 
   /**
@@ -2771,6 +2799,24 @@ export class ReadStream {
   }
 
   /**
+   * Reads a nested object (STANDARD.md, "object"): calls serialize(this)
+   * inline, exactly as the same operations read unnested, with no framing
+   * of its own. Failure is terminal across the object's entry and exit: a
+   * failed stream refuses before the callback runs, so even an empty object
+   * that reads no bits refuses after a refusal, and a callback that returns
+   * false, or returns true over a refusal it swallowed, refuses the whole.
+   * The latched reason is always the first refusal's.
+   * @param {(stream: ReadStream) => boolean} serialize the object's serialize function.
+   * @returns {boolean} true on success.
+   */
+  serializeObject(serialize) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    return serialize(this) === true && this.#error === SerializeError.None;
+  }
+
+  /**
    * The number of bits required to align the stream to the next byte
    * boundary, in [0,7].
    */
@@ -3244,6 +3290,19 @@ class CheckedMeasureStream {
   }
 
   /**
+   * Measures a nested object: calls serialize(this) inline and adds no bits
+   * of its own. A latched error refuses before the callback runs.
+   * @param {(stream: CheckedMeasureStream) => boolean} serialize the object's serialize function.
+   * @returns {boolean} true on success.
+   */
+  serializeObject(serialize) {
+    if (this.#error !== SerializeError.None) {
+      return false;
+    }
+    return serialize(this) === true && this.#error === SerializeError.None;
+  }
+
+  /**
    * The worst case align of 7 bits. The number of bits required for
    * alignment depends on where the message lands in the final bit stream,
    * so the measurement is conservative.
@@ -3554,6 +3613,16 @@ class ProductionMeasureStream {
    */
   serializeEnd() {
     return true;
+  }
+
+  /**
+   * Measures a nested object: calls serialize(this) inline and adds no bits
+   * of its own.
+   * @param {(stream: ProductionMeasureStream) => boolean} serialize the object's serialize function.
+   * @returns {boolean} the callback's result.
+   */
+  serializeObject(serialize) {
+    return serialize(this) === true;
   }
 
   /**
