@@ -342,6 +342,23 @@ r6.serializeBytes(out); // out now holds the bytes
 
 A zero-length array still performs (and verifies) the align.
 
+`serializeBytes(data, offset, length)` takes a span of the array instead
+of all of it, with no subarray view allocated per call: the span's length
+is the count, and a read fills only the span. `offset` defaults to 0 and
+`length` to `data.length - offset`; a span outside the array is caller
+misuse and throws (always on a read; on the write and measure streams in
+the checked variant). A fixed-capacity array carrying a used length is the
+common case:
+
+```js
+w6.serializeBytes(text, 0, textLength); // the used prefix, no view
+// ...
+r6.serializeBytes(text, 0, textLength); // fills text[0, textLength)
+```
+
+`BitWriter.writeBytes` and `BitReader.readBytesInto` take the same
+`offset, length` span.
+
 ## Strings: UTF-8 on the wire
 
 `serializeString(ref, bufferSize)` sends the UTF-8 byte length as
