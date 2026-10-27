@@ -49,6 +49,56 @@ jobs:
       - name: ESLint, zero warnings
         run: npm run lint
 
+  # The fuzz smoke: the reference's 60 second libFuzzer job, here on Jazzer.js
+  # (coverage-guided, libFuzzer in-process). fuzz/ carries its own package.json
+  # and lockfile, so the library package stays dependency-free; npm ci installs
+  # exactly the pinned Jazzer.js. Two targets, the two passes of the reference's
+  # fuzz.cpp: a hostile read of arbitrary bytes, and a differential write ->
+  # measure -> read round trip. Then the reversed witness: the round trip run
+  # over a copy of src/ with a planted writer asymmetry must be CAUGHT within
+  # the same 60 second budget, or the fuzzer is proving nothing.
+  fuzz:
+    name: fuzz (Jazzer.js)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: fuzz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install the pinned Jazzer.js
+        run: npm ci
+      - name: Fuzz the hostile read
+        run: npx --no-install jazzer read.fuzz.js --sync --timeout=10000 -- -max_total_time=60 -print_final_stats=1
+      - name: Fuzz the round trip
+        run: npx --no-install jazzer roundtrip.fuzz.js --sync --timeout=10000 -- -max_total_time=60 -print_final_stats=1
+      - name: "Negative control: a planted asymmetry is caught within the smoke budget"
+        run: |
+          set +e
+          SERIALIZE_FUZZ_SABOTAGE=int-relative-tier npx --no-install jazzer roundtrip.fuzz.js --sync --timeout=10000 -- -max_total_time=60 -artifact_prefix=sabotage- -print_final_stats=1 > sabotage.log 2>&1
+          status=$?
+          set -e
+          tail -n 40 sabotage.log
+          if [ "$status" -eq 0 ]; then
+            echo "the planted asymmetry was NOT caught in 60 s"
+            exit 1
+          fi
+          grep -q "fuzz check failed: int relative" sabotage.log
+          ls sabotage-crash-*
+          echo "caught: the fuzzer exited $status on the planted asymmetry"
+      - name: Upload crash reproducers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: |
+            fuzz/crash-*
+            fuzz/oom-*
+            fuzz/timeout-*
+          if-no-files-found: ignore
+
   # STANDARD.md, conformance/ and conformance-controls/ here are VERBATIM
   # VENDORED COPIES of the specification, the shared conformance corpus and
   # the negative controls' .expected lists in mas-bandwidth/serialize. A duplicated normative document is the same

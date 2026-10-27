@@ -2,3 +2,9 @@ node_modules/
 *.tgz
 .DS_Store
 .controls/
+fuzz/.sabotage/
+fuzz/corpus/
+fuzz/crash-*
+fuzz/oom-*
+fuzz/timeout-*
+fuzz/sabotage-*
