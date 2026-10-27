@@ -93,20 +93,23 @@ jobs:
   # in all of them. Never main, because an upstream merge mid-day must not change
   # what a commit's CI proves. Find the newest tag with:
   #   gh release list --repo mas-bandwidth/serialize --limit 1
-  # Bump family-wide, deliberately, in its own commit per repo. SERIALIZE_TAG
+  # Bump family-wide, deliberately, in its own commit per repo. SERIALIZE_REF
   # below is the ONE place this repository names a version of the reference, and
   # ONE pin is the whole point: the wire exchange and the conformance corpus are
   # held to the same release, so the reference reader driving the corpus is the
   # reference library the bytes are exchanged with. A release whose corpus this
   # repository has not vendored fails the diff below rather than passing on a
-  # second, looser pin.
+  # second, looser pin. Between a corpus change landing upstream and its release
+  # being tagged, the pin is that commit's full SHA, which no merge can move
+  # either; it goes back to the tag once the tag exists.
   # (The spec-sync job above deliberately stays on upstream main: drift DETECTION
   # is that job's whole purpose.)
   interop:
     name: interop with the C++ reference
     runs-on: ubuntu-24.04
     env:
-      SERIALIZE_TAG: v2.0.0
+      # 2.0.1's corpus (object read terminality), ahead of its v2.0.1 tag
+      SERIALIZE_REF: 3617d3606db9c5686018d6568f0aa761869083c5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -114,7 +117,11 @@ jobs:
           node-version: 22
 
       - name: Check out the C++ reference at the pinned release
-        run: git clone --quiet --depth 1 --branch "$SERIALIZE_TAG" https://github.com/mas-bandwidth/serialize.git /tmp/cpp-serialize
+        run: |
+          git init --quiet /tmp/cpp-serialize
+          git -C /tmp/cpp-serialize fetch --quiet --depth 1 https://github.com/mas-bandwidth/serialize.git "$SERIALIZE_REF"
+          git -C /tmp/cpp-serialize -c advice.detachedHead=false checkout --quiet FETCH_HEAD
+          echo "reference: mas-bandwidth/serialize@$(git -C /tmp/cpp-serialize rev-parse HEAD)"
 
       # The corpus vendored here must be the one the pinned release carries: the
       # corpus and the runner that can drive it are one artifact, and a reference

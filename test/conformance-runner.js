@@ -467,12 +467,18 @@ function runStep(stream, step) {
  * STANDARD.md, "object": serialize_object invokes the object's own
  * serialize function inline and contributes NO BYTES OF ITS OWN -- it is
  * composition, not an encoding, with no framing, length prefix or alignment
- * inserted around it. JavaScript needs no macro for that: a nested object IS
- * a serialize function returning a bool, exactly as USAGE.md composes one,
- * and a refusal inside it propagates out through the return value.
+ * inserted around it. A nested object is a serialize function returning a
+ * bool, handed to the stream's serializeObject, which refuses on entry when
+ * the stream has already failed (so an empty object that reads no bits still
+ * refuses after a refusal) and refuses the whole when the object does.
  */
 function serializeNestedObject(stream, steps) {
-  return runSteps(stream, steps);
+  let inner = { ok: false, stoppedAt: -1, failedStep: null };
+  const ok = stream.serializeObject((nested) => {
+    inner = runSteps(nested, steps);
+    return inner.ok;
+  });
+  return ok ? inner : { ok: false, stoppedAt: inner.stoppedAt, failedStep: inner.failedStep };
 }
 
 /**
