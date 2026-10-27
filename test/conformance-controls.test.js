@@ -130,7 +130,11 @@ const CONTROLS = [
         '    if (this.#error !== SerializeError.None) {',
         '      return false;',
         '    }',
-        '    return serialize(this) === true && this.#error === SerializeError.None;',
+        '    if (serialize(this) === true && this.#error === SerializeError.None) {',
+        '      return true;',
+        '    }',
+        '    // the callback refused on its own: the first reason wins through the latch',
+        '    return this.#fail(SerializeError.Rejected);',
       ].join('\n'),
       patch: [
         '   * @param {(stream: ReadStream) => boolean} serialize the object\'s serialize function.',
@@ -141,6 +145,40 @@ const CONTROLS = [
         '      return false;',
         '    }',
         `    return serialize(this) === true;${MARK}`,
+      ].join('\n'),
+    }],
+  },
+  {
+    // The 2.0 object, which refused a callback that returned false and
+    // recorded no reason for it: the stream stays healthy.
+    name: 'object-latch-rejected',
+    rule: 'a nested object that refuses on its own latches rejected',
+    patches: [{
+      file: 'streams.js',
+      needle: [
+        '    // the callback refused on its own: the first reason wins through the latch',
+        '    return this.#fail(SerializeError.Rejected);',
+      ].join('\n'),
+      patch: [
+        '    // the callback refused on its own: the first reason wins through the latch',
+        `    return SerializeError.Rejected === undefined;${MARK}`,
+      ].join('\n'),
+    }],
+  },
+  {
+    // reject refuses under a wire rule's name: the stream still fails, for
+    // the wrong reason
+    name: 'reject-reason',
+    rule: 'the caller\'s reject refuses as rejected',
+    patches: [{
+      file: 'streams.js',
+      needle: [
+        '  reject() {',
+        '    return this.#fail(SerializeError.Rejected);',
+      ].join('\n'),
+      patch: [
+        '  reject() {',
+        `    return this.#fail(SerializeError.ValueOutOfRange);${MARK}`,
       ].join('\n'),
     }],
   },

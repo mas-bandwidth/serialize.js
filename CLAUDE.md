@@ -77,7 +77,9 @@ Format 2.0: the wire carries only integers and bytes, and every value has
 exactly one encoding. Every refusal names one reason from the standard's
 closed list, `SerializeError`'s values spelled exactly: `past_end`,
 `value_out_of_range`, `nonzero_padding`, `trailing_data`,
-`non_finite_float`, `invalid_utf8`, `embedded_nul`, `non_canonical`. The
+`non_finite_float`, `invalid_utf8`, `embedded_nul`, `non_canonical`, and
+`rejected`, the caller's own refusal (`ReadStream.reject()`, or a nested
+object whose function fails with nothing latched). The
 stream latches the FIRST refusal's reason; later refusals are echoes.
 Readers refuse past-end reads, out-of-range decoded values, set align
 padding, NaN and infinities (on the RAW bits, before any conversion), a

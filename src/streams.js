@@ -69,6 +69,7 @@ const RELATIVE_DOMAIN_MAX = 0x7fffffff;
 const FIXED_FORMAT_MESSAGE = 'integerBits must be an integer of at least 1, fractionBits an integer of at least 0, and their sum must be a storage width of 8, 16, 32, 64 or 128';
 const FIXED_NARROW_BOUNDS_MESSAGE = 'min and max must be integer Numbers in whole units for storage of 32 bits or fewer';
 const FIXED_CAPACITY_MESSAGE = 'min and max in whole units must fit the Q format';
+const REJECT_READ_ONLY_MESSAGE = 'reject is read only: a write or a measure has nothing to refuse';
 
 const INT64_MIN = -(2n ** 63n);
 const INT64_MAX = 2n ** 63n - 1n;
@@ -111,7 +112,7 @@ const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
  * without changing it -- the later refusals of a failed stream are its
  * echoes, and the reason that stands is the FIRST one's. reset() clears it.
  *
- * Every read refusal names one of these eight rules, and every refused
+ * Every read refusal names one of these nine reasons, and every refused
  * conformance vector states the one it expects. The write side reuses the
  * same names for the same rules seen from the trusted side: a write past
  * the end of the buffer is PastEnd, and the checked runtime latches a value
@@ -180,6 +181,15 @@ export const SerializeError = Object.freeze({
    * tier would have taken.
    */
   NonCanonical: 'non_canonical',
+
+  /**
+   * The caller's own refusal (STANDARD.md, "Refusal reasons"): the bytes
+   * were well formed, and the reader's caller refused the value they carry.
+   * Latched by ReadStream.reject(), and by serializeObject when the
+   * object's serialize function fails with nothing latched. Never a wire
+   * rule, and never chosen by the wire.
+   */
+  Rejected: 'rejected',
 });
 
 /**
@@ -1272,6 +1282,15 @@ class CheckedWriteStream {
   }
 
   /**
+   * The caller's refusal is read only: a write has nothing to refuse, so
+   * calling it here is caller misuse, which the checked runtime throws.
+   * @returns {boolean} never returns.
+   */
+  reject() {
+    throw new TypeError(REJECT_READ_ONLY_MESSAGE);
+  }
+
+  /**
    * Flushes the last word of bits to memory. Always call this after you
    * finish writing and before you use data(), or you risk truncating the
    * last word. The flush ends the write: do not serialize more values
@@ -1937,6 +1956,15 @@ class ProductionWriteStream {
       return false;
     }
     return serialize(this) === true && this.#error === SerializeError.None;
+  }
+
+  /**
+   * reject: caller misuse on a write, validated by nothing here; returns
+   * false and latches nothing.
+   * @returns {boolean} false, always.
+   */
+  reject() {
+    return false;
   }
 
   /**
@@ -2805,7 +2833,9 @@ export class ReadStream {
    * failed stream refuses before the callback runs, so even an empty object
    * that reads no bits refuses after a refusal, and a callback that returns
    * false, or returns true over a refusal it swallowed, refuses the whole.
-   * The latched reason is always the first refusal's.
+   * A callback that returns false with nothing latched is the caller's own
+   * refusal, and latches SerializeError.Rejected (STANDARD.md, "Refusal
+   * reasons"); a refusal inside the object latched first keeps its reason.
    * @param {(stream: ReadStream) => boolean} serialize the object's serialize function.
    * @returns {boolean} true on success.
    */
@@ -2813,7 +2843,23 @@ export class ReadStream {
     if (this.#error !== SerializeError.None) {
       return false;
     }
-    return serialize(this) === true && this.#error === SerializeError.None;
+    if (serialize(this) === true && this.#error === SerializeError.None) {
+      return true;
+    }
+    // the callback refused on its own: the first reason wins through the latch
+    return this.#fail(SerializeError.Rejected);
+  }
+
+  /**
+   * The caller's own refusal (STANDARD.md, "Refusal reasons", `rejected`):
+   * the bytes read so far were well formed, and the caller refuses the value
+   * they carry. Latches SerializeError.Rejected through the same latch as
+   * every wire refusal, so it is terminal and a stream that already failed
+   * keeps its first reason. Never throws.
+   * @returns {boolean} false, always: return it from the serialize function.
+   */
+  reject() {
+    return this.#fail(SerializeError.Rejected);
   }
 
   /**
@@ -3303,6 +3349,15 @@ class CheckedMeasureStream {
   }
 
   /**
+   * The caller's refusal is read only: a measure has nothing to refuse, so
+   * calling it here is caller misuse, which the checked runtime throws.
+   * @returns {boolean} never returns.
+   */
+  reject() {
+    throw new TypeError(REJECT_READ_ONLY_MESSAGE);
+  }
+
+  /**
    * The worst case align of 7 bits. The number of bits required for
    * alignment depends on where the message lands in the final bit stream,
    * so the measurement is conservative.
@@ -3623,6 +3678,15 @@ class ProductionMeasureStream {
    */
   serializeObject(serialize) {
     return serialize(this) === true;
+  }
+
+  /**
+   * reject: caller misuse on a measure, validated by nothing here; returns
+   * false and latches nothing.
+   * @returns {boolean} false, always.
+   */
+  reject() {
+    return false;
   }
 
   /**

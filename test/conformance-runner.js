@@ -83,6 +83,7 @@ export const REASONS = new Set([
   'invalid_utf8',
   'embedded_nul',
   'non_canonical',
+  'rejected',
 ]);
 
 // The buffer contract. This port's reader prices its windows inside the
@@ -297,6 +298,8 @@ function stepFromWords(text, where) {
       return { kind: 'string', bufferSize: Number(number(1)) };
     case 'end/1':
       return { kind: 'end' };
+    case 'reject/1':
+      return { kind: 'reject' };
     case 'int/3':
       return { kind: 'int', min: Number(number(1)), max: Number(number(2)) };
     case 'int64/3':
@@ -472,10 +475,10 @@ function runStep(stream, step) {
  * the stream has already failed (so an empty object that reads no bits still
  * refuses after a refusal) and refuses the whole when the object does.
  */
-function serializeNestedObject(stream, steps) {
+function serializeNestedObject(stream, steps, depth) {
   let inner = { ok: false, stoppedAt: -1, failedStep: null };
   const ok = stream.serializeObject((nested) => {
-    inner = runSteps(nested, steps);
+    inner = runSteps(nested, steps, depth + 1);
     return inner.ok;
   });
   return ok ? inner : { ok: false, stoppedAt: inner.stoppedAt, failedStep: inner.failedStep };
@@ -486,16 +489,29 @@ function serializeNestedObject(stream, steps) {
  * it stopped on: `stoppedAt` is the top-level index, and `failedStep` is the
  * step whose destination the non-mutation rule reaches, which for a nested
  * object is a step inside it.
+ *
+ * `reject` is the caller refusing (sequence.txt, the step spellings): at the
+ * top level through the stream's reject entry point, and inside a nested
+ * object (`depth` above 0) as the object's serialize function returning
+ * false there without refusing on its own, which serializeObject must latch
+ * as `rejected`.
  */
-function runSteps(stream, steps) {
+function runSteps(stream, steps, depth = 0) {
   for (let i = 0; i < steps.length; ) {
     const step = steps[i];
     if (step.kind === 'object') {
-      const nested = serializeNestedObject(stream, steps.slice(i + 1, i + 1 + step.count));
+      const nested = serializeNestedObject(stream, steps.slice(i + 1, i + 1 + step.count), depth);
       if (!nested.ok) {
         return { ok: false, stoppedAt: i, failedStep: nested.failedStep };
       }
       i += 1 + step.count;
+      continue;
+    }
+    if (step.kind === 'reject') {
+      if (depth > 0 || !stream.reject()) {
+        return { ok: false, stoppedAt: i, failedStep: step };
+      }
+      i += 1;
       continue;
     }
     if (!runStep(stream, step)) {
@@ -668,6 +684,9 @@ function runVectorWith(record, ReadStream, WriteStream, MeasureStream) {
     assert.equal(after.value, UNTOUCHED, 'a read after a refusal writes nothing');
     assert.equal(stream.bitsProcessed(), bitsBefore, 'a read after a refusal consumes no bits');
     assert.equal(stream.error, record.reason, 'a later refusal is an echo: the first reason stands');
+    if (record.where.startsWith('object.txt:')) {
+      runObjectRefusalChecks(record, ReadStream, stream, steps);
+    }
     runWriterInput(record, WriteStream);
     return;
   }
@@ -728,6 +747,53 @@ function runVectorWith(record, ReadStream, WriteStream, MeasureStream) {
       `measured ${measure.bitsProcessed()} bits, the corpus requires at least ${record.measureAtLeast}`,
     );
   }
+}
+
+/**
+ * The object checks on every refused vector in object.txt, the reference
+ * runner's shape (conformance.cpp, fail_unless_stream_is_terminal): an empty
+ * object on the failed stream refuses without calling its serialize
+ * function or changing the stream; over the vector's bytes, a fresh stream
+ * whose object's serialize function returns false with nothing latched
+ * latches `rejected` and stays failed; and an object whose serialize
+ * function returns true over the vector's own refusal keeps that refusal's
+ * reason.
+ */
+function runObjectRefusalChecks(record, ReadStream, stream, steps) {
+  const bitsBefore = stream.bitsProcessed();
+  let called = false;
+  assert.equal(stream.serializeObject(() => {
+    called = true;
+    return true;
+  }), false, 'an object read after the refusal must fail');
+  assert.equal(called, false, 'the object read after the refusal invoked its serialize function');
+  assert.equal(stream.bitsProcessed(), bitsBefore, 'the object read after the refusal consumed bits');
+  assert.equal(stream.error, record.reason, 'the object read after the refusal changed the reason');
+
+  const callbackRefused = new ReadStream(streamData(record));
+  assert.equal(callbackRefused.serializeObject(() => false), false, 'an object accepted a serialize function returning false');
+  assert.equal(callbackRefused.error, 'rejected', 'an object whose serialize function refused on its own did not latch rejected');
+  const probe = { value: UNTOUCHED };
+  assert.equal(callbackRefused.serializeInt(probe, 7, 7), false, 'a zero bit read succeeded after the rejection');
+  assert.equal(probe.value, UNTOUCHED, 'a zero bit read after the rejection wrote its destination');
+  let postCalled = false;
+  assert.equal(callbackRefused.serializeObject(() => {
+    postCalled = true;
+    return true;
+  }), false, 'an object read succeeded after the rejection');
+  assert.equal(postCalled, false, 'an object read after the rejection invoked its serialize function');
+  const probeBits = { value: UNTOUCHED };
+  assert.equal(callbackRefused.serializeBits(probeBits, 8), false, 'a read succeeded after the rejection');
+  assert.equal(probeBits.value, UNTOUCHED, 'a read after the rejection wrote its destination');
+  assert.equal(callbackRefused.error, 'rejected', 'reads after the rejection overwrote rejected');
+
+  const swallowed = new ReadStream(streamData(record));
+  seedDestinations(steps);
+  assert.equal(swallowed.serializeObject((nested) => {
+    runSteps(nested, steps);
+    return true;
+  }), false, 'an object accepted a serialize function returning true after a refusal inside it');
+  assert.equal(swallowed.error, record.reason, 'an object did not keep the refusal inside it when its serialize function returned true');
 }
 
 /**
