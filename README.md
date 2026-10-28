@@ -69,10 +69,11 @@ measures. [USAGE.md](USAGE.md) teaches every operation by example.
   `serializeUint64` / `serializeUint128` (BigInt), `serializeBool`.
 - **Floats**: `serializeFloat` and `serializeDouble`, finite values only —
   NaN and the infinities are refused on read (`non_finite_float`), tested
-  on the raw bits, and latched by the checked writer; negative zero and the
+  on the raw bits, and thrown by the checked writer; negative zero and the
   subnormals travel bit exact. `serializeCompressedFloat` quantizes in
   float32 with the standard's two roundings on each side and refuses a
-  non-finite decode.
+  non-finite decode; `compressedFloatParams` and
+  `serializeCompressedFloatPrecomputed` pay its derivation once.
 - **Bytes and strings**: `serializeBytes` (aligned bulk copy, count
   agreed, not transmitted; an optional `offset, length` span copies part of
   an array with no view allocated); `serializeString` (UTF-8 on the wire; a read
@@ -174,9 +175,11 @@ for a build with assertions enabled — and compiled to zero in release.
 JavaScript has no compiler to strip code, so the write path forks **once,
 at module load**, on `NODE_ENV` — the JS `#ifdef`:
 
-- **Checked** (the default): caller misuse throws, invalid values latch —
-  the always-on form of the family's checked-build assertions. Develop and
-  test here.
+- **Checked** (the default): write misuse throws, one mechanism on every
+  operation — a bad declaration, a value of the wrong type, a value the
+  declaration cannot carry (out of range, wider than its bits, not finite,
+  text that is not well-formed) — the always-on form of the family's
+  checked-build assertions. Develop and test here.
 - **Production** (`NODE_ENV=production`): the caller is trusted, exactly as
   a C/C++ release build trusts it. Per-operation caller validation is gone
   from `WriteStream`, `MeasureStream` and `BitWriter`; every write keeps
@@ -191,7 +194,18 @@ chosen at export time, changing `NODE_ENV` after load has no effect — and
 the wire is byte identical in both modes: the golden pins and the property
 sweep are re-run under the production variants. Reads validate everything
 in **every** mode: the wire is a trust boundary, `ReadStream` has no
-variants, and the read-side content refusals bind in production too.
+variants, and the read-side content refusals bind in production too. A
+read never throws, on hostile bytes or on caller misuse: a bad declaration
+refuses as `value_out_of_range` before any bits move.
+
+The family's uniform rules (IMPLEMENTING.md U1 to U16) hold here, each
+proved in `test/uniform-rules.test.js` and
+`test/uniform-rules-checked.test.js`: write buffers are a multiple of 8
+bytes; a write checks room for the whole operation before writing any of
+it; a writer's buffer is defined only after `flush()`; `end` on a write or
+measure returns true; `reset()` re-initialises every stream and clears its
+latch; every stream has a public `fail(reason)`, and `refusalName(error)`
+gives the family spelling, `'none'` for no refusal.
 
 ## Testing
 

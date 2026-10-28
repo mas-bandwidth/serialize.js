@@ -7,7 +7,7 @@ Planned work for serialize.js. The items below were open GitHub issues and pull 
 ## Contents
 
 - [Moved from GitHub issues on 2026-10-14](#moved-from-github-issues-on-2026-10-14) (1)
-- [Left open at serialize.js 2.1.0](#left-open-at-serializejs-210) (18)
+- [Left open at serialize.js 2.1.1](#left-open-at-serializejs-211) (4)
 
 ## Moved from GitHub issues on 2026-10-14
 
@@ -19,114 +19,30 @@ The BitReader in src/bitpacker.js takes the zero-slack option: it requires no al
 
 From: mas-bandwidth/serialize.js issue #22, opened 2026-09-13 by rowan-claude; moved here 2026-10-14
 
-## Left open at serialize.js 2.1.0
+## Left open at serialize.js 2.1.1
 
-Reference v2.1.0's uniform rules (IMPLEMENTING.md U1 to U16) and the 2026-10-27 audit findings for this port, deferred when the 2.1 wrap-up order (Glenn, 2026-10-27) limited 2.1.0 to the re-vendor and the rejected reason (U2, landed). Each rule is unaudited here until its item closes: none is claimed kept or broken.
+At 2.1.1 (2026-10-27) the port keeps the uniform rules of IMPLEMENTING.md (reference v2.1.0) and the 2026-10-27 audit's over-wide and overlap findings are fixed, each proved in test/uniform-rules.test.js and test/uniform-rules-checked.test.js; landed work is in git, so their items are gone from here. What stays open is below.
 
-### U1: write buffers are a multiple of 8 bytes
+### Audit L: measure the zero-slack reader's per-load compare against the 8-byte slack contract on amd-3
 
-Check that WriteStream and BitWriter require and check a length that is a multiple of 8, and that every doc says 8, never 4. Done when: a unit test cites U1 and is green, with a red-first test and fix if the port broke the rule, or a one-line note that the port already keeps it.
+The zero-slack BitReader pays reset-time window assembly and a compare per window load, which IMPLEMENTING.md's buffer contract calls the slower correct option (speed rule). Same as issue-22 and java L3. Since 2.1.1 the read-buffer docs (CLAUDE.md, USAGE.md, the BitReader comment) state the contract the reader actually has and that it is unmeasured; the measurement is still owed. Timing runs only on amd-3, with nothing else running. Done when: the slack contract is measured against the zero-slack reader on amd-3, and the faster one ships with its contract documented.
 
-From: IMPLEMENTING.md U1 at mas-bandwidth/serialize v2.1.0; deferred by the 2.1 wrap-up order, 2026-10-27
+From: serialize-love AUDIT-LEDGER.md, heading js, 2026-10-27; docs half closed in 2.1.1
 
-### U3: the writer never sends bytes that differ from the caller's value
+### U15: serialize_copy_string, for a language without bounded string buffers
 
-Check that string writes and measures use a strict UTF-8 codec: a lone surrogate is write misuse and is never replaced. Done when: a unit test cites U3 and is green, with a red-first test and fix if the port broke the rule, or a one-line note that the port already keeps it.
+IMPLEMENTING.md U15 names serialize_copy_string a gap wherever it is missing. JavaScript strings carry no bounded buffer, so what the operation means here is being ruled in the reference; this port waits for that ruling. compressed_float_precomputed landed in 2.1.1 (compressedFloatParams and serializeCompressedFloatPrecomputed). Done when: the reference rules on copy_string for unbounded-string languages and this port matches the ruling with a unit test.
 
-From: IMPLEMENTING.md U3 at mas-bandwidth/serialize v2.1.0; deferred by the 2.1 wrap-up order, 2026-10-27
+From: IMPLEMENTING.md U15 at mas-bandwidth/serialize v2.1.0; copy_string held for the reference ruling, 2026-10-27
 
-### U4: check UTF-8 and NUL on every string write
+### U15: the bytes span (offset, length) is not on the allowed-extras list
 
-Check that the checked write path refuses ill-formed UTF-8 and U+0000 on string write and measure. Done when: a unit test cites U4 and is green, with a red-first test and fix if the port broke the rule, or a one-line note that the port already keeps it.
+serializeBytes(data, offset, length) (js#31) selects a span of the caller's array with no view allocated. It changes no wire, but U15 allows only the extras it lists (Bits64, Continue/Until, batch APIs, the C write error flag, split read_/write_), and a span argument is none of them. Since 2.1.1 its misuse on read refuses as value_out_of_range (U7). Done when: the reference rules the span an allowed extra, or this port removes it in a major release.
 
-From: IMPLEMENTING.md U4 at mas-bandwidth/serialize v2.1.0; deferred by the 2.1 wrap-up order, 2026-10-27
+From: 2.1.1 U15 surface audit
 
-### U5: int bounds are int32
+### U7: a read handed no ref holder (undefined or null) throws a TypeError from the language
 
-Check that a min or max outside int32 is caught on the caller's value before narrowing on write and measure, and refused as value_out_of_range on read. Done when: a unit test cites U5 and is green, with a red-first test and fix if the port broke the rule, or a one-line note that the port already keeps it.
+Every read assigns ref.value, so a caller that passes undefined or null as the holder gets a TypeError from the runtime, not a value_out_of_range refusal. Refusing it costs a check on every read on the hot path, which the speed rule says must be measured first. Done when: the per-read check is measured on amd-3 and either lands with a unit test, or the reference rules a missing holder a language-level error outside U7.
 
-From: IMPLEMENTING.md U5 at mas-bandwidth/serialize v2.1.0; deferred by the 2.1 wrap-up order, 2026-10-27
-
-### U6: a measure stream refuses nothing
-
-Check that measure misuse follows the write-misuse mechanism and a measure never latches a read refusal. Done when: a unit test cites U6 and is green, with a red-first test and fix if the port broke the rule, or a one-line note that the port already keeps it.
-
-From: IMPLEMENTING.md U6 at mas-bandwidth/serialize v2.1.0; deferred by the 2.1 wrap-up order, 2026-10-27
-
-### U7: a reader never traps, and a refusal is a value
-
-Check that read-side caller misuse (negative byte count, string buffer size below 1, bad declarations) returns false with value_out_of_range rather than throwing, with the failure state checked first. ReadStream misuse currently throws RangeError in several validators (validateBits and others). Done when: a unit test cites U7 and is green, with a red-first test and fix if the port broke the rule, or a one-line note that the port already keeps it.
-
-From: IMPLEMENTING.md U7 at mas-bandwidth/serialize v2.1.0; deferred by the 2.1 wrap-up order, 2026-10-27
-
-### U8: over-wide values on write are caught in the checked build
-
-Check that the checked write path catches a value that does not fit its bit width rather than masking it. See ledger item ledger-bits-overwide. Done when: a unit test cites U8 and is green, with a red-first test and fix if the port broke the rule, or a one-line note that the port already keeps it.
-
-From: IMPLEMENTING.md U8 at mas-bandwidth/serialize v2.1.0; deferred by the 2.1 wrap-up order, 2026-10-27
-
-### U9: one write-misuse mechanism per implementation
-
-Check that every operation, compressed_float included, uses the same write-misuse mechanism, and that fail or reject on a write or measure returns false and never throws in production. reject() follows this since 2.1.0; a public fail(reason) is U14. Done when: a unit test cites U9 and is green, with a red-first test and fix if the port broke the rule, or a one-line note that the port already keeps it.
-
-From: IMPLEMENTING.md U9 at mas-bandwidth/serialize v2.1.0; deferred by the 2.1 wrap-up order, 2026-10-27
-
-### U10: a write checks room for the whole operation before writing any of it
-
-Check that bytes and string check the room for field, align and payload before the first bit, so no length or align bits are written ahead of a payload that does not fit. Done when: a unit test cites U10 and is green, with a red-first test and fix if the port broke the rule, or a one-line note that the port already keeps it.
-
-From: IMPLEMENTING.md U10 at mas-bandwidth/serialize v2.1.0; deferred by the 2.1 wrap-up order, 2026-10-27
-
-### U11: a writer's buffer is unspecified until flush
-
-Check that every doc that describes WriteStream says flush is required. Done when: a unit test cites U11 and is green, with a red-first test and fix if the port broke the rule, or a one-line note that the port already keeps it.
-
-From: IMPLEMENTING.md U11 at mas-bandwidth/serialize v2.1.0; deferred by the 2.1 wrap-up order, 2026-10-27
-
-### U12: end on a write or measure stream is a no-op returning true
-
-Check serializeEnd on WriteStream and MeasureStream in both variants. The checked variants return false after a latched error today, which needs a ruling against U12. Done when: a unit test cites U12 and is green, with a red-first test and fix if the port broke the rule, or a one-line note that the port already keeps it.
-
-From: IMPLEMENTING.md U12 at mas-bandwidth/serialize v2.1.0; deferred by the 2.1 wrap-up order, 2026-10-27
-
-### U13: re-initialising a stream is optional
-
-Check that reset() is documented as clearing the latch on every stream that has one. Done when: a unit test cites U13 and is green, with a red-first test and fix if the port broke the rule, or a one-line note that the port already keeps it.
-
-From: IMPLEMENTING.md U13 at mas-bandwidth/serialize v2.1.0; deferred by the 2.1 wrap-up order, 2026-10-27
-
-### U14: the refusal-name function and a public fail(reason)
-
-Add a public fail(reason) on ReadStream that records rejected for no reason or a reason outside the closed list, and expose or document the refusal-name function with none for no refusal. Done when: a unit test cites U14 and is green, with a red-first test and fix if the port broke the rule, or a one-line note that the port already keeps it.
-
-From: IMPLEMENTING.md U14 at mas-bandwidth/serialize v2.1.0; deferred by the 2.1 wrap-up order, 2026-10-27
-
-### U15: the allowed extras, and nothing else
-
-Audit the public surface against U15's list, and add serialize_copy_string and compressed_float_precomputed if they are missing. Done when: a unit test cites U15 and is green, with a red-first test and fix if the port broke the rule, or a one-line note that the port already keeps it.
-
-From: IMPLEMENTING.md U15 at mas-bandwidth/serialize v2.1.0; deferred by the 2.1 wrap-up order, 2026-10-27
-
-### U16: caller declarations validated on every stream before any bits move
-
-Check bits counts, fixed point bounds, ranged min <= max, string buffer_size >= 1 and the precomputed compressed_float constants on read (value_out_of_range, never a throw) and on write and measure (the write-misuse mechanism). Done when: a unit test cites U16 and is green, with a red-first test and fix if the port broke the rule, or a one-line note that the port already keeps it.
-
-From: IMPLEMENTING.md U16 at mas-bandwidth/serialize v2.1.0; deferred by the 2.1 wrap-up order, 2026-10-27
-
-### Audit M: checked build masks over-wide bits on write
-
-serializeBits(256, 8) writes 0 in the checked build instead of being caught (U8). Reproducer: /Volumes/nova/ai/rowan/working/serialize-love/audit2/serialize.js/audit-repro/bits-overwide.mjs. Run it first and confirm it fails before fixing. Done when: the reproducer is a unit test that is red on the old code and green on the fix, in the checked build.
-
-From: serialize-love AUDIT-LEDGER.md, heading js, 2026-10-27; deferred by the 2.1 wrap-up order
-
-### Audit L: overlapping src/dst buffers corrupt copies of 64 bytes or fewer
-
-Copies of 64 bytes or fewer through overlapping source and destination buffers corrupt the data. Reproducer: /Volumes/nova/ai/rowan/working/serialize-love/audit2/serialize.js/audit-repro/overlap.mjs. Run it first and confirm it fails before fixing, or record that the overlap is caller misuse and document it. Done when: the reproducer is a unit test that is green, or the contract is documented and the reproducer is recorded as misuse.
-
-From: serialize-love AUDIT-LEDGER.md, heading js, 2026-10-27; deferred by the 2.1 wrap-up order
-
-### Audit L: read-buffer doc stale; zero-slack reader does a per-op compare
-
-The read-buffer documentation is stale, and the zero-slack BitReader pays a compare per window load, which IMPLEMENTING.md's buffer contract calls the slower correct option (speed rule). Same as roadmap item issue-22 and java L3. Timing runs only on amd-3. Done when: the slack contract is measured against the zero-slack reader on amd-3, the faster one ships, and the read-buffer docs state the contract the reader actually has.
-
-From: serialize-love AUDIT-LEDGER.md, heading js, 2026-10-27; deferred by the 2.1 wrap-up order
+From: 2.1.1 U7 audit

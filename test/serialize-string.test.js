@@ -136,8 +136,8 @@ test('the checked writer refuses a lone surrogate as invalid_utf8, before the en
   // checked writer latches InvalidUtf8 and puts nothing on the wire
   for (const value of ['\ud800', 'a\udc00', 'ab\ud83d', '\ude00\ud83d']) {
     for (const stream of [new WriteStream(new Uint8Array(64)), new MeasureStream()]) {
-      assert.equal(stream.serializeString({ value }, 16), false, `${JSON.stringify(value)} refused`);
-      assert.equal(stream.error, SerializeError.InvalidUtf8);
+      assert.throws(() => stream.serializeString({ value }, 16), RangeError, `${JSON.stringify(value)} refused`);
+      assert.equal(stream.ok, true);
       assert.equal(stream.bitsProcessed(), 0, 'nothing written');
     }
   }
@@ -150,8 +150,8 @@ test('the checked writer refuses a lone surrogate as invalid_utf8, before the en
 test('the checked writer refuses U+0000 as embedded_nul at every position', () => {
   for (const value of ['\0', '\0ab', 'a\0b', 'ab\0']) {
     for (const stream of [new WriteStream(new Uint8Array(64)), new MeasureStream()]) {
-      assert.equal(stream.serializeString({ value }, 16), false, `${JSON.stringify(value)} refused`);
-      assert.equal(stream.error, SerializeError.EmbeddedNul);
+      assert.throws(() => stream.serializeString({ value }, 16), RangeError, `${JSON.stringify(value)} refused`);
+      assert.equal(stream.ok, true);
       assert.equal(stream.bitsProcessed(), 0, 'nothing written');
     }
   }
@@ -176,11 +176,11 @@ test('real text round trips byte for byte: no normalization, no replacement, eve
   assert.notEqual(readString(writeString('e\u0301', 64), 64), '\u00E9', 'never normalized');
 });
 
-test('too-long string refused as ValueOutOfRange, the boundary length accepted', () => {
+test('too-long string is write misuse and throws, the boundary length accepted', () => {
   // bufferSize 4: the payload must fit in 3 bytes
   const refused = new WriteStream(new Uint8Array(64));
-  assert.equal(refused.serializeString({ value: 'abcd' }, 4), false);
-  assert.equal(refused.error, SerializeError.ValueOutOfRange);
+  assert.throws(() => refused.serializeString({ value: 'abcd' }, 4), RangeError);
+  assert.equal(refused.ok, true);
   assert.equal(refused.bitsProcessed(), 0); // nothing on the wire
 
   const accepted = new WriteStream(new Uint8Array(64));
@@ -195,8 +195,7 @@ test('the length check counts UTF-8 bytes, not UTF-16 code units', () => {
   assert.equal(accepted.serializeString({ value: '\u00E9' }, 3), true);
 
   const refused = new WriteStream(new Uint8Array(64));
-  assert.equal(refused.serializeString({ value: '\u00E9' }, 2), false);
-  assert.equal(refused.error, SerializeError.ValueOutOfRange);
+  assert.throws(() => refused.serializeString({ value: '\u00E9' }, 2), RangeError);
 });
 
 test('a string that does not fit the write buffer latches PastEnd', () => {
@@ -223,17 +222,17 @@ test('bufferSize 1 is the degenerate length field: the empty string in zero bits
 
   // one byte of payload has nowhere to go: the length field cannot carry a 1
   const refused = new WriteStream(new Uint8Array(8));
-  assert.equal(refused.serializeString({ value: 'a' }, 1), false);
-  assert.equal(refused.error, SerializeError.ValueOutOfRange);
+  assert.throws(() => refused.serializeString({ value: 'a' }, 1), RangeError);
 });
 
-test('caller misuse throws on every stream: bufferSize and value type', () => {
+test('caller misuse: bufferSize and value type throw on write and measure, refuse on read (U7)', () => {
   const writer = new WriteStream(new Uint8Array(8));
-  const reader = new ReadStream(Uint8Array.from([0x00]));
   const measure = new MeasureStream();
   for (const bad of [0, -1, 1.5, 2 ** 31, '8', null]) {
     assert.throws(() => writer.serializeString({ value: 'x' }, bad), RangeError, `write bufferSize ${bad}`);
-    assert.throws(() => reader.serializeString({}, bad), RangeError, `read bufferSize ${bad}`);
+    const reader = new ReadStream(Uint8Array.from([0x00]));
+    assert.equal(reader.serializeString({}, bad), false, `read bufferSize ${bad}`);
+    assert.equal(reader.error, SerializeError.ValueOutOfRange);
     assert.throws(() => measure.serializeString({ value: 'x' }, bad), RangeError, `measure bufferSize ${bad}`);
   }
   for (const bad of [null, undefined, 42, ['a']]) {
@@ -256,8 +255,8 @@ test('measure prices the length prefix, worst case align, and the payload', () =
 
   // a string that cannot be written cannot be measured either
   measure.reset();
-  assert.equal(measure.serializeString({ value: 'abcd' }, 4), false);
-  assert.equal(measure.error, SerializeError.ValueOutOfRange);
+  assert.throws(() => measure.serializeString({ value: 'abcd' }, 4), RangeError);
+  assert.equal(measure.ok, true);
 });
 
 test('the measure bound covers the actual write at every starting offset', () => {

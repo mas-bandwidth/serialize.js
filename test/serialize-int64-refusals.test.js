@@ -146,14 +146,14 @@ test('write-side range checks latch, never throw, and write nothing', () => {
   for (const [value, min, max] of cases) {
     const label = `${value} in [${min},${max}]`;
     const writer = new WriteStream(new Uint8Array(16));
-    assert.equal(writer.serializeInt64({ value }, min, max), false, `write ${label}`);
-    assert.equal(writer.error, SerializeError.ValueOutOfRange, `latch for ${label}`);
+    assert.throws(() => writer.serializeInt64({ value }, min, max), RangeError, `write ${label}`);
+    assert.equal(writer.ok, true);
     assert.equal(writer.bitsProcessed(), 0, `nothing written for ${label}`);
 
     // the measure acts like a write: same refusal
     const measure = new MeasureStream();
-    assert.equal(measure.serializeInt64({ value }, min, max), false, `measure ${label}`);
-    assert.equal(measure.error, SerializeError.ValueOutOfRange);
+    assert.throws(() => measure.serializeInt64({ value }, min, max), RangeError, `measure ${label}`);
+    assert.equal(measure.ok, true);
     assert.equal(measure.bitsProcessed(), 0);
   }
 

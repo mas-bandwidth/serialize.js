@@ -133,14 +133,21 @@ test('measure charges a span as its length: the worst case align plus the span b
   assert.equal(measure.bitsProcessed(), 7);
 });
 
-test('the read span contract throws on misuse in every mode', () => {
-  const reader = new ReadStream(Uint8Array.from([0x00, 0x00]));
+test('the read span contract refuses misuse as value_out_of_range in every mode (U7)', () => {
   const dest = new Uint8Array(4);
   for (const [offset, length] of [[-1, 1], [0, -1], [1.5, 1], [0, 1.5], [3, 2], [5, 0], [0, 5], ['0', 1], [null, 1]]) {
-    assert.throws(() => reader.serializeBytes(dest, offset, length), RangeError, `offset ${offset}, length ${length}`);
+    const reader = new ReadStream(Uint8Array.from([0x00, 0x00]));
+    let result;
+    assert.doesNotThrow(() => {
+      result = reader.serializeBytes(dest, offset, length);
+    }, `offset ${offset}, length ${length}`);
+    assert.equal(result, false, `offset ${offset}, length ${length}`);
+    assert.equal(reader.error, SerializeError.ValueOutOfRange, `offset ${offset}, length ${length}`);
+    // misuse consumed nothing and wrote nothing
+    assert.equal(reader.bitsProcessed(), 0);
   }
-  // misuse consumed nothing and latched nothing
-  assert.equal(reader.ok, true);
+  // the reversed witness: a span inside dest reads
+  const reader = new ReadStream(Uint8Array.from([0x00, 0x00]));
   assert.equal(reader.serializeBytes(dest, 2, 2), true);
 });
 

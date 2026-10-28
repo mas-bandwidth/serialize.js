@@ -53,11 +53,11 @@ test('headroom smuggling refused, boundary neighbor accepted: [0,10] at 0.01', (
 
 test('a non-finite write refused, the float32 edge accepted', () => {
   // the checked runtime's always-on form of the family's checked-build assertion:
-  // NaN and the infinities latch NonFiniteFloat and put nothing on the wire
+  // NaN and the infinities are write misuse, throw (U9) and put nothing on the wire
   for (const value of [NaN, Infinity, -Infinity]) {
     const writer = new WriteStream(new Uint8Array(8));
-    assert.equal(writer.serializeCompressedFloat({ value }, 0, 10, 0.01), false, `${value}`);
-    assert.equal(writer.error, SerializeError.NonFiniteFloat);
+    assert.throws(() => writer.serializeCompressedFloat({ value }, 0, 10, 0.01), RangeError, `${value}`);
+    assert.equal(writer.ok, true);
     assert.equal(writer.bitsProcessed(), 0, 'the refused write consumed nothing');
   }
 
@@ -65,8 +65,8 @@ test('a non-finite write refused, the float32 edge accepted', () => {
   // of the other ports: 3.5e38 overflows float32 to infinity and is refused
   // even though the double is finite...
   const overflowed = new WriteStream(new Uint8Array(8));
-  assert.equal(overflowed.serializeCompressedFloat({ value: 3.5e38 }, 0, 10, 0.01), false);
-  assert.equal(overflowed.error, SerializeError.NonFiniteFloat);
+  assert.throws(() => overflowed.serializeCompressedFloat({ value: 3.5e38 }, 0, 10, 0.01), RangeError);
+  assert.equal(overflowed.bitsProcessed(), 0);
 
   // ...while the largest finite float32 is the accept boundary: far outside
   // [0,10], so it clamps to max and writes -- clamping is never a refusal
@@ -114,8 +114,8 @@ test('a truncated read latches PastEnd and leaves the ref alone', () => {
 test('measure refuses a non-finite value like the write it stands in for', () => {
   // a message that cannot be written cannot be measured either
   const measure = new MeasureStream();
-  assert.equal(measure.serializeCompressedFloat({ value: NaN }, 0, 10, 0.01), false);
-  assert.equal(measure.error, SerializeError.NonFiniteFloat);
+  assert.throws(() => measure.serializeCompressedFloat({ value: NaN }, 0, 10, 0.01), RangeError);
+  assert.equal(measure.ok, true);
   assert.equal(measure.bitsProcessed(), 0);
 
   // the accept boundary: the largest finite float32 clamps on write, so it
@@ -127,10 +127,11 @@ test('measure refuses a non-finite value like the write it stands in for', () =>
 
 test('a latched error makes compressed floats no-ops, and misuse still throws', () => {
   const writer = new WriteStream(new Uint8Array(8));
-  assert.equal(writer.serializeInt({ value: 5 }, 0, 3), false, 'latch ValueOutOfRange');
+  assert.equal(writer.serializeUint64({ value: 0n }), true);
+  assert.equal(writer.serializeBool({ value: true }), false, 'latch PastEnd');
   assert.equal(writer.serializeCompressedFloat({ value: 5 }, 0, 10, 0.01), false);
-  assert.equal(writer.error, SerializeError.ValueOutOfRange, 'the first error sticks');
-  assert.equal(writer.bitsProcessed(), 0);
+  assert.equal(writer.error, SerializeError.PastEnd, 'the first error sticks');
+  assert.equal(writer.bitsProcessed(), 64);
   // the declaration is validated before the latch check: declaration
   // misuse throws on a latched stream too, while a value-type misuse is
   // never reached -- the latch check returns false before the ref is read,
@@ -139,13 +140,24 @@ test('a latched error makes compressed floats no-ops, and misuse still throws', 
   assert.equal(writer.serializeCompressedFloat({ value: '5' }, 0, 10, 0.01), false);
 });
 
-test('an invalid declaration is caller misuse and throws on every stream', () => {
+test('an invalid declaration throws on write and measure, and refuses on read (U7, U16)', () => {
   const streams = [
     new WriteStream(new Uint8Array(8)),
-    new ReadStream(rawPacket(0, 10)),
     new MeasureStream(),
   ];
   const ref = { value: 5 };
+  const declarations = [
+    [10, 10, 0.01], [10, 0, 0.01], [0, 10, 0], [0, 10, -0.01], [NaN, 10, 0.01], [0, NaN, 0.01],
+    [0, 10, NaN], ['0', 10, 0.01], [1, 1 + 1e-8, 0.01], [-3e38, 3e38, 1], [0, 3e38, 1e-38],
+  ];
+  for (const [min, max, resolution] of declarations) {
+    const reader = new ReadStream(rawPacket(0, 10));
+    const out = { value: 'untouched' };
+    assert.equal(reader.serializeCompressedFloat(out, min, max, resolution), false, `${min} ${max} ${resolution}`);
+    assert.equal(reader.error, SerializeError.ValueOutOfRange);
+    assert.equal(reader.bitsProcessed(), 0);
+    assert.equal(out.value, 'untouched');
+  }
   for (const stream of streams) {
     // min not below max, resolution not positive, NaN parameters
     assert.throws(() => stream.serializeCompressedFloat(ref, 10, 10, 0.01), RangeError);

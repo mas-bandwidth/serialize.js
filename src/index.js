@@ -13,4 +13,11 @@
 
 export { BitWriter, BitReader } from './bitpacker.js';
 export { bitsRequired, bitsRequired64, bitsRequired128 } from './bits.js';
-export { SerializeError, WriteStream, ReadStream, MeasureStream } from './streams.js';
+export {
+  SerializeError,
+  WriteStream,
+  ReadStream,
+  MeasureStream,
+  compressedFloatParams,
+  refusalName,
+} from './streams.js';

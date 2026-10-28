@@ -20,6 +20,7 @@ import {
   SerializeError,
   bitsRequired128,
 } from '../src/index.js';
+import { misuse } from './misuse.js';
 
 const INT64_MIN = -(2n ** 63n);
 const INT64_MAX = 2n ** 63n - 1n;
@@ -104,8 +105,8 @@ test('writes and measures refuse raw values outside the raw bounds as latched er
     // raw domain cannot carry
     for (const value of [-100 * 256 - 1, 100 * 256 + 1, 1.5, NaN, Infinity]) {
       const stream = makeStream();
-      assert.equal(stream.serializeFixed({ value }, 8, 8, -100, 100), false, `refuse ${value}`);
-      assert.equal(stream.error, SerializeError.ValueOutOfRange);
+      assert.throws(() => stream.serializeFixed({ value }, 8, 8, -100, 100), RangeError, `refuse ${value}`);
+      assert.equal(stream.ok, true);
       assert.equal(stream.bitsProcessed(), 0, 'a refused fixed write costs nothing');
     }
 
@@ -119,8 +120,8 @@ test('writes and measures refuse raw values outside the raw bounds as latched er
     // wide lane: one raw step outside each bound
     for (const value of [-1000n * 65536n - 1n, 1000n * 65536n + 1n]) {
       const stream = makeStream();
-      assert.equal(stream.serializeFixed({ value }, 48, 16, -1000n, 1000n), false, `refuse ${value}`);
-      assert.equal(stream.error, SerializeError.ValueOutOfRange);
+      assert.throws(() => stream.serializeFixed({ value }, 48, 16, -1000n, 1000n), RangeError, `refuse ${value}`);
+      assert.equal(stream.ok, true);
     }
     const stream = makeStream();
     assert.equal(stream.serializeFixed({ value: 1000n * 65536n }, 48, 16, -1000n, 1000n), true);
@@ -135,8 +136,8 @@ test('a degenerate range accepts ONLY its own raw value on write and measure', (
   ]) {
     for (const value of [5 * 65536 - 1, 5 * 65536 + 1, 0]) {
       const stream = makeStream();
-      assert.equal(stream.serializeFixed({ value }, 16, 16, 5, 5), false, `refuse ${value}`);
-      assert.equal(stream.error, SerializeError.ValueOutOfRange);
+      assert.throws(() => stream.serializeFixed({ value }, 16, 16, 5, 5), RangeError, `refuse ${value}`);
+      assert.equal(stream.ok, true);
     }
     const stream = makeStream();
     assert.equal(stream.serializeFixed({ value: 5 * 65536 }, 16, 16, 5, 5), true);
@@ -155,52 +156,52 @@ test('a refused wide write puts nothing on the wire', () => {
   assert.equal(writer.bitsProcessed(), 40, 'nothing written on refusal');
 });
 
-test('an invalid Q format declaration is caller misuse and throws on every stream', () => {
+test('an invalid Q format declaration is caller misuse: it throws on write and measure, and refuses on read', () => {
   const writer = new WriteStream(new Uint8Array(16));
   const reader = new ReadStream(new Uint8Array(16));
   const measure = new MeasureStream();
   for (const stream of [writer, reader, measure]) {
     // the serialize.h static assert cases, translated:
     // integerBits + fractionBits must equal a storage width
-    assert.throws(() => stream.serializeFixed({ value: 0 }, 16, 8, 0, 100), RangeError);
-    assert.throws(() => stream.serializeFixed({ value: 0 }, 20, 20, 0, 100), RangeError);
+    misuse(stream, () => stream.serializeFixed({ value: 0 }, 16, 8, 0, 100), RangeError);
+    misuse(stream, () => stream.serializeFixed({ value: 0 }, 20, 20, 0, 100), RangeError);
     // at least one integer bit (the sign bit counts); no negative fractions
-    assert.throws(() => stream.serializeFixed({ value: 0 }, 0, 32, 0, 100), RangeError);
-    assert.throws(() => stream.serializeFixed({ value: 0 }, 40, -8, 0, 100), RangeError);
+    misuse(stream, () => stream.serializeFixed({ value: 0 }, 0, 32, 0, 100), RangeError);
+    misuse(stream, () => stream.serializeFixed({ value: 0 }, 40, -8, 0, 100), RangeError);
     // non-integer bit counts
-    assert.throws(() => stream.serializeFixed({ value: 0 }, 16.5, 15.5, 0, 100), RangeError);
+    misuse(stream, () => stream.serializeFixed({ value: 0 }, 16.5, 15.5, 0, 100), RangeError);
     // bounds exceed the Q16.16 whole unit capacity [-32768,32767]
-    assert.throws(() => stream.serializeFixed({ value: 0 }, 16, 16, -40000, 40000), RangeError);
+    misuse(stream, () => stream.serializeFixed({ value: 0 }, 16, 16, -40000, 40000), RangeError);
     // the signed reading binds when min < 0: max past the signed capacity
-    assert.throws(() => stream.serializeFixed({ value: 0 }, 16, 16, -1, 40000), RangeError);
+    misuse(stream, () => stream.serializeFixed({ value: 0 }, 16, 16, -1, 40000), RangeError);
     // the unsigned reading binds when min >= 0: max past 2^16 - 1
-    assert.throws(() => stream.serializeFixed({ value: 0 }, 16, 16, 0, 65536), RangeError);
+    misuse(stream, () => stream.serializeFixed({ value: 0 }, 16, 16, 0, 65536), RangeError);
     // min must not exceed max (min == max is LEGAL: zero bits)
-    assert.throws(() => stream.serializeFixed({ value: 0 }, 16, 16, 200, 100), RangeError);
+    misuse(stream, () => stream.serializeFixed({ value: 0 }, 16, 16, 200, 100), RangeError);
     // the bounds domain follows the storage width: Numbers narrow, BigInts wide
-    assert.throws(() => stream.serializeFixed({ value: 0 }, 16, 16, 0n, 100n), RangeError);
-    assert.throws(() => stream.serializeFixed({ value: 0n }, 48, 16, 0, 100), RangeError);
+    misuse(stream, () => stream.serializeFixed({ value: 0 }, 16, 16, 0n, 100n), RangeError);
+    misuse(stream, () => stream.serializeFixed({ value: 0n }, 48, 16, 0, 100), RangeError);
     // wide bounds live in the int64 domain, exactly the reference's
     // template parameter type
-    assert.throws(
+    misuse(stream, 
       () => stream.serializeFixed({ value: 0n }, 112, 16, 0n, INT64_MAX + 1n),
       RangeError,
     );
-    assert.throws(
+    misuse(stream, 
       () => stream.serializeFixed({ value: 0n }, 112, 16, INT64_MIN - 1n, 0n),
       RangeError,
     );
     // wide capacity: Q48.16 whole units live in [-2^47, 2^47 - 1]
-    assert.throws(
+    misuse(stream, 
       () => stream.serializeFixed({ value: 0n }, 48, 16, -(2n ** 47n) - 1n, 0n),
       RangeError,
     );
-    assert.throws(
+    misuse(stream, 
       () => stream.serializeFixed({ value: 0n }, 48, 16, 0n, 2n ** 48n),
       RangeError,
     );
     // misuse throws even though nothing latched: the streams stay healthy
-    assert.equal(stream.ok, true);
+    assert.equal(stream.ok, !stream.isReading);
     assert.equal(stream.bitsProcessed(), 0);
   }
 
@@ -229,11 +230,12 @@ test('a value of the wrong domain type on write or measure is caller misuse and 
 });
 
 test('a latched stream refuses fixed serializes without touching state', () => {
-  const writer = new WriteStream(new Uint8Array(16));
-  assert.equal(writer.serializeInt({ value: 9 }, 0, 7), false); // latch ValueOutOfRange
+  const writer = new WriteStream(new Uint8Array(8));
+  assert.equal(writer.serializeUint64({ value: 0n }), true);
+  assert.equal(writer.serializeBool({ value: true }), false); // latch PastEnd
   assert.equal(writer.serializeFixed({ value: 0 }, 8, 8, -100, 100), false);
-  assert.equal(writer.error, SerializeError.ValueOutOfRange);
-  assert.equal(writer.bitsProcessed(), 0);
+  assert.equal(writer.error, SerializeError.PastEnd);
+  assert.equal(writer.bitsProcessed(), 64);
 
   const reader = new ReadStream(new Uint8Array(0));
   assert.equal(reader.serializeBits({}, 1), false); // latch PastEnd

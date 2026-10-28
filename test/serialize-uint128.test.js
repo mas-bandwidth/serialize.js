@@ -85,20 +85,9 @@ test('the golden pin: 16 bytes in little-endian order, low half first', () => {
   assert.equal(ref.value, goldenValue);
 });
 
-test('higher bits are ignored and negative BigInts wrap two\'s complement', () => {
-  const writer = new WriteStream(new Uint8Array(32));
-  writer.serializeUint128({ value: (1n << 128n) | 5n }); // bit 128 dropped
-  writer.serializeUint128({ value: -1n }); // wraps to 2^128 - 1
-  writer.flush();
-
-  const reader = new ReadStream(writer.data());
-  const a = {};
-  const b = {};
-  assert.equal(reader.serializeUint128(a), true);
-  assert.equal(reader.serializeUint128(b), true);
-  assert.equal(a.value, 5n);
-  assert.equal(b.value, 2n ** 128n - 1n);
-});
+// A value wider than 128 bits, or negative, is write misuse (IMPLEMENTING.md
+// U8): the checked runtime throws it, and the production output after misuse
+// is unspecified. test/uniform-rules-checked.test.js holds the checked throws.
 
 test('a uint128 carries no alignment: a bool shifts the whole field', () => {
   const value = (0x0123_4567_89ab_cdefn << 64n) | 0xfedc_ba98_7654_3210n;

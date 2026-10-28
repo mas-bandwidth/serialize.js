@@ -54,21 +54,35 @@ caller responsible for well-formed writes. JavaScript has no compile-out,
 so `src/mode.js` reads NODE_ENV **once at module load** and the write-path
 classes export in one of two variants — the JS #ifdef:
 
-- **CHECKED** (default): caller misuse throws, invalid write values latch —
-  the always-on form of the family's checked-build assertions. Develop and
-  test here.
+- **CHECKED** (default): write misuse throws, ONE mechanism on every
+  operation of WriteStream, MeasureStream and BitWriter, compressed_float
+  included (IMPLEMENTING.md U9): a bad declaration, a value of the wrong
+  type, and a value the declaration cannot carry (out of range, wider than
+  its bits (U8), not finite, text that is not well-formed or holds U+0000,
+  too long for its buffer). The always-on form of the family's
+  checked-build assertions. A write past the end of the buffer is not
+  misuse: it latches PastEnd in every mode. Develop and test here.
 - **PRODUCTION** (`NODE_ENV=production`): per-op caller validation removed
   from WriteStream/MeasureStream/BitWriter, the C/C++ release shape. Every
   write keeps the sticky-error gate and the buffer-end check (its false
   latches PastEnd). Misuse yields wire garbage, never memory unsafety.
 - **Reads validate everything in EVERY mode.** The wire is a trust
   boundary; ReadStream has no variants; ruling #8 content refusals always
-  bind.
+  bind. **A read never throws** (U7): caller misuse on read (a bad
+  declaration, a span outside its array, data or a destination of the wrong
+  type) refuses as `value_out_of_range` before any bits move, and the
+  failure state is checked first, so a failed stream keeps its first
+  reason.
 - **Errors are values**: serialize methods return `bool`, and the stream
   carries a **sticky latched error** (serialize.cs's shape). Once a stream
   has failed, every subsequent operation on it fails.
 - **Hostile input NEVER throws.** A doctored buffer produces `false` and a
   latched error, never an exception.
+- `serializeEnd` on a write or measure is a no-op returning true (U12);
+  `fail(reason)` is public on every stream: on read it latches the reason
+  (anything off the closed list latches `rejected`), on write and measure it
+  records nothing and returns false (U6, U14). `refusalName(error)` gives
+  the family spelling, `'none'` for no refusal.
 - Both modes speak ONE wire: `npm run test:production` re-runs the golden
   pins and property sweep under the production variants. Run BOTH legs
   before every commit.
@@ -117,9 +131,13 @@ never exact.
 ## Read-side buffer contract
 
 The reader prices its windows **inside the buffer** (serialize.c's stance):
-there is no past-end allocation requirement on the caller's buffer.
-STANDARD.md treats this as an implementation contract; both stances conform.
-Document it wherever the read API is described.
+there is no past-end allocation requirement on the caller's buffer. This is
+the zero-slack option, which IMPLEMENTING.md ("The buffer contract") calls
+the slower correct option: it costs a copy or window assembly at reset and a
+compare per window load. The 8-byte slack contract has not been measured
+against it on amd-3, so the choice does not yet stand on cost (ROADMAP,
+issue #22). Document the contract the reader actually has wherever the read
+API is described.
 
 ## Working discipline
 

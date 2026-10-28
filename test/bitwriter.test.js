@@ -111,7 +111,7 @@ test('unaligned flush shapes: trailing bits are zero by construction', () => {
     let remaining = totalBits;
     while (remaining > 0) {
       const chunk = Math.min(remaining, 32);
-      writer.writeBits(0xffffffff, chunk);
+      writer.writeBits(chunk === 32 ? 0xffffffff : 2 ** chunk - 1, chunk);
       remaining -= chunk;
     }
     writer.flushBits();
@@ -149,11 +149,15 @@ test('flush is a no-op at an exact word boundary and when empty', () => {
   );
 });
 
-test('bits of value above the count are ignored', () => {
-  // family convention: the Go and C# ports mask the value to the bit count
+test('a value wider than its bits is write misuse and throws (IMPLEMENTING.md U8)', () => {
+  // masking is not checking: the checked writer catches the caller's value
+  // before anything narrows it, as the C++ BitWriter asserts
   const buffer = new Uint8Array(8);
   const writer = new BitWriter(buffer);
-  writer.writeBits(0xffffff2a, 8); // low 8 bits are 0x2A
+  assert.throws(() => writer.writeBits(0xffffff2a, 8), RangeError);
+  assert.throws(() => writer.writeBits(-1, 8), RangeError);
+  assert.equal(writer.bitsWritten(), 0);
+  writer.writeBits(0x2a, 8); // the reversed witness: the same field, in width
   writer.flushBits();
   assert.deepEqual(Array.from(writer.data()), [0x2a]);
 });

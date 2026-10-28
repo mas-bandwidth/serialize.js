@@ -111,7 +111,7 @@ test('every alignment-performing op is charged 7 bits even when the count is ali
   // at bit 8 a write's align would pad zero bits; the measure still
   // charges 7, because the message may land unaligned
   const measure = new MeasureStream();
-  measure.serializeBits({}, 8);
+  measure.serializeBits({ value: 0 }, 8);
   measure.serializeAlign();
   assert.equal(measure.bitsProcessed(), 15);
   assert.equal(measure.alignBits(), 7);

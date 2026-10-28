@@ -36,6 +36,7 @@ const DATA_TYPE_MESSAGE = 'data must be a Uint8Array';
 const BYTES_COUNT_MESSAGE = 'bytes must be a non-negative integer';
 const WRITE_UNALIGNED_MESSAGE = 'writeBytes requires a byte-aligned bit index';
 const READ_UNALIGNED_MESSAGE = 'readBytes requires a byte-aligned bit index';
+const VALUE_WIDTH_MESSAGE = 'value must be an unsigned integer that fits its bit count';
 const SPAN_MESSAGE = 'offset and length must be non-negative integers with offset + length at most data.length';
 
 /**
@@ -48,9 +49,22 @@ const SPAN_MESSAGE = 'offset and length must be non-negative integers with offse
  * @param {number} length the number of bytes.
  */
 export function validateSpan(data, offset, length) {
-  if (!Number.isInteger(offset) || !Number.isInteger(length) || offset < 0 || length < 0 || offset + length > data.length) {
+  if (!spanIsValid(data, offset, length)) {
     throw new RangeError(SPAN_MESSAGE);
   }
+}
+
+/**
+ * The span rule as a predicate: the read stream refuses where the write
+ * side throws (IMPLEMENTING.md U7).
+ * @param {Uint8Array} data the array the span selects from.
+ * @param {number} offset the index of the first byte.
+ * @param {number} length the number of bytes.
+ * @returns {boolean} true when the span lies inside data.
+ */
+export function spanIsValid(data, offset, length) {
+  return Number.isInteger(offset) && Number.isInteger(length) && offset >= 0 && length >= 0 &&
+    offset + length <= data.length;
 }
 
 // Data at or below this size is copied into the reader's persistent scratch
@@ -152,12 +166,14 @@ class CheckedBitWriter {
     if (typeof value !== 'number') {
       throw new TypeError(VALUE_TYPE_MESSAGE);
     }
+    // IMPLEMENTING.md U8: a value that does not fit its bit count is write
+    // misuse, caught here on the caller's value; masking is not checking
+    if ((value >>> 0) !== value || value > (bits === 32 ? 0xffffffff : ((1 << bits) >>> 0) - 1)) {
+      throw new RangeError(VALUE_WIDTH_MESSAGE);
+    }
     if (this.#bitsWritten + bits > this.#numBits) {
       throw new RangeError(WRITE_OVERFLOW_MESSAGE);
     }
-
-    // mask to the bit count: bits of value above the count are ignored
-    value = bits === 32 ? value >>> 0 : (value & (((1 << bits) >>> 0) - 1)) >>> 0;
 
     // merge into the single 32-bit staging word at the current bit position.
     // The invariant is that the word's bits at and above scratchBits are
@@ -207,12 +223,14 @@ class CheckedBitWriter {
     if (typeof value !== 'number') {
       throw new TypeError(VALUE_TYPE_MESSAGE);
     }
+    // IMPLEMENTING.md U8: a value that does not fit its bit count is write
+    // misuse, caught here on the caller's value; masking is not checking
+    if ((value >>> 0) !== value || value > (bits === 32 ? 0xffffffff : ((1 << bits) >>> 0) - 1)) {
+      throw new RangeError(VALUE_WIDTH_MESSAGE);
+    }
     if (this.#bitsWritten + bits > this.#numBits) {
       return false;
     }
-
-    // mask to the bit count: bits of value above the count are ignored
-    value = bits === 32 ? value >>> 0 : (value & (((1 << bits) >>> 0) - 1)) >>> 0;
 
     // merge into the single 32-bit staging word at the current bit position.
     // The invariant is that the word's bits at and above scratchBits are
@@ -281,7 +299,7 @@ class CheckedBitWriter {
     if (!(data instanceof Uint8Array)) {
       throw new TypeError(DATA_TYPE_MESSAGE);
     }
-    const start = offset === undefined ? 0 : offset;
+    let start = offset === undefined ? 0 : offset;
     const bytes = length === undefined ? data.length - start : length;
     validateSpan(data, start, bytes);
     if (this.#bitsWritten % 8 !== 0) {
@@ -289,6 +307,12 @@ class CheckedBitWriter {
     }
     if (this.#bitsWritten + bytes * 8 > this.#numBits) {
       throw new RangeError(WRITE_OVERFLOW_MESSAGE);
+    }
+    if (data.buffer === this.#data.buffer) {
+      // the source shares memory with the destination: copy it out first,
+      // so the copy is exact whatever the overlap (audit L, js)
+      data = data.slice(start, start + bytes);
+      start = 0;
     }
 
     // head: single bytes through the scratch until the cursor reaches a word
@@ -586,8 +610,14 @@ class ProductionBitWriter {
    * @param {number} [length] the number of bytes to write.
    */
   writeBytes(data, offset, length) {
-    const start = offset === undefined ? 0 : offset;
+    let start = offset === undefined ? 0 : offset;
     const bytes = length === undefined ? data.length - start : length;
+    if (data.buffer === this.#data.buffer) {
+      // the source shares memory with the destination: copy it out first,
+      // so the copy is exact whatever the overlap (audit L, js)
+      data = data.slice(start, start + bytes);
+      start = 0;
+    }
 
     // head: single bytes through the scratch until the cursor reaches a word
     // boundary, or the data runs out first
@@ -725,17 +755,18 @@ export const BitWriter = PRODUCTION ? ProductionBitWriter : CheckedBitWriter;
  * front from the bytes that are there, and every read in the last 8 bytes
  * shifts that instead. THE CALLER'S ALLOCATION CONTRACT IS THEREFORE EMPTY:
  * no slack past the data is required, unlike the C++ reader, which loads
- * unconditionally and demands 8 bytes beyond the data. STANDARD.md:912-915
- * calls the zero-slack machinery conforming on the wire and, as an
- * implementation choice, refused by the speed rule in favour of the 8-byte
- * slack contract the C and C++ readers demand. This port takes the
- * zero-slack option today: it reads only the view it is given (byteOffset
- * to byteLength), never the ArrayBuffer's spare capacity; the cost is paid
- * once at reset, where the final 8 bytes are pre-assembled into
- * tailLo/tailHi, plus a compare per window load, and nothing past the data
- * is ever loaded. A capacity-reading variant, which would offer the 8-byte
- * slack contract the way the Go port reads cap(), is possible and
- * unmeasured; see https://github.com/mas-bandwidth/serialize.js/issues/22.
+ * unconditionally and demands 8 bytes beyond the data. IMPLEMENTING.md
+ * ("The buffer contract") calls the zero-slack machinery conforming on the
+ * wire and, as an implementation choice, the slower correct option, refused
+ * by the speed rule in favour of the 8-byte slack contract the C and C++
+ * readers demand. This port takes the zero-slack option today: it reads
+ * only the view it is given (byteOffset to byteLength), never the
+ * ArrayBuffer's spare capacity; the cost is paid once at reset, where the
+ * final 8 bytes are pre-assembled into tailLo/tailHi, plus a compare per
+ * window load, and nothing past the data is ever loaded. A capacity-reading
+ * variant, which would offer the 8-byte slack contract the way the Go port
+ * reads cap(), is possible and not yet measured against this one (ROADMAP,
+ * issue #22: the timing runs belong on amd-3).
  *
  * The wire is a trust boundary. The refusal surface -- wouldReadPastEnd(),
  * tryReadBits(), readAlign() -- never throws on hostile data: past-end reads
@@ -993,11 +1024,13 @@ export class BitReader {
     // the bit index is byte aligned, so this is a straight copy of the data
     const byteIndex = this.#bitsRead / 8;
     const data = this.#data;
-    if (bytes <= SMALL_COPY_BYTES) {
+    if (bytes <= SMALL_COPY_BYTES && dest.buffer !== data.buffer) {
       for (let i = 0; i < bytes; i++) {
         dest[start + i] = data[byteIndex + i];
       }
     } else {
+      // set copies as if through a temporary when the two share memory
+      // (audit L, js): the byte loop smeared an overlapping source
       dest.set(data.subarray(byteIndex, byteIndex + bytes), start);
     }
     this.#bitsRead += bytes * 8;

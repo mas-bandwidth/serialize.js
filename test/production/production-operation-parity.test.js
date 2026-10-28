@@ -233,12 +233,12 @@ function collectBitWriterRecords() {
   const records = [];
 
   // 1. writeBits and tryWriteBits across every bit width 1..32, aligned and unaligned,
-  // including values with extra high bits above `bits` that must be masked off.
+  // (a value wider than its bits is write misuse since 2.1, IMPLEMENTING.md
+  // U8: the checked writer throws it, so every value here fits its width).
   for (let bits = 1; bits <= 32; bits++) {
     const maxVal = bits === 32 ? 0xffffffff : ((1 << bits) - 1) >>> 0;
     const midVal = bits === 32 ? 0xa5a55a5a : (0xaaaaaaaa >>> (32 - bits));
-    const overVal = bits < 24 ? ((maxVal | (0x5a << bits)) >>> 0) : maxVal;
-    const values = [0, 1, midVal, maxVal, overVal];
+    const values = [0, 1, midVal, maxVal, maxVal];
 
     const bufWrite = new Uint8Array(32).fill(0xff);
     const writer = new BitWriter(bufWrite);
@@ -450,13 +450,12 @@ function buildValidStreamScenarios() {
     }
   }
 
-  // 1. serializeBits across all widths 1..32 (including high-bit masking on write).
+  // 1. serializeBits across all widths 1..32 (every value fits its width: U8).
   for (let bits = 1; bits <= 32; bits++) {
     const maxVal = bits === 32 ? 0xffffffff : ((1 << bits) - 1) >>> 0;
     const altVal = bits === 32 ? 0x55aaaa55 : (0x55555555 & maxVal) >>> 0;
-    const unmaskedInput = bits < 24 ? ((altVal | (0x7b << bits)) >>> 0) : altVal;
     const expectedValues = [0, 1, altVal, maxVal, altVal];
-    const writeInputs = [0, 1, altVal, maxVal, unmaskedInput];
+    const writeInputs = [0, 1, altVal, maxVal, altVal];
 
     addAlignedAndUnaligned(
       `ws.bits.w${bits}`,
@@ -477,14 +476,13 @@ function buildValidStreamScenarios() {
   }
 
   // 2. serializeBits64 across all widths 1..64 (1..32 single group, 33..64 two groups,
-  // plus BigInt.asUintN masking of negative/wide inputs).
+  // every value fits its width: U8).
   for (let bits = 1; bits <= 64; bits++) {
     const mask = (1n << BigInt(bits)) - 1n;
     const alt = 0x5555aaaa5555aaaan & mask;
     const hiBit = 1n << BigInt(bits - 1);
-    const overInput = alt | (0x1fn << BigInt(bits));
     const expectedValues = [0n, 1n, hiBit, alt, mask, alt, mask];
-    const writeInputs = [0n, 1n, hiBit, alt, mask, overInput, -1n];
+    const writeInputs = [0n, 1n, hiBit, alt, mask, alt, mask];
 
     addAlignedAndUnaligned(
       `ws.bits64.w${bits}`,
@@ -1306,7 +1304,8 @@ function collectOverflowBoundaryRecords() {
     const availBeforeShort = shortWriter.bitsAvailable();
     const shortRet = opFn(shortWriter);
     const bitsAfterShort = shortWriter.bitsProcessed();
-    // Sticky PastEnd latch check: subsequent operations (even 0-bit degenerate or align) must return false.
+    // Sticky PastEnd latch check: subsequent operations (even 0-bit degenerate or align) must return false;
+    // end is a no-op returning true on a write (U12).
     const stickyBitsRet = shortWriter.serializeBits({ value: 0 }, 1);
     const stickyDegRet = shortWriter.serializeInt({ value: 7 }, 7, 7);
     const stickyAlignRet = shortWriter.serializeAlign();
@@ -1679,7 +1678,8 @@ test('fresh module-load parity: checked (NODE_ENV=development) and production (N
       );
       assert.deepEqual(
         rec.stickyReturns,
-        [false, false, false, false],
+        // end on a write is a no-op returning true (IMPLEMENTING.md U12)
+        [false, false, false, true],
         `${rec.id}: sticky PastEnd blocks subsequent operations`,
       );
       assert.equal(rec.recoverRet, true, `${rec.id}: reset() recovers from PastEnd`);

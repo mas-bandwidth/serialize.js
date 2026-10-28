@@ -108,30 +108,23 @@ test('serializeUint64 is serializeBits64 at 64: pinned little-endian bytes', () 
   assert.equal(ref.value, 0xfedc_ba98_7654_3210n);
 
   const measure = new MeasureStream();
-  assert.equal(measure.serializeUint64({}), true);
+  assert.equal(measure.serializeUint64({ value: 0n }), true);
   assert.equal(measure.bitsProcessed(), 64);
 });
 
-test('higher bits are ignored and negative BigInts wrap two\'s complement', () => {
-  // the call-site conversion of the family: the other ports take a uint64
-  // parameter, converting at the call site; here the value is reduced to
-  // the bit count the same way
-  const writer = new WriteStream(new Uint8Array(24));
-  writer.serializeBits64({ value: (1n << 64n) | 5n }, 64); // bit 64 dropped
-  writer.serializeBits64({ value: -1n }, 64); // wraps to 2^64 - 1
-  writer.serializeBits64({ value: -1n }, 8); // wraps to 0xFF at any width
-  writer.flush();
-
-  const reader = new ReadStream(writer.data());
-  const a = {};
-  const b = {};
-  const c = {};
-  assert.equal(reader.serializeBits64(a, 64), true);
-  assert.equal(reader.serializeBits64(b, 64), true);
-  assert.equal(reader.serializeBits64(c, 8), true);
-  assert.equal(a.value, 5n);
-  assert.equal(b.value, 0xffff_ffff_ffff_ffffn);
-  assert.equal(c.value, 0xffn);
+test('a value wider than its bits, or negative, is write misuse and throws (U8)', () => {
+  // masking is not checking (IMPLEMENTING.md U8): the checked runtime
+  // catches the caller's value before anything narrows it
+  for (const stream of [new WriteStream(new Uint8Array(24)), new MeasureStream()]) {
+    assert.throws(() => stream.serializeBits64({ value: (1n << 64n) | 5n }, 64), RangeError);
+    assert.throws(() => stream.serializeBits64({ value: -1n }, 64), RangeError);
+    assert.throws(() => stream.serializeBits64({ value: 256n }, 8), RangeError);
+    assert.throws(() => stream.serializeUint64({ value: -1n }), RangeError);
+    assert.equal(stream.bitsProcessed(), 0);
+    // the reversed witness: the widest values that fit
+    assert.equal(stream.serializeBits64({ value: 0xffff_ffff_ffff_ffffn }, 64), true);
+    assert.equal(stream.serializeBits64({ value: 0xffn }, 8), true);
+  }
 });
 
 test('wide values carry no alignment: a bool shifts a 64-bit field', () => {
@@ -210,23 +203,26 @@ test('a latched stream refuses the wide operations without touching refs', () =>
   assert.equal(reader.serializeUint64(ref), false);
   assert.equal(ref.value, 999n);
 
-  const measure = new MeasureStream();
-  measure.serializeInt({ value: 8 }, 0, 7); // latches ValueOutOfRange
-  assert.equal(measure.serializeBits64({ value: 0n }, 64), false);
-  assert.equal(measure.bitsProcessed(), 0);
 });
 
-test('an invalid bit count is caller misuse and throws on every stream', () => {
+test('an invalid bit count throws on write and measure, and refuses on read (U7, U16)', () => {
   const writer = new WriteStream(new Uint8Array(8));
-  const reader = new ReadStream(new Uint8Array(8));
   const measure = new MeasureStream();
-  for (const stream of [writer, reader, measure]) {
+  for (const stream of [writer, measure]) {
     for (const bits of [0, -1, 65, 32.5, NaN]) {
       assert.throws(() => stream.serializeBits64({ value: 0n }, bits), RangeError);
     }
     // misuse throws even though nothing latched: the streams stay healthy
     assert.equal(stream.ok, true);
     assert.equal(stream.bitsProcessed(), 0);
+  }
+  for (const bits of [0, -1, 65, 32.5, NaN]) {
+    const reader = new ReadStream(new Uint8Array(8));
+    const ref = { value: 7n };
+    assert.equal(reader.serializeBits64(ref, bits), false);
+    assert.equal(reader.error, SerializeError.ValueOutOfRange);
+    assert.equal(reader.bitsProcessed(), 0);
+    assert.equal(ref.value, 7n);
   }
 });
 
