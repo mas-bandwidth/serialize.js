@@ -36,6 +36,22 @@ const DATA_TYPE_MESSAGE = 'data must be a Uint8Array';
 const BYTES_COUNT_MESSAGE = 'bytes must be a non-negative integer';
 const WRITE_UNALIGNED_MESSAGE = 'writeBytes requires a byte-aligned bit index';
 const READ_UNALIGNED_MESSAGE = 'readBytes requires a byte-aligned bit index';
+const SPAN_MESSAGE = 'offset and length must be non-negative integers with offset + length at most data.length';
+
+/**
+ * Validates the caller contract of a byte span: offset and length must be
+ * non-negative integers with offset + length at most data.length. Violating
+ * it is caller misuse and throws. Shared with the stream layer, whose bytes
+ * operations take the same span.
+ * @param {Uint8Array} data the array the span selects from.
+ * @param {number} offset the index of the first byte.
+ * @param {number} length the number of bytes.
+ */
+export function validateSpan(data, offset, length) {
+  if (!Number.isInteger(offset) || !Number.isInteger(length) || offset < 0 || length < 0 || offset + length > data.length) {
+    throw new RangeError(SPAN_MESSAGE);
+  }
+}
 
 // Data at or below this size is copied into the reader's persistent scratch
 // at reset and windowed through the persistent scratch view, so reset
@@ -251,16 +267,26 @@ class CheckedBitWriter {
    * whole words bulk copy directly into the buffer, and the final partial
    * word of bytes goes through the scratch again. The wire is identical to
    * writing every byte with writeBits(value, 8).
+   *
+   * offset and length select a span of data without a subarray view, so a
+   * caller holding a fixed-capacity array writes its used prefix with no
+   * allocation: offset defaults to 0 and length to data.length - offset.
+   * Both must be non-negative integers with offset + length at most
+   * data.length -- a caller contract, and violating it throws.
    * @param {Uint8Array} data the bytes to write, in order.
+   * @param {number} [offset] the index of the first byte to write.
+   * @param {number} [length] the number of bytes to write.
    */
-  writeBytes(data) {
+  writeBytes(data, offset, length) {
     if (!(data instanceof Uint8Array)) {
       throw new TypeError(DATA_TYPE_MESSAGE);
     }
+    const start = offset === undefined ? 0 : offset;
+    const bytes = length === undefined ? data.length - start : length;
+    validateSpan(data, start, bytes);
     if (this.#bitsWritten % 8 !== 0) {
       throw new RangeError(WRITE_UNALIGNED_MESSAGE);
     }
-    const bytes = data.length;
     if (this.#bitsWritten + bytes * 8 > this.#numBits) {
       throw new RangeError(WRITE_OVERFLOW_MESSAGE);
     }
@@ -272,7 +298,7 @@ class CheckedBitWriter {
       headBytes = bytes;
     }
     for (let i = 0; i < headBytes; i++) {
-      this.writeBits(data[i], 8);
+      this.writeBits(data[start + i], 8);
     }
     if (headBytes === bytes) {
       return;
@@ -291,10 +317,10 @@ class CheckedBitWriter {
         const dst = this.#data;
         const dstBase = this.#wordIndex * 4;
         for (let i = 0; i < wordBytes; i++) {
-          dst[dstBase + i] = data[headBytes + i];
+          dst[dstBase + i] = data[start + headBytes + i];
         }
       } else {
-        this.#data.set(data.subarray(headBytes, headBytes + wordBytes), this.#wordIndex * 4);
+        this.#data.set(data.subarray(start + headBytes, start + headBytes + wordBytes), this.#wordIndex * 4);
       }
       this.#bitsWritten += numWords * 32;
       this.#wordIndex += numWords;
@@ -303,7 +329,7 @@ class CheckedBitWriter {
     // tail: the remaining bytes, fewer than 8, through the scratch
     const tailStart = headBytes + numWords * 4;
     for (let i = tailStart; i < bytes; i++) {
-      this.writeBits(data[i], 8);
+      this.writeBits(data[start + i], 8);
     }
   }
 
@@ -553,11 +579,15 @@ class ProductionBitWriter {
    * that fits the buffer are the caller's contract (the stream layer aligns
    * and bounds checks before calling). The copy structure is identical:
    * head bytes through the scratch to the word boundary, whole words bulk
-   * copied, tail bytes through the scratch.
+   * copied, tail bytes through the scratch. offset defaults to 0 and length
+   * to data.length - offset; a span inside data is the caller's contract.
    * @param {Uint8Array} data the bytes to write, in order.
+   * @param {number} [offset] the index of the first byte to write.
+   * @param {number} [length] the number of bytes to write.
    */
-  writeBytes(data) {
-    const bytes = data.length;
+  writeBytes(data, offset, length) {
+    const start = offset === undefined ? 0 : offset;
+    const bytes = length === undefined ? data.length - start : length;
 
     // head: single bytes through the scratch until the cursor reaches a word
     // boundary, or the data runs out first
@@ -566,7 +596,7 @@ class ProductionBitWriter {
       headBytes = bytes;
     }
     for (let i = 0; i < headBytes; i++) {
-      this.writeBits(data[i], 8);
+      this.writeBits(data[start + i], 8);
     }
     if (headBytes === bytes) {
       return;
@@ -585,10 +615,10 @@ class ProductionBitWriter {
         const dst = this.#data;
         const dstBase = this.#wordIndex * 4;
         for (let i = 0; i < wordBytes; i++) {
-          dst[dstBase + i] = data[headBytes + i];
+          dst[dstBase + i] = data[start + headBytes + i];
         }
       } else {
-        this.#data.set(data.subarray(headBytes, headBytes + wordBytes), this.#wordIndex * 4);
+        this.#data.set(data.subarray(start + headBytes, start + headBytes + wordBytes), this.#wordIndex * 4);
       }
       this.#bitsWritten += numWords * 32;
       this.#wordIndex += numWords;
@@ -597,7 +627,7 @@ class ProductionBitWriter {
     // tail: the remaining bytes, fewer than 8, through the scratch
     const tailStart = headBytes + numWords * 4;
     for (let i = tailStart; i < bytes; i++) {
-      this.writeBits(data[i], 8);
+      this.writeBits(data[start + i], 8);
     }
   }
 
@@ -937,16 +967,26 @@ export class BitReader {
    * pass the end of the data -- caller contracts, and violating them
    * throws (the trusted-caller form; the stream layer bounds checks first
    * and refuses as a value, with dest untouched on refusal).
+   *
+   * offset and length select the span of dest to fill without a subarray
+   * view: offset defaults to 0 and length to dest.length - offset. Both
+   * must be non-negative integers with offset + length at most dest.length
+   * -- a caller contract, and violating it throws. Bytes of dest outside
+   * the span are never written.
    * @param {Uint8Array} dest destination; its length is the byte count.
+   * @param {number} [offset] the index of the first byte of dest to fill.
+   * @param {number} [length] the number of bytes to read.
    */
-  readBytesInto(dest) {
+  readBytesInto(dest, offset, length) {
     if (!(dest instanceof Uint8Array)) {
       throw new TypeError(DATA_TYPE_MESSAGE);
     }
+    const start = offset === undefined ? 0 : offset;
+    const bytes = length === undefined ? dest.length - start : length;
+    validateSpan(dest, start, bytes);
     if (this.#bitsRead % 8 !== 0) {
       throw new RangeError(READ_UNALIGNED_MESSAGE);
     }
-    const bytes = dest.length;
     if (this.#bitsRead + bytes * 8 > this.#numBits) {
       throw new RangeError(READ_OVERFLOW_MESSAGE);
     }
@@ -955,10 +995,10 @@ export class BitReader {
     const data = this.#data;
     if (bytes <= SMALL_COPY_BYTES) {
       for (let i = 0; i < bytes; i++) {
-        dest[i] = data[byteIndex + i];
+        dest[start + i] = data[byteIndex + i];
       }
     } else {
-      dest.set(data.subarray(byteIndex, byteIndex + bytes));
+      dest.set(data.subarray(byteIndex, byteIndex + bytes), start);
     }
     this.#bitsRead += bytes * 8;
   }

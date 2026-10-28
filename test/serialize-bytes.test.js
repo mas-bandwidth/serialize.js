@@ -190,3 +190,18 @@ test('the measure bound covers the actual write at every starting offset', () =>
     assert.ok(span <= bound, `offset ${offset}: span ${span} within bound ${bound}`);
   }
 });
+
+test('the span must lie inside data on the write and measure streams: misuse throws', () => {
+  const writer = new WriteStream(new Uint8Array(8));
+  const measure = new MeasureStream();
+  const data = new Uint8Array(4);
+  for (const [offset, length] of [[-1, 1], [0, -1], [1.5, 1], [0, 1.5], [3, 2], [5, 0], [0, 5], ['0', 1], [null, 1]]) {
+    assert.throws(() => writer.serializeBytes(data, offset, length), RangeError, `offset ${offset}, length ${length}`);
+    assert.throws(() => measure.serializeBytes(data, offset, length), RangeError, `offset ${offset}, length ${length}`);
+  }
+  // misuse wrote nothing and latched nothing
+  assert.equal(writer.ok, true);
+  assert.equal(writer.bitsProcessed(), 0);
+  assert.equal(measure.bitsProcessed(), 0);
+  assert.equal(writer.serializeBytes(data, 4, 0), true);
+});

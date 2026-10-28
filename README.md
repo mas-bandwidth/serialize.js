@@ -74,7 +74,8 @@ measures. [USAGE.md](USAGE.md) teaches every operation by example.
   float32 with the standard's two roundings on each side and refuses a
   non-finite decode.
 - **Bytes and strings**: `serializeBytes` (aligned bulk copy, count
-  agreed, not transmitted); `serializeString` (UTF-8 on the wire; a read
+  agreed, not transmitted; an optional `offset, length` span copies part of
+  an array with no view allocated); `serializeString` (UTF-8 on the wire; a read
   refuses a zero byte as `embedded_nul` before it refuses malformed UTF-8
   as `invalid_utf8`, through a fatal decoder that never substitutes U+FFFD
   or strips a byte order mark; the checked writer refuses U+0000 and lone

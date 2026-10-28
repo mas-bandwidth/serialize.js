@@ -38,7 +38,7 @@
 //   a caller bug. Misused production writes produce garbage on the wire
 //   (which conforming readers refuse), never memory unsafety.
 
-import { BitWriter, BitReader } from './bitpacker.js';
+import { BitWriter, BitReader, validateSpan } from './bitpacker.js';
 import { bitsRequired, bitsRequired64, bitsRequired128, bitLength64 } from './bits.js';
 import { PRODUCTION } from './mode.js';
 
@@ -1176,21 +1176,33 @@ class CheckedWriteStream {
    * Uint8Array (misuse throws). Returns false and latches PastEnd if the
    * bytes would pass the end of the buffer; the align padding, written
    * before the check, is part of the latched stream's dead wire.
+   *
+   * offset and length select a span of data without a subarray view, so a
+   * fixed-capacity array's used prefix costs no allocation per call:
+   * serializeBytes(text, 0, textLength). offset defaults to 0 and length to
+   * data.length - offset; the span's length is the byte count on the wire.
+   * Both must be non-negative integers with offset + length at most
+   * data.length (misuse throws).
    * @param {Uint8Array} data the bytes to write, in order.
+   * @param {number} [offset] the index of the first byte of the span.
+   * @param {number} [length] the number of bytes in the span.
    * @returns {boolean} true on success.
    */
-  serializeBytes(data) {
+  serializeBytes(data, offset, length) {
     if (!(data instanceof Uint8Array)) {
       throw new TypeError(BYTES_TYPE_MESSAGE);
     }
+    const start = offset === undefined ? 0 : offset;
+    const bytes = length === undefined ? data.length - start : length;
+    validateSpan(data, start, bytes);
     if (this.#error !== SerializeError.None) {
       return false;
     }
     this.#writer.writeAlign();
-    if (data.length * 8 > this.#writer.bitsAvailable()) {
+    if (bytes * 8 > this.#writer.bitsAvailable()) {
       return this.#fail(SerializeError.PastEnd);
     }
-    this.#writer.writeBytes(data);
+    this.#writer.writeBytes(data, start, bytes);
     return true;
   }
 
@@ -1885,19 +1897,25 @@ class ProductionWriteStream {
    * serializeBytes, trusted: a Uint8Array is the caller's contract. The
    * align, the overflow latch and the bulk copy are exactly the checked
    * variant's; the align padding, written before the check, is part of a
-   * latched stream's dead wire, as in every mode.
+   * latched stream's dead wire, as in every mode. offset defaults to 0 and
+   * length to data.length - offset; a span inside data is the caller's
+   * contract.
    * @param {Uint8Array} data the bytes to write, in order.
+   * @param {number} [offset] the index of the first byte of the span.
+   * @param {number} [length] the number of bytes in the span.
    * @returns {boolean} true on success.
    */
-  serializeBytes(data) {
+  serializeBytes(data, offset, length) {
     if (this.#error !== SerializeError.None) {
       return false;
     }
+    const start = offset === undefined ? 0 : offset;
+    const bytes = length === undefined ? data.length - start : length;
     this.#writer.writeAlign();
-    if (data.length * 8 > this.#writer.bitsAvailable()) {
+    if (bytes * 8 > this.#writer.bitsAvailable()) {
       return this.#fail(SerializeError.PastEnd);
     }
-    this.#writer.writeBytes(data);
+    this.#writer.writeBytes(data, start, bytes);
     return true;
   }
 
@@ -2688,13 +2706,26 @@ export class ReadStream {
    * UNSPECIFIED (STANDARD.md, "Reader Obligations"): the non-mutation rule
    * covers scalar destinations, and a caller must read data only after a
    * true return. Hostile data never throws.
+   *
+   * offset and length select a span of data without a subarray view, so a
+   * fixed-capacity array's used prefix costs no allocation per call:
+   * serializeBytes(text, 0, textLength). offset defaults to 0 and length to
+   * data.length - offset; the span's length is the byte count on the wire.
+   * Bytes of data outside the span are never written. Both must be
+   * non-negative integers with offset + length at most data.length (misuse
+   * throws).
    * @param {Uint8Array} data destination; its length is the byte count.
+   * @param {number} [offset] the index of the first byte of the span.
+   * @param {number} [length] the number of bytes in the span.
    * @returns {boolean} true on success.
    */
-  serializeBytes(data) {
+  serializeBytes(data, offset, length) {
     if (!(data instanceof Uint8Array)) {
       throw new TypeError(BYTES_TYPE_MESSAGE);
     }
+    const start = offset === undefined ? 0 : offset;
+    const bytes = length === undefined ? data.length - start : length;
+    validateSpan(data, start, bytes);
     if (this.#error !== SerializeError.None) {
       return false;
     }
@@ -2703,11 +2734,11 @@ export class ReadStream {
     }
     // compare in bytes rather than bits, consistent with the family's
     // 64-bit bookkeeping
-    if (data.length > this.#reader.bitsRemaining() / 8) {
+    if (bytes > this.#reader.bitsRemaining() / 8) {
       return this.#fail(SerializeError.PastEnd);
     }
     // copy-in form: no subarray view, no second copy out of it
-    this.#reader.readBytesInto(data);
+    this.#reader.readBytesInto(data, start, bytes);
     return true;
   }
 
@@ -3261,19 +3292,25 @@ class CheckedMeasureStream {
    * Measures an array of bytes: a worst case 7-bit align plus the data
    * bytes -- the bytes operation aligns, and a measure charges every
    * alignment its conservative worst case. data must be a Uint8Array
-   * (misuse throws); its contents are ignored.
+   * (misuse throws); its contents are ignored. offset and length select a
+   * span exactly as on the write stream, validated the same way.
    * @param {Uint8Array} data the bytes that would be written.
+   * @param {number} [offset] the index of the first byte of the span.
+   * @param {number} [length] the number of bytes in the span.
    * @returns {boolean} true on success.
    */
-  serializeBytes(data) {
+  serializeBytes(data, offset, length) {
     if (!(data instanceof Uint8Array)) {
       throw new TypeError(BYTES_TYPE_MESSAGE);
     }
+    const start = offset === undefined ? 0 : offset;
+    const bytes = length === undefined ? data.length - start : length;
+    validateSpan(data, start, bytes);
     if (this.#error !== SerializeError.None) {
       return false;
     }
     this.serializeAlign();
-    return this.#measure(data.length * 8);
+    return this.#measure(bytes * 8);
   }
 
   /**
@@ -3629,12 +3666,16 @@ class ProductionMeasureStream {
 
   /**
    * Measures an array of bytes: a worst case 7-bit align plus the data
-   * bytes. data must be a Uint8Array (the caller's contract).
+   * bytes. data must be a Uint8Array and the span inside it (the caller's
+   * contract); offset defaults to 0 and length to data.length - offset.
    * @param {Uint8Array} data the bytes that would be written.
+   * @param {number} [offset] the index of the first byte of the span.
+   * @param {number} [length] the number of bytes in the span.
    * @returns {boolean} true, always.
    */
-  serializeBytes(data) {
-    this.#bitsWritten += 7 + data.length * 8;
+  serializeBytes(data, offset, length) {
+    const start = offset === undefined ? 0 : offset;
+    this.#bitsWritten += 7 + (length === undefined ? data.length - start : length) * 8;
     return true;
   }
 
