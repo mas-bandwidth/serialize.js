@@ -99,10 +99,20 @@ All three streams expose `bitsProcessed()`, `bytesProcessed()`,
 
 ## Errors are values
 
-The wire is a trust boundary: hostile bytes never throw. Every failure —
-a truncated read, a value outside its range, a malformed string — returns
-`false` and latches the first error on the stream, where it sticks; every
-later call returns `false` without disturbing it.
+The wire is a trust boundary: hostile bytes never throw. Every read
+refusal — a truncated read, a value outside its range, a malformed
+string — returns `false` and latches the first error on the stream, where
+it sticks; every later call returns `false` without disturbing it.
+
+A write or a measure refuses nothing and latches nothing (IMPLEMENTING.md
+U6, U9): its `error` is always `SerializeError.None`. Write misuse — a bad
+declaration, a value its declaration cannot carry, and an operation that
+does not fit the room left in the buffer — throws at the call (a
+`RangeError` or `TypeError`), before any bit of it is written. That throw
+is this port's trap, the family's checked-build assertion. Only `fail()`
+and a nested object whose function returns `false` make a write call
+return `false`, and neither records anything. Size a write buffer with a
+`MeasureStream`, or check `bitsAvailable()` first.
 
 ```js
 const r = new ReadStream(Uint8Array.of(0x00)); // 8 bits of data
@@ -188,25 +198,26 @@ here.
 **Production** removes the per-operation caller validation from
 `WriteStream`, `MeasureStream` and `BitWriter`, exactly as a C/C++ release
 build compiles its asserts to nothing. What every write keeps, in both
-modes identically: the sticky-error gate and the buffer-end check —
+modes identically, is the room check, which keeps the writer inside its
+buffer, and it throws there too —
 
 ```js
-// production mode: a message that does not fit is still a latched VALUE
+// both modes: an operation that does not fit throws, and nothing latches
 const w = new WriteStream(new Uint8Array(8));
 const big = { value: 1n };
 w.serializeUint64(big); // -> true: 64 bits, the buffer is full
-w.serializeUint64(big); // -> false: SerializeError.PastEnd, latched
-w.ok; // false, and every later call keeps returning false
+w.serializeUint64(big); // throws RangeError, writing nothing
+w.ok; // true: write misuse never latches (U9)
 ```
 
-— because overflow is a runtime condition, not a caller bug. Everything
-else on the write side is your contract in production: a value outside its
-declared range goes out as deterministic garbage (which conforming readers
-refuse), a NaN or a U+0000 reaches the wire (where conforming readers
-refuse it), a lone surrogate becomes U+FFFD, and nothing is validated for
-you. Misuse never
-corrupts memory — JavaScript's own bounds semantics are the backstop — it
-corrupts your message. The wire for *conforming* writes is byte identical
+Everything else on the write side is your contract in production, and the
+output after any other write misuse is **unspecified** (IMPLEMENTING.md
+U3, U9): a value outside its range or wider than its bits, a NaN, a
+U+0000 or a lone surrogate produce bytes nothing promises anything about,
+and a caller must never depend on them. Whatever a lenient encoder makes
+of a lone surrogate is that unspecified output, never a documented
+behaviour. Misuse never corrupts memory — JavaScript's own bounds
+semantics are the backstop — it corrupts your message. The wire for *conforming* writes is byte identical
 in both modes: `npm run test:production` re-runs the golden pins and the
 property sweep under the production variants to prove it.
 
@@ -398,6 +409,12 @@ r6.serializeBytes(text, 0, textLength); // fills text[0, textLength)
 `BitWriter.writeBytes` and `BitReader.readBytesInto` take the same
 `offset, length` span.
 
+The span is a **language necessity** (IMPLEMENTING.md U15, "Exports beyond
+the reference operations"): JavaScript cannot point into the middle of a
+buffer, so `offset` and `length` stand for the reference's pointer and
+count. It is wire-identical to `serializeBytes` on that span, and schema's
+generated code relies on it.
+
 ## Strings: UTF-8 on the wire
 
 `serializeString(ref, bufferSize)` sends the UTF-8 byte length as
@@ -421,11 +438,26 @@ back exactly: no normalization (`'e\u0301'` stays three bytes), no stripped
 byte order mark, every plane.
 
 The checked writer refuses what a reader would (U3, U4): a U+0000, and a
-lone surrogate — ill-formed UTF-16, which `TextEncoder` would silently
-turn into U+FFFD — are write misuse and throw, before anything is written.
+lone surrogate — ill-formed UTF-16, with no UTF-8 encoding — are write
+misuse and throw, before anything is written; no checked build ever
+replaces one.
 A string that does not fit the buffer writes nothing at all: the room for
 the length, the align and the payload is checked first (U10).
 Text is UTF-8 on the wire; there is no wide-string operation.
+
+`copyString(source, destSize)` is the family's `serialize_copy_string`
+(IMPLEMENTING.md U15): it bounds text for `serializeString(ref, destSize)`.
+It returns the longest prefix of `source`, before its first U+0000, whose
+UTF-8 encoding fits `destSize - 1` bytes and does not end inside a
+character. JavaScript strings are UTF-16, so `destSize` counts the bytes of
+the strict UTF-8 encoding. A `destSize` below 1, and a source holding a lone
+surrogate, are write misuse and throw `RangeError` (U3, U9).
+
+```js
+copyString('a\u{1F600}', 5); // 'a': the emoji's 4 bytes do not fit 4
+copyString('a\0bc', 8); // 'a': text ends at the first U+0000
+w.serializeString({ value: copyString(name, 32) }, 32); // always fits
+```
 
 ## The relative integer
 

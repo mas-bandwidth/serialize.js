@@ -19,5 +19,6 @@ export {
   ReadStream,
   MeasureStream,
   compressedFloatParams,
+  copyString,
   refusalName,
 } from './streams.js';

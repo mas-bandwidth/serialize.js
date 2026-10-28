@@ -19,7 +19,8 @@
 //   - alignment and end (writeAlign / serializeAlign from offsets 0..7,
 //     serializeEnd, flushBits / flush on even and odd word indices)
 //   - exact-capacity fit vs past-capacity overflow (tryWriteBits and every
-//     WriteStream operation family, sticky PastEnd latch, and reset() recovery)
+//     WriteStream operation family: a throw that writes nothing and latches
+//     nothing (IMPLEMENTING.md U9), and reset() reuse)
 //
 // Executes the entire table in fresh module-load processes for checked
 // (NODE_ENV=development) and production (NODE_ENV=production) modes and
@@ -41,7 +42,6 @@ import {
   WriteStream,
   ReadStream,
   MeasureStream,
-  SerializeError,
   bitsRequired,
   bitsRequired64,
   bitsRequired128,
@@ -1228,10 +1228,29 @@ function buildValidStreamScenarios() {
   return scenarios;
 }
 
+// The result of a write that may be misuse: its return, or the name of what
+// it threw (U9: an operation that does not fit the room left throws).
+function attempt(fn) {
+  try {
+    return fn();
+  } catch (error) {
+    return error instanceof RangeError ? 'RangeError' : String(error);
+  }
+}
+
+// Writes zero bits, 32 at a time: true when every write returned true.
+function fillBits(stream, bits) {
+  let ok = true;
+  for (let rem = bits; rem > 0; rem -= 32) {
+    ok = stream.serializeBits({ value: 0 }, Math.min(rem, 32)) && ok;
+  }
+  return ok;
+}
+
 // Capacity-boundary scenarios for WriteStream: for every operation family,
 // tests exact remaining capacity fit (bitsAvailable() === cost -> true, 0 bits left),
-// 1-bit short overflow (bitsAvailable() === cost - 1 -> false, PastEnd),
-// sticky PastEnd latch on subsequent operations, and reset(buffer) recovery.
+// 1-bit short overflow (bitsAvailable() === cost - 1 -> a RangeError, U9),
+// no latch afterwards (what still fits is written), and reset(buffer) reuse.
 function collectOverflowBoundaryRecords() {
   // Each entry: [id, costBits, executeOp(stream)]
   const ops = [
@@ -1302,11 +1321,12 @@ function collectOverflowBoundaryRecords() {
     const shortWriter = new WriteStream(shortBuf);
     primeBitOffset(shortWriter, totalBits - (cost - 1));
     const availBeforeShort = shortWriter.bitsAvailable();
-    const shortRet = opFn(shortWriter);
+    const shortRet = attempt(() => opFn(shortWriter));
     const bitsAfterShort = shortWriter.bitsProcessed();
-    // Sticky PastEnd latch check: subsequent operations (even 0-bit degenerate or align) must return false;
-    // end is a no-op returning true on a write (U12).
-    const stickyBitsRet = shortWriter.serializeBits({ value: 0 }, 1);
+    // No latch (U9): the misuse failed nothing, so the cost - 1 bits still
+    // left are written, then a degenerate 0-bit int, an align and an end
+    // (a no-op returning true on a write, U12).
+    const stickyBitsRet = fillBits(shortWriter, cost - 1);
     const stickyDegRet = shortWriter.serializeInt({ value: 7 }, 7, 7);
     const stickyAlignRet = shortWriter.serializeAlign();
     const stickyEndRet = shortWriter.serializeEnd();
@@ -1346,7 +1366,7 @@ function collectOverflowBoundaryRecords() {
     writer.serializeBits({ value: 0xdeadbeef }, 32);
     writer.serializeBits({ value: 0x1fffffff }, 29); // 3 bits left, alignBits() === 3 fits!
     const exactBytesRet = writer.serializeAlign();
-    const overflowBytesRet = writer.serializeBytes(new Uint8Array(1)); // 0 bytes left after 64 bits!
+    const overflowBytesRet = attempt(() => writer.serializeBytes(new Uint8Array(1))); // 0 bytes left after 64 bits!
     writer.flush();
     records.push({
       id: 'ws.overflow.bytes_after_align_at_end',
@@ -1363,14 +1383,14 @@ function collectOverflowBoundaryRecords() {
     const wPrefix = new WriteStream(bufPrefix);
     wPrefix.serializeBits({ value: 0xdeadbeef }, 32);
     wPrefix.serializeBits({ value: 0x07ffffff }, 27); // 5 bits left
-    const prefixRet = wPrefix.serializeString({ value: 'hi' }, 64);
+    const prefixRet = attempt(() => wPrefix.serializeString({ value: 'hi' }, 64));
     wPrefix.flush();
 
     // Length prefix fits (6 bits) + align (2 bits) = 8 bits -> 3 bytes left, but string is 4 bytes.
     const bufPayload = new Uint8Array(8).fill(0xff);
     const wPayload = new WriteStream(bufPayload);
     wPayload.serializeBits({ value: 0xdeadbeef }, 32);
-    const payloadRet = wPayload.serializeString({ value: 'abcd' }, 64);
+    const payloadRet = attempt(() => wPayload.serializeString({ value: 'abcd' }, 64));
     wPayload.flush();
 
     // 3-byte string fits in remaining 4 bytes (6-bit length + 2-bit align + 24-bit payload = 32 bits).
@@ -1662,27 +1682,25 @@ test('fresh module-load parity: checked (NODE_ENV=development) and production (N
 
   compareParitySnapshots(checkedSnapshot, productionSnapshot);
 
-  // Also verify every overflow record latched SerializeError.PastEnd on the 1-bit short case.
+  // Also verify every overflow record threw on the 1-bit short case and latched nothing (U9).
   for (const rec of productionSnapshot.overflowRecords) {
     if ('shortSnap' in rec) {
       assert.equal(rec.exactRet, true, `${rec.id}: exact fit must succeed`);
       assert.equal(rec.exactSnap.ok, true, `${rec.id}: exact fit ok`);
       assert.equal(rec.exactSnap.error, null, `${rec.id}: exact fit error`);
       assert.equal(rec.exactSnap.bitsAvailable, 0, `${rec.id}: exact fit leaves 0 bits available`);
-      assert.equal(rec.shortRet, false, `${rec.id}: 1-bit short must fail`);
-      assert.equal(rec.shortSnap.ok, false, `${rec.id}: 1-bit short ok === false`);
-      assert.equal(
-        rec.shortSnap.error,
-        SerializeError.PastEnd,
-        `${rec.id}: 1-bit short latches PastEnd`,
-      );
+      assert.equal(rec.shortRet, 'RangeError', `${rec.id}: 1-bit short throws (U9)`);
+      assert.equal(rec.bitsAfterShort, 192 - (rec.cost - 1), `${rec.id}: 1-bit short writes nothing`);
+      assert.equal(rec.shortSnap.ok, true, `${rec.id}: 1-bit short latches nothing`);
+      assert.equal(rec.shortSnap.error, null, `${rec.id}: 1-bit short records no reason`);
+      assert.equal(rec.shortSnap.bitsAvailable, 0, `${rec.id}: the room left is still written`);
       assert.deepEqual(
         rec.stickyReturns,
         // end on a write is a no-op returning true (IMPLEMENTING.md U12)
-        [false, false, false, true],
-        `${rec.id}: sticky PastEnd blocks subsequent operations`,
+        [true, true, true, true],
+        `${rec.id}: no latch, later operations that fit are written`,
       );
-      assert.equal(rec.recoverRet, true, `${rec.id}: reset() recovers from PastEnd`);
+      assert.equal(rec.recoverRet, true, `${rec.id}: reset() reuses the stream`);
       assert.equal(rec.recoverSnap.ok, true, `${rec.id}: reset() restores ok === true`);
       assert.equal(rec.recoverSnap.error, null, `${rec.id}: reset() clears error`);
     }
@@ -1786,7 +1804,7 @@ test('sensitivity control: planted production-only byte, bit-count, measure-coun
       (r) => r.id === 'ws.overflow.int128_g4_128bit',
     );
     assert.ok(target);
-    target.shortSnap.error = null;
+    target.shortRet = false;
     assert.throws(
       () => compareParitySnapshots(baseChecked, mutated),
       /overflow parity mismatch at ws\.overflow\.int128_g4_128bit/,

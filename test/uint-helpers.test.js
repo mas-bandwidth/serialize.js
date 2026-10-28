@@ -142,7 +142,7 @@ test('truncated data refused as PastEnd, the exact fit accepted', () => {
   }
 });
 
-test('a write past the end latches PastEnd, the exact fit succeeds', () => {
+test('a write past the end throws (U9) and writes nothing, the exact fit succeeds', () => {
   const cases = [
     ['serializeUint8', 8, { value: 0 }],
     ['serializeUint16', 16, { value: 0 }],
@@ -157,8 +157,8 @@ test('a write past the end latches PastEnd, the exact fit succeeds', () => {
 
     const overflows = new WriteStream(new Uint8Array(8));
     processPrefix(overflows, 64 - bits + 1);
-    assert.equal(overflows[method](ref), false, `${method} overflows`);
-    assert.equal(overflows.error, SerializeError.PastEnd);
+    assert.throws(() => overflows[method](ref), RangeError, `${method} overflows`);
+    assert.equal(overflows.error, SerializeError.None);
     assert.equal(overflows.bitsProcessed(), 64 - bits + 1); // nothing written
   }
 });
@@ -175,16 +175,15 @@ test('measures are exact for the fixed-width helpers', () => {
   assert.equal(measure.bitsProcessed(), 57);
 });
 
-test('a latched stream refuses every helper without touching refs', () => {
+test('a full write stream throws on every helper and latches nothing; a latched reader refuses without touching refs', () => {
   const writer = new WriteStream(new Uint8Array(8));
   writer.serializeBits({ value: 0 }, 32);
   writer.serializeBits({ value: 0 }, 32);
-  writer.serializeUint8({ value: 1 }); // latches PastEnd
-  assert.equal(writer.error, SerializeError.PastEnd);
-  assert.equal(writer.serializeUint16({ value: 2 }), false);
-  assert.equal(writer.serializeUint32({ value: 3 }), false);
-  assert.equal(writer.serializeBool({ value: true }), false);
-  assert.equal(writer.error, SerializeError.PastEnd);
+  assert.throws(() => writer.serializeUint8({ value: 1 }), RangeError);
+  assert.throws(() => writer.serializeUint16({ value: 2 }), RangeError);
+  assert.throws(() => writer.serializeUint32({ value: 3 }), RangeError);
+  assert.throws(() => writer.serializeBool({ value: true }), RangeError);
+  assert.equal(writer.error, SerializeError.None);
 
   const reader = new ReadStream(new Uint8Array(0));
   const ref = { value: 999 };

@@ -80,13 +80,13 @@ test('a non-finite write refused, the float32 edge accepted', () => {
   assert.equal(ref.value, 10, 'the clamped edge decodes to max');
 });
 
-test('a write that does not fit latches PastEnd and writes nothing', () => {
+test('a write that does not fit throws (U9) and writes nothing', () => {
   const writer = new WriteStream(new Uint8Array(8));
   assert.equal(writer.serializeBits({ value: 0 }, 32), true);
   assert.equal(writer.serializeBits({ value: 0 }, 23), true);
   // 9 bits left: the 10-bit declaration does not fit
-  assert.equal(writer.serializeCompressedFloat({ value: 5 }, 0, 10, 0.01), false);
-  assert.equal(writer.error, SerializeError.PastEnd);
+  assert.throws(() => writer.serializeCompressedFloat({ value: 5 }, 0, 10, 0.01), RangeError);
+  assert.equal(writer.error, SerializeError.None);
   assert.equal(writer.bitsProcessed(), 55, 'the refused write consumed nothing');
 
   // the accept boundary: with exactly 10 bits left the write succeeds
@@ -125,19 +125,16 @@ test('measure refuses a non-finite value like the write it stands in for', () =>
   assert.equal(boundary.bitsProcessed(), 10);
 });
 
-test('a latched error makes compressed floats no-ops, and misuse still throws', () => {
+test('a full write stream throws on compressed floats and latches nothing (U9)', () => {
   const writer = new WriteStream(new Uint8Array(8));
   assert.equal(writer.serializeUint64({ value: 0n }), true);
-  assert.equal(writer.serializeBool({ value: true }), false, 'latch PastEnd');
-  assert.equal(writer.serializeCompressedFloat({ value: 5 }, 0, 10, 0.01), false);
-  assert.equal(writer.error, SerializeError.PastEnd, 'the first error sticks');
+  assert.throws(() => writer.serializeBool({ value: true }), RangeError);
+  assert.throws(() => writer.serializeCompressedFloat({ value: 5 }, 0, 10, 0.01), RangeError);
+  assert.equal(writer.error, SerializeError.None, 'write misuse never latches');
   assert.equal(writer.bitsProcessed(), 64);
-  // the declaration is validated before the latch check: declaration
-  // misuse throws on a latched stream too, while a value-type misuse is
-  // never reached -- the latch check returns false before the ref is read,
-  // the same order serializeInt pins
+  // declaration and value misuse throw before the room is looked at
   assert.throws(() => writer.serializeCompressedFloat({ value: 5 }, 10, 0, 0.01), RangeError);
-  assert.equal(writer.serializeCompressedFloat({ value: '5' }, 0, 10, 0.01), false);
+  assert.throws(() => writer.serializeCompressedFloat({ value: '5' }, 0, 10, 0.01), TypeError);
 });
 
 test('an invalid declaration throws on write and measure, and refuses on read (U7, U16)', () => {

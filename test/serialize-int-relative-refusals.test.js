@@ -174,8 +174,8 @@ test('a refused absolute-tier write puts nothing on the wire', () => {
   const writer = new WriteStream(new Uint8Array(8));
   assert.equal(writer.serializeBits({ value: 0 }, 32), true);
   assert.equal(writer.serializeBits({ value: 0 }, 8), true);
-  assert.equal(writer.serializeIntRelative(100, { value: 100000 }), false);
-  assert.equal(writer.error, SerializeError.PastEnd);
+  assert.throws(() => writer.serializeIntRelative(100, { value: 100000 }), RangeError);
+  assert.equal(writer.error, SerializeError.None);
   assert.equal(writer.bitsProcessed(), 40, 'nothing written on refusal');
 });
 
@@ -212,12 +212,12 @@ test('a non-number current on write or measure is caller misuse and throws', () 
   assert.throws(() => measure.serializeIntRelative(100, { value: null }), TypeError);
 });
 
-test('a latched stream refuses relative serializes without touching state', () => {
+test('a full write stream throws on relative serializes and latches nothing; a latched reader refuses', () => {
   const writer = new WriteStream(new Uint8Array(8));
   assert.equal(writer.serializeUint64({ value: 0n }), true);
-  assert.equal(writer.serializeBool({ value: true }), false); // latch PastEnd
-  assert.equal(writer.serializeIntRelative(100, { value: 101 }), false);
-  assert.equal(writer.error, SerializeError.PastEnd);
+  assert.throws(() => writer.serializeBool({ value: true }), RangeError);
+  assert.throws(() => writer.serializeIntRelative(100, { value: 101 }), RangeError);
+  assert.equal(writer.error, SerializeError.None);
   assert.equal(writer.bitsProcessed(), 64);
 
   const reader = new ReadStream(new Uint8Array(0));

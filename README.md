@@ -76,11 +76,14 @@ measures. [USAGE.md](USAGE.md) teaches every operation by example.
   `serializeCompressedFloatPrecomputed` pay its derivation once.
 - **Bytes and strings**: `serializeBytes` (aligned bulk copy, count
   agreed, not transmitted; an optional `offset, length` span copies part of
-  an array with no view allocated); `serializeString` (UTF-8 on the wire; a read
+  an array with no view allocated, a language necessity under
+  IMPLEMENTING.md U15: JavaScript cannot point into the middle of a
+  buffer); `serializeString` (UTF-8 on the wire; a read
   refuses a zero byte as `embedded_nul` before it refuses malformed UTF-8
   as `invalid_utf8`, through a fatal decoder that never substitutes U+FFFD
-  or strips a byte order mark; the checked writer refuses U+0000 and lone
-  surrogates rather than letting `TextEncoder` launder them).
+  or strips a byte order mark; U+0000 and lone surrogates are write misuse,
+  which the checked writer throws); `copyString` (`serialize_copy_string`,
+  U15: the longest whole-character prefix whose UTF-8 fits `destSize - 1`).
 - **The relative integer**: `serializeIntRelative` — the flag ladder for
   strictly increasing sequences over the non-negative int32 domain, 0 to
   2^31 - 1, one bit for a difference of 1, no wrapping. Every tier's
@@ -163,9 +166,10 @@ surface.
 
 ## Design
 
-This is a **hand-port to native JavaScript** — no wasm. Errors are values —
-bool-returning serialize methods plus a sticky latched stream error — and
-hostile input never throws.
+This is a **hand-port to native JavaScript** — no wasm. A read's refusals
+are values — bool-returning serialize methods plus a sticky latched stream
+error — and hostile input never throws. Write misuse is a throw, never a
+latch (IMPLEMENTING.md U9): a write or measure stream records no reason.
 
 The check model is the family standard's (STANDARD.md, "Writers are
 trusted; readers are not"): **the caller is responsible for well-formed
@@ -178,16 +182,16 @@ at module load**, on `NODE_ENV` — the JS `#ifdef`:
 - **Checked** (the default): write misuse throws, one mechanism on every
   operation — a bad declaration, a value of the wrong type, a value the
   declaration cannot carry (out of range, wider than its bits, not finite,
-  text that is not well-formed) — the always-on form of the family's
-  checked-build assertions. Develop and test here.
+  text that is not well-formed, an operation that does not fit the room
+  left) — the always-on form of the family's checked-build assertions,
+  and this port's trap (U9). Develop and test here.
 - **Production** (`NODE_ENV=production`): the caller is trusted, exactly as
   a C/C++ release build trusts it. Per-operation caller validation is gone
   from `WriteStream`, `MeasureStream` and `BitWriter`; every write keeps
-  the sticky-error gate and the buffer-end check, whose false latches
-  `PastEnd` — a message that does not fit is a runtime condition, not a
-  caller bug. Misuse produces garbage on the wire (which conforming readers
-  refuse), never memory unsafety: JavaScript's own bounds semantics
-  backstop the trusted path.
+  the room check, which keeps the writer inside its buffer, and it throws
+  there too. Output after any other write misuse is unspecified (U3, U9),
+  never a documented behaviour, and never memory unsafety: JavaScript's
+  own bounds semantics backstop the trusted path.
 
 The selection is frozen — the environment is read once, whole classes are
 chosen at export time, changing `NODE_ENV` after load has no effect — and
@@ -203,8 +207,8 @@ proved in `test/uniform-rules.test.js` and
 `test/uniform-rules-checked.test.js`: write buffers are a multiple of 8
 bytes; a write checks room for the whole operation before writing any of
 it; a writer's buffer is defined only after `flush()`; `end` on a write or
-measure returns true; `reset()` re-initialises every stream and clears its
-latch; every stream has a public `fail(reason)`, and `refusalName(error)`
+measure returns true; `reset()` re-initialises every stream and clears a
+reader's latch; write misuse throws and never latches; every stream has a public `fail(reason)`, and `refusalName(error)`
 gives the family spelling, `'none'` for no refusal.
 
 ## Testing
@@ -222,8 +226,8 @@ being accepted by Node 22's runner, so the invocation stays argument-free.)
 The production leg runs `production-tests.mjs`, which spawns the same runner
 with `NODE_ENV=production` pinned over every test file that asserts no
 dev-only caller validation, plus `test/production/` — where each dev assert
-is proven **absent**: calls that throw or latch in dev pass through in
-production, and overflow still latches. CI runs both legs on every OS and
+is proven **absent**: calls that throw in dev pass through in production,
+and a write that does not fit still throws. CI runs both legs on every OS and
 Node version, and lint as its own failing check.
 
 ### Fuzzing

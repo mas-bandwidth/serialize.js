@@ -17,8 +17,9 @@
 // carries the family's release shape: the caller is responsible for
 // well-formed writes (STANDARD.md, "Writers are trusted; readers are not"), so the
 // per-operation caller validation is gone and only tryWriteBits's buffer-end
-// check remains -- the one write-path check the writer-trusted model keeps,
-// because its false is the stream layer's sticky PastEnd. The read side is
+// check remains -- the one write-path check this port keeps in production,
+// because it keeps the writer inside its buffer; the stream layer throws on
+// its false (IMPLEMENTING.md U9: room misuse traps, and nothing latches). The read side is
 // different in EVERY mode: the wire is a trust boundary, and hostile input
 // never throws. See BitReader.
 //
@@ -148,10 +149,10 @@ class CheckedBitWriter {
   /**
    * Writes the low order bits of value to the buffer, without padding to the
    * nearest byte. A boolean writes just 1 bit, a value in [0,31] writes in 5
-   * bits, and so on. bits must be in [1,32]. value is converted to uint32;
-   * bits of value above the count are ignored, as in the Go and C# ports
-   * (their uint32 parameter type performs the same conversion at the call
-   * site). Throws if the write would go past the end of the buffer.
+   * bits, and so on. bits must be in [1,32], and value an unsigned
+   * integer that fits them: a value wider than its count is write misuse
+   * and throws (U8, masking is not checking). Throws if the write would go
+   * past the end of the buffer.
    *
    * The core below the checks is duplicated in tryWriteBits and in both
    * ProductionBitWriter entries -- fused into each public entry because V8
@@ -208,8 +209,8 @@ class CheckedBitWriter {
    * Writes bits, refusing a past-end write as a value: returns true on
    * success, or false -- writing nothing -- if the write would go past the
    * end of the buffer. The write-side mirror of tryReadBits, and the single
-   * bounds check on the stream layer's hot path: the stream refuses the
-   * false as its PastEnd without a second check anywhere. bits must be in
+   * bounds check on the stream layer's hot path: the stream throws on the
+   * false (U9, room misuse) without a second check anywhere. bits must be in
    * [1,32] and value a number -- caller contracts, and violating them
    * throws.
    *
@@ -440,13 +441,14 @@ class CheckedBitWriter {
  *
  * What remains is exactly what the writer-trusted model keeps hard:
  *
- * - tryWriteBits keeps its buffer-end check. Its false is the stream
- *   layer's sticky PastEnd refusal: a message that does not fit the buffer
- *   is a runtime condition, not a caller bug, so the overflow contract
- *   latches identically in both modes.
- * - The value mask stays in both entries: bits of the value above the count
- *   are IGNORED by documented semantics (the Go/C# uint32 conversion), so
- *   the mask is wire arithmetic, not validation.
+ * - tryWriteBits keeps its buffer-end check, which keeps the writer inside
+ *   its buffer. The stream layer throws on its false in both modes
+ *   identically (IMPLEMENTING.md U9: an operation that does not fit the
+ *   room left is write misuse; nothing latches).
+ * - The value mask stays in both entries so a misused value cannot spill
+ *   into its neighbours' bits. A value wider than its count is write misuse
+ *   (U8), which the checked variant throws; what production writes for one
+ *   is unspecified output (U9), never a documented behaviour.
  *
  * Everything else -- bits an integer in [1,32], a Number value, capacity
  * for the trusted writeBits, a byte-aligned cursor and in-bounds span for
@@ -505,7 +507,8 @@ class ProductionBitWriter {
    * checks removed: KEEP THE FOUR COPIES IDENTICAL (see writeBits there).
    */
   writeBits(value, bits) {
-    // mask to the bit count: bits of value above the count are ignored
+    // mask to the bit count: a wider value is misuse (U8), and its output
+    // is unspecified (U9); the mask keeps it out of its neighbours' bits
     value = bits === 32 ? value >>> 0 : (value & (((1 << bits) >>> 0) - 1)) >>> 0;
 
     // merge into the single 32-bit staging word at the current bit position.
@@ -541,8 +544,8 @@ class ProductionBitWriter {
    * Writes bits, refusing a past-end write as a value: returns true on
    * success, or false -- writing nothing -- if the write would go past the
    * end of the buffer. THE RETAINED HARD CHECK of the production write
-   * path: the stream layer's sticky PastEnd latches off this false, in
-   * both modes identically. bits in [1,32] and a Number value remain the
+   * path: the stream layer throws on this false (U9), in both modes
+   * identically. bits in [1,32] and a Number value remain the
    * caller's contract, unvalidated here.
    *
    * The body below the bounds check is the fused core: KEEP THE FOUR
@@ -553,7 +556,8 @@ class ProductionBitWriter {
       return false;
     }
 
-    // mask to the bit count: bits of value above the count are ignored
+    // mask to the bit count: a wider value is misuse (U8), and its output
+    // is unspecified (U9); the mask keeps it out of its neighbours' bits
     value = bits === 32 ? value >>> 0 : (value & (((1 << bits) >>> 0) - 1)) >>> 0;
 
     // merge into the single 32-bit staging word at the current bit position.
