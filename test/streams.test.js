@@ -14,11 +14,12 @@ import {
   MeasureStream,
   SerializeError,
 } from '../src/index.js';
+import { misuse } from './misuse.js';
 
 // The family's unified serialize pattern: ONE function, three streams. refs
 // are { value } holders -- JavaScript's stand-in for the family's ref
 // parameters. On write the values are consumed, on read they are filled in,
-// on measure they are ignored.
+// on measure they are checked as the write would check them.
 function serializeSequence(stream, refs) {
   return (
     stream.serializeBits(refs.a, 5) &&
@@ -111,7 +112,7 @@ test('alignBits reports the true pad on write and read, worst case on measure', 
   // the measure does not know where the message lands: always 7
   const measure = new MeasureStream();
   assert.equal(measure.alignBits(), 7);
-  measure.serializeBits({}, 8);
+  measure.serializeBits({ value: 0 }, 8);
   assert.equal(measure.alignBits(), 7);
 });
 
@@ -135,7 +136,7 @@ test('reset clears the streams for allocation-free reuse', () => {
   assert.equal(ref.value, 0xa);
 
   const measure = new MeasureStream();
-  measure.serializeBits({}, 13);
+  measure.serializeBits({ value: 0 }, 13);
   measure.serializeAlign();
   assert.equal(measure.bitsProcessed(), 20);
   measure.reset();
@@ -143,16 +144,16 @@ test('reset clears the streams for allocation-free reuse', () => {
   assert.equal(measure.ok, true);
 });
 
-test('an invalid bits count is caller misuse and throws on every stream', () => {
+test('an invalid bits count is caller misuse: it throws on write and measure, and refuses on read', () => {
   const writer = new WriteStream(new Uint8Array(8));
   const reader = new ReadStream(new Uint8Array(8));
   const measure = new MeasureStream();
   for (const stream of [writer, reader, measure]) {
     for (const bits of [0, 33, -1, 2.5, NaN]) {
-      assert.throws(() => stream.serializeBits({ value: 0 }, bits), RangeError);
+      misuse(stream, () => stream.serializeBits({ value: 0 }, bits), RangeError);
     }
     // misuse throws even though nothing latched: the streams stay healthy
-    assert.equal(stream.ok, true);
+    assert.equal(stream.ok, !stream.isReading);
     assert.equal(stream.bitsProcessed(), 0);
   }
 });

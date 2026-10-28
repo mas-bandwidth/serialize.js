@@ -13,6 +13,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { WriteStream, ReadStream, MeasureStream, SerializeError } from '../src/index.js';
+import { misuse } from './misuse.js';
 
 // Hand-builds a stream holding the absolute tier: six zero flags, then
 // current as 32 raw bits -- the doctored form of the reference's own
@@ -155,8 +156,8 @@ test('writes and measures refuse ordering violations as latched errors', () => {
     // first refusal is 2^31, one above the domain maximum
     for (const current of [100, 99, 0, -1, 1.5, NaN, 0x80000000, 0x100000000]) {
       const stream = makeStream();
-      assert.equal(stream.serializeIntRelative(100, { value: current }), false, `refuse ${current}`);
-      assert.equal(stream.error, SerializeError.ValueOutOfRange);
+      assert.throws(() => stream.serializeIntRelative(100, { value: current }), RangeError, `refuse ${current}`);
+      assert.equal(stream.ok, true);
       assert.equal(stream.bitsProcessed(), 0, 'a refused relative write costs nothing');
     }
 
@@ -178,7 +179,7 @@ test('a refused absolute-tier write puts nothing on the wire', () => {
   assert.equal(writer.bitsProcessed(), 40, 'nothing written on refusal');
 });
 
-test('a previous outside the domain is caller misuse and throws on every stream', () => {
+test('a previous outside the domain is caller misuse: it throws on write and measure, and refuses on read', () => {
   // previous is the caller's own sequence state and never arrives off the
   // wire, so a previous outside the domain 0 to 2^31 - 1 is caller error
   // everywhere -- a 2^31 exactly as a negative one (STANDARD.md, adopted
@@ -188,10 +189,10 @@ test('a previous outside the domain is caller misuse and throws on every stream'
   const measure = new MeasureStream();
   for (const stream of [writer, reader, measure]) {
     for (const previous of [-1, 1.5, NaN, 0x80000000, 0x100000000, '100', 100n]) {
-      assert.throws(() => stream.serializeIntRelative(previous, { value: 200 }), RangeError);
+      misuse(stream, () => stream.serializeIntRelative(previous, { value: 200 }), RangeError);
     }
     // misuse throws even though nothing latched: the streams stay healthy
-    assert.equal(stream.ok, true);
+    assert.equal(stream.ok, !stream.isReading);
     assert.equal(stream.bitsProcessed(), 0);
   }
 
@@ -213,10 +214,11 @@ test('a non-number current on write or measure is caller misuse and throws', () 
 
 test('a latched stream refuses relative serializes without touching state', () => {
   const writer = new WriteStream(new Uint8Array(8));
-  assert.equal(writer.serializeInt({ value: 9 }, 0, 7), false); // latch ValueOutOfRange
+  assert.equal(writer.serializeUint64({ value: 0n }), true);
+  assert.equal(writer.serializeBool({ value: true }), false); // latch PastEnd
   assert.equal(writer.serializeIntRelative(100, { value: 101 }), false);
-  assert.equal(writer.error, SerializeError.ValueOutOfRange);
-  assert.equal(writer.bitsProcessed(), 0);
+  assert.equal(writer.error, SerializeError.PastEnd);
+  assert.equal(writer.bitsProcessed(), 64);
 
   const reader = new ReadStream(new Uint8Array(0));
   assert.equal(reader.serializeBits({}, 1), false); // latch PastEnd

@@ -152,14 +152,15 @@ test('a latched stream refuses serializeBytes without touching anything', () => 
   assert.deepEqual(Array.from(one), [0x99]);
 });
 
-test('data must be a Uint8Array on every stream: misuse throws', () => {
+test('data must be a Uint8Array on every stream: misuse throws on write and measure, refuses on read (U7)', () => {
   const writer = new WriteStream(new Uint8Array(8));
-  const reader = new ReadStream(Uint8Array.from([0x00]));
   const measure = new MeasureStream();
   for (const bad of [null, undefined, [1, 2], 'bytes', new Uint16Array(2)]) {
     assert.throws(() => writer.serializeBytes(bad), TypeError);
-    assert.throws(() => reader.serializeBytes(bad), TypeError);
     assert.throws(() => measure.serializeBytes(bad), TypeError);
+    const reader = new ReadStream(Uint8Array.from([0x00]));
+    assert.equal(reader.serializeBytes(bad), false);
+    assert.equal(reader.error, SerializeError.ValueOutOfRange);
   }
 });
 

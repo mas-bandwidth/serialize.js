@@ -96,9 +96,10 @@ test('a writer\'s end emits nothing and a measure\'s costs nothing', () => {
   assert.equal(measure.bitsProcessed(), 3);
 });
 
-test('an end after a latched write error returns false', () => {
+test('an end after a latched write error is still a no-op returning true (U12)', () => {
   const writer = new WriteStream(new Uint8Array(8));
-  assert.equal(writer.serializeInt({ value: 9 }, 0, 4), false);
-  assert.equal(writer.serializeEnd(), false);
-  assert.equal(writer.error, SerializeError.ValueOutOfRange);
+  assert.equal(writer.serializeUint64({ value: 0n }), true);
+  assert.equal(writer.serializeBool({ value: true }), false);
+  assert.equal(writer.serializeEnd(), true);
+  assert.equal(writer.error, SerializeError.PastEnd);
 });

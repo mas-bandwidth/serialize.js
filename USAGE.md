@@ -7,6 +7,7 @@ that speaks it.
 ```js
 import {
   WriteStream, ReadStream, MeasureStream, SerializeError,
+  refusalName, compressedFloatParams,
   BitWriter, BitReader,
   bitsRequired, bitsRequired64, bitsRequired128,
 } from './serialize.js/src/index.js';
@@ -143,13 +144,29 @@ failed stream are echoes. A healthy stream's `error` is
 `SerializeError.None`, which is `null`, so `if (stream.error)` reads
 naturally.
 
-Broken *code* is different from hostile *data*: misusing the API — bits
-out of `[1,32]`, a non-BigInt where the domain is BigInt, an invalid
-declaration — throws `TypeError`/`RangeError` on every stream, in every
-state, and writing a value outside its declared range latches
-`ValueOutOfRange` and writes nothing. That is the **checked** mode, the
-default; whether those caller checks exist at all is the mode's choice —
-see the next section.
+Broken *code* is different from hostile *data*. On a `WriteStream` or
+`MeasureStream`, misusing the API is write misuse, and it throws
+`TypeError`/`RangeError` in every state, one mechanism on every operation
+(IMPLEMENTING.md U9): a bad declaration (bits out of `[1,32]`, bounds outside
+int32, an invalid Q format or compressed float declaration), a value of the
+wrong type, and a value the declaration cannot carry (outside its range,
+wider than its bits, NaN or an infinity, a string holding U+0000 or a lone
+surrogate, or too long for its `bufferSize`). Nothing is written. That is
+the **checked** mode, the default; whether those caller checks exist at all
+is the mode's choice — see the next section.
+
+A `ReadStream` never throws, misuse included (U7): the same bad declaration,
+a byte span outside its array, a destination that is not a `Uint8Array`, or
+data that is not a `Uint8Array` refuses as `ValueOutOfRange` before any bits
+move, and a stream that already failed keeps its first reason.
+
+`stream.fail(reason)` refuses a read with a reason of your choosing,
+through the same latch; a reason off the closed list (or none) latches
+`rejected`, so a refused stream never reports none. On a write or a measure
+`fail` records nothing and returns `false` (U6, U14). `refusalName(error)`
+gives the family spelling of any stream's error, `'none'` for no refusal.
+`serializeEnd()` on a write or a measure is a no-op that returns `true`
+(U12): check `stream.ok` for a write's outcome.
 
 ## The two modes: checked and production
 
@@ -164,9 +181,9 @@ node app.js                       # checked: the development default
 NODE_ENV=production node app.js   # production: the caller-trust release shape
 ```
 
-**Checked** is everything described above: caller misuse throws, invalid
-values latch — the always-on form of the family's checked-build
-assertions. Develop and test here.
+**Checked** is everything described above: write misuse throws — the
+always-on form of the family's checked-build assertions. Develop and test
+here.
 
 **Production** removes the per-operation caller validation from
 `WriteStream`, `MeasureStream` and `BitWriter`, exactly as a C/C++ release
@@ -203,8 +220,10 @@ are chosen at export time (`ReadStream` has no variants). Changing
 
 ## Raw bits
 
-`serializeBits` moves the low `bits` of a non-negative Number, 1 to 32.
-`serializeBits64` is its BigInt twin, 1 to 64 bits. Values wider than 32
+`serializeBits` moves a non-negative integer Number that fits `bits`, 1 to
+32. `serializeBits64` is its BigInt twin, 1 to 64 bits. A value wider than
+its bits, or negative, is write misuse and throws in the checked variant
+(U8): the writer never masks a value into something you did not send. Values wider than 32
 bits go low 32-bit dword first — the family's group rule.
 
 ```js
@@ -288,9 +307,9 @@ w3.serializeBool({ value: true });
 values. A reader refuses a pattern whose exponent is all ones — NaN with any
 payload, either sign, signaling or quiet, and both infinities — as
 `NonFiniteFloat`, testing the raw bits before any conversion and leaving the
-destination untouched. The checked writer latches the same reason for a NaN
-or an infinity, including a finite double above the float32 range, which
-narrows to an infinity. Every finite pattern travels bit exact: negative zero
+destination untouched. The checked writer throws on a NaN or an infinity,
+including a finite double above the float32 range, which narrows to an
+infinity. Every finite pattern travels bit exact: negative zero
 and the subnormals are never flushed or re-signed. A float is 32 bits on the
 wire: write `Math.fround`ed values or you'll be surprised by the read-back.
 
@@ -298,7 +317,7 @@ wire: write `Math.fround`ed values or you'll be surprised by the read-back.
 w4.serializeFloat({ value: Math.fround(3.1415926) });
 w4.serializeDouble({ value: 1.0 / 3.0 });
 w4.serializeFloat({ value: -0 }); // -0 round trips as -0
-w4.serializeFloat({ value: NaN }); // -> false: SerializeError.NonFiniteFloat
+w4.serializeFloat({ value: NaN }); // checked: throws RangeError (write misuse)
 ```
 
 ## The compressed float
@@ -318,11 +337,29 @@ w5.serializeCompressedFloat({ value: 5.0 }, 0.0, 10.0, 0.01); // 10 bits
 ```
 
 Finite values outside `[min, max]` clamp on write; a non-finite value
-latches `NonFiniteFloat`; reads refuse integers smuggled above the
+throws in the checked writer; reads refuse integers smuggled above the
 quantization ceiling as `ValueOutOfRange`, and a decode that is not finite
 as `NonFiniteFloat`. A declaration whose top, `min + delta` in float32,
 rounds to an infinity is non-conforming: the checked writer and measure
 throw on it, and a reader refuses its non-finite decodes.
+
+`compressedFloatParams(min, max, resolution)` derives the wire constants
+once — `{ maxIntegerValue, bits, delta }`, exactly what every
+`serializeCompressedFloat` call derives — and
+`serializeCompressedFloatPrecomputed(ref, maxIntegerValue, bits, delta, min)`
+takes them, skipping the per-call divide, clamp and ceil. The two entry
+points share one body, so the wire is identical. Constants that cannot have
+come from `compressedFloatParams` (a `bits` that is not
+`bitsRequired(0, maxIntegerValue)`, a `maxIntegerValue` outside
+`[1, 4294967040]`, a `delta` that is not positive and finite) throw on write
+and measure and refuse as `ValueOutOfRange` on read (U16).
+
+```js
+const heading = compressedFloatParams(0, 10, 0.01); // once
+w5.serializeCompressedFloatPrecomputed(
+  { value: 5.0 }, heading.maxIntegerValue, heading.bits, heading.delta, 0,
+);
+```
 
 ## Raw bytes
 
@@ -346,8 +383,10 @@ A zero-length array still performs (and verifies) the align.
 of all of it, with no subarray view allocated per call: the span's length
 is the count, and a read fills only the span. `offset` defaults to 0 and
 `length` to `data.length - offset`; a span outside the array is caller
-misuse and throws (always on a read; on the write and measure streams in
-the checked variant). A fixed-capacity array carrying a used length is the
+misuse: it throws on the write and measure streams in the checked variant,
+and a read refuses it as `ValueOutOfRange` (U7). The source and the
+destination may share memory, the writer's own buffer or the reader's own
+data included: the copy is exact either way. A fixed-capacity array carrying a used length is the
 common case:
 
 ```js
@@ -381,9 +420,11 @@ fatal decoder that never substitutes U+FFFD. Every well-formed payload comes
 back exactly: no normalization (`'e\u0301'` stays three bytes), no stripped
 byte order mark, every plane.
 
-The checked writer refuses what a reader would: a U+0000 latches
-`EmbeddedNul`, and a lone surrogate — ill-formed UTF-16, which
-`TextEncoder` would silently turn into U+FFFD — latches `InvalidUtf8`.
+The checked writer refuses what a reader would (U3, U4): a U+0000, and a
+lone surrogate — ill-formed UTF-16, which `TextEncoder` would silently
+turn into U+FFFD — are write misuse and throw, before anything is written.
+A string that does not fit the buffer writes nothing at all: the room for
+the length, the align and the payload is checked first (U10).
 Text is UTF-8 on the wire; there is no wide-string operation.
 
 ## The relative integer
@@ -406,7 +447,8 @@ r9.serializeIntRelative(100, seq); // seq.value === 101
 `previous` outside the domain throws as misuse — the domain belongs to the
 operation, not to your storage type, so `2**31` is caller error exactly as
 `-1` is. Writing a `current` at or below `previous`, or above the domain,
-latches `ValueOutOfRange`.
+is write misuse and throws. On read, a `previous` outside the domain
+refuses as `ValueOutOfRange`.
 
 On read, **every tier's reconstruction is checked**: the reader rebuilds
 `current` in a width that cannot wrap and refuses the read as
@@ -449,7 +491,7 @@ value wherever storage fits 64 bits — and the round trip is **exact**: no
 quantization, unlike the compressed float. A degenerate `min === max`
 range costs zero bits on every storage width. Reads refuse raw values
 smuggled into the bit headroom; an invalid declaration throws as caller
-misuse.
+misuse on write and measure, and refuses as `ValueOutOfRange` on read.
 
 ## Measuring
 
@@ -487,7 +529,10 @@ br.readBytes(3); // Uint8Array [1, 2, 3]
 ```
 
 The reader prices its windows **inside** the buffer: any data length is
-supported and no slack past the data is required.
+supported and no slack past the data is required. This is the zero-slack
+contract, which the family's IMPLEMENTING.md calls the slower correct
+option (a copy or window assembly at reset, a compare per window load);
+the 8-byte slack alternative has not been measured against it yet.
 
 ## Wire compatibility
 

@@ -181,8 +181,8 @@ test('the checked writer latches a non-finite float as non_finite_float and writ
   // rule is tested after the narrowing, on the bits that would ship
   for (const value of [NaN, Infinity, -Infinity, 1e300, -1e300, float32FromBits(0x7f800001)]) {
     const writer = new WriteStream(new Uint8Array(8));
-    assert.equal(writer.serializeFloat({ value }), false, `float ${value} refused`);
-    assert.equal(writer.error, SerializeError.NonFiniteFloat);
+    assert.throws(() => writer.serializeFloat({ value }), RangeError, `float ${value} refused`);
+    assert.equal(writer.ok, true);
     assert.equal(writer.bitsProcessed(), 0, 'nothing written');
   }
   // the largest finite float32 is accepted, and so is a double just above
@@ -195,8 +195,8 @@ test('the checked writer latches a non-finite float as non_finite_float and writ
 test('the checked writer latches a non-finite double as non_finite_float and writes nothing', () => {
   for (const value of [NaN, Infinity, -Infinity, float64FromBits(0x7ff0000000000001n)]) {
     const writer = new WriteStream(new Uint8Array(8));
-    assert.equal(writer.serializeDouble({ value }), false, `double ${value} refused`);
-    assert.equal(writer.error, SerializeError.NonFiniteFloat);
+    assert.throws(() => writer.serializeDouble({ value }), RangeError, `double ${value} refused`);
+    assert.equal(writer.ok, true);
     assert.equal(writer.bitsProcessed(), 0, 'nothing written');
   }
   assert.deepEqual(writeDoubleBytes(Number.MAX_VALUE), float64Bytes(0x7fefffffffffffffn));
@@ -230,11 +230,11 @@ test('floats round trip at unaligned bit positions', () => {
   assert.equal(ref.value, 1 / 3);
 });
 
-test('measure prices a float at 32 bits and a double at 64, ignoring the value', () => {
+test('measure prices a float at 32 bits and a double at 64', () => {
   const measure = new MeasureStream();
-  assert.equal(measure.serializeFloat({}), true, 'measure ignores the ref');
+  assert.equal(measure.serializeFloat({ value: 0.5 }), true);
   assert.equal(measure.bitsProcessed(), 32);
-  assert.equal(measure.serializeDouble({}), true);
+  assert.equal(measure.serializeDouble({ value: 0.5 }), true);
   assert.equal(measure.bitsProcessed(), 32 + 64);
 });
 
@@ -276,11 +276,12 @@ test('a truncated double read latches PastEnd before consuming anything', () => 
 
 test('a latched error makes float serializes no-ops, and misuse still throws', () => {
   const writer = new WriteStream(new Uint8Array(8));
-  assert.equal(writer.serializeInt({ value: 5 }, 0, 3), false, 'latch ValueOutOfRange');
+  assert.equal(writer.serializeUint64({ value: 0n }), true);
+  assert.equal(writer.serializeBool({ value: true }), false); // latch PastEnd
   assert.equal(writer.serializeFloat({ value: 1.5 }), false);
   assert.equal(writer.serializeDouble({ value: 1.5 }), false);
-  assert.equal(writer.error, SerializeError.ValueOutOfRange, 'the first error sticks');
-  assert.equal(writer.bitsProcessed(), 0);
+  assert.equal(writer.error, SerializeError.PastEnd);
+  assert.equal(writer.bitsProcessed(), 64);
 });
 
 test('a non-number value is caller misuse and throws', () => {

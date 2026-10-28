@@ -103,26 +103,9 @@ test('domain boundary values round trip', () => {
   }
 });
 
-test('higher bits are ignored: the call-site conversion of the family', () => {
-  // the other ports take uint8/uint16/uint32 parameters, converting at the
-  // call site; here the helper masks to its width the same way
-  const writer = new WriteStream(new Uint8Array(8));
-  writer.serializeUint8({ value: 0x1c3 }); // low 8 bits: 0xC3
-  writer.serializeUint16({ value: 0x5beef }); // low 16 bits: 0xBEEF
-  writer.serializeUint32({ value: 0x1_0000_0005 }); // low 32 bits: 5
-  writer.flush();
-
-  const reader = new ReadStream(writer.data());
-  const a = {};
-  const b = {};
-  const c = {};
-  reader.serializeUint8(a);
-  reader.serializeUint16(b);
-  reader.serializeUint32(c);
-  assert.equal(a.value, 0xc3);
-  assert.equal(b.value, 0xbeef);
-  assert.equal(c.value, 5);
-});
+// A value wider than a helper's width is write misuse (IMPLEMENTING.md U8):
+// the checked runtime throws it, and the production output after misuse is
+// unspecified. test/uniform-rules-checked.test.js holds the checked throws.
 
 // Consumes or writes exactly n prefix bits through serializeBits, in
 // chunks that respect its [1,32] contract.
@@ -182,13 +165,13 @@ test('a write past the end latches PastEnd, the exact fit succeeds', () => {
 
 test('measures are exact for the fixed-width helpers', () => {
   const measure = new MeasureStream();
-  assert.equal(measure.serializeUint8({}), true);
+  assert.equal(measure.serializeUint8({ value: 0 }), true);
   assert.equal(measure.bitsProcessed(), 8);
-  assert.equal(measure.serializeUint16({}), true);
+  assert.equal(measure.serializeUint16({ value: 0 }), true);
   assert.equal(measure.bitsProcessed(), 24);
-  assert.equal(measure.serializeUint32({}), true);
+  assert.equal(measure.serializeUint32({ value: 0 }), true);
   assert.equal(measure.bitsProcessed(), 56);
-  assert.equal(measure.serializeBool({}), true);
+  assert.equal(measure.serializeBool({ value: false }), true);
   assert.equal(measure.bitsProcessed(), 57);
 });
 
