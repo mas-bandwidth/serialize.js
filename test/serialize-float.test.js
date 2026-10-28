@@ -238,22 +238,22 @@ test('measure prices a float at 32 bits and a double at 64', () => {
   assert.equal(measure.bitsProcessed(), 32 + 64);
 });
 
-test('a float write that does not fit latches PastEnd and writes nothing', () => {
+test('a float write that does not fit throws (U9) and writes nothing', () => {
   const writer = new WriteStream(new Uint8Array(8));
   assert.equal(writer.serializeBits({ value: 0 }, 32), true);
   assert.equal(writer.serializeBits({ value: 0 }, 1), true);
   // 31 bits left: a float does not fit
-  assert.equal(writer.serializeFloat({ value: 1.5 }), false);
-  assert.equal(writer.error, SerializeError.PastEnd);
+  assert.throws(() => writer.serializeFloat({ value: 1.5 }), RangeError);
+  assert.equal(writer.error, SerializeError.None);
   assert.equal(writer.bitsProcessed(), 33, 'the refused write consumed nothing');
 });
 
-test('a double write that does not fit latches PastEnd with nothing dangling', () => {
+test('a double write that does not fit throws (U9) and writes nothing', () => {
   const writer = new WriteStream(new Uint8Array(8));
   assert.equal(writer.serializeBits({ value: 0 }, 1), true);
   // 63 bits left: the low dword alone would fit, the total width does not
-  assert.equal(writer.serializeDouble({ value: 1.5 }), false);
-  assert.equal(writer.error, SerializeError.PastEnd);
+  assert.throws(() => writer.serializeDouble({ value: 1.5 }), RangeError);
+  assert.equal(writer.error, SerializeError.None);
   assert.equal(writer.bitsProcessed(), 1, 'no dangling low dword');
 });
 
@@ -274,13 +274,13 @@ test('a truncated double read latches PastEnd before consuming anything', () => 
   assert.equal(reader.bitsProcessed(), 0, 'the refused read consumed nothing');
 });
 
-test('a latched error makes float serializes no-ops, and misuse still throws', () => {
+test('a full write stream throws on float serializes and latches nothing (U9)', () => {
   const writer = new WriteStream(new Uint8Array(8));
   assert.equal(writer.serializeUint64({ value: 0n }), true);
-  assert.equal(writer.serializeBool({ value: true }), false); // latch PastEnd
-  assert.equal(writer.serializeFloat({ value: 1.5 }), false);
-  assert.equal(writer.serializeDouble({ value: 1.5 }), false);
-  assert.equal(writer.error, SerializeError.PastEnd);
+  assert.throws(() => writer.serializeBool({ value: true }), RangeError);
+  assert.throws(() => writer.serializeFloat({ value: 1.5 }), RangeError);
+  assert.throws(() => writer.serializeDouble({ value: 1.5 }), RangeError);
+  assert.equal(writer.error, SerializeError.None);
   assert.equal(writer.bitsProcessed(), 64);
 });
 

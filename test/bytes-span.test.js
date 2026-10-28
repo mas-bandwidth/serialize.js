@@ -107,11 +107,11 @@ test('a read span refuses set align padding as NonzeroPadding, the clean neighbo
   assert.deepEqual(Array.from(dest), [0, 0xab, 0, 0]);
 });
 
-test('a write span past the end of the buffer latches PastEnd, the exact fit accepted', () => {
+test('a write span past the end of the buffer throws (U9) and writes nothing, the exact fit accepted', () => {
   const source = pattern(16);
   const refused = new WriteStream(new Uint8Array(8));
-  assert.equal(refused.serializeBytes(source, 4, 9), false);
-  assert.equal(refused.error, SerializeError.PastEnd);
+  assert.throws(() => refused.serializeBytes(source, 4, 9), RangeError);
+  assert.equal(refused.error, SerializeError.None);
 
   const accepted = new WriteStream(new Uint8Array(8));
   assert.equal(accepted.serializeBytes(source, 4, 8), true);

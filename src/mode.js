@@ -7,8 +7,9 @@
 // the write path. JavaScript has no compiler to strip code, so the same fork
 // happens at MODULE LOAD instead: NODE_ENV is read exactly once, here, and
 // each write-path class is exported in one of
-// two variants -- CHECKED (caller validation on: misuse throws, invalid
-// values latch -- the development default) or PRODUCTION (caller-trust:
+// two variants -- CHECKED (caller validation on: every write misuse throws,
+// nothing latches (IMPLEMENTING.md U9) -- the development default) or
+// PRODUCTION (caller-trust, output after misuse unspecified:
 // per-operation caller validation removed; only the checks the family keeps
 // hard in release remain -- see the production classes for exactly what
 // stays).

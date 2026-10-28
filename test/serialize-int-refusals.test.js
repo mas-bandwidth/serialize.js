@@ -111,7 +111,7 @@ test('truncated data refused as PastEnd, exact fit accepted', () => {
   assert.equal(accepts.ok, true);
 });
 
-test('a write past the end latches PastEnd, the exact fit succeeds', () => {
+test('a write past the end throws (U9) and writes nothing, the exact fit succeeds', () => {
   // 61 + 3 = 64 bits: exact fit succeeds
   const fits = new WriteStream(new Uint8Array(8));
   fits.serializeBits({ value: 0 }, 32);
@@ -120,12 +120,12 @@ test('a write past the end latches PastEnd, the exact fit succeeds', () => {
   assert.equal(fits.ok, true);
   assert.equal(fits.bitsProcessed(), 64);
 
-  // 62 + 3 > 64: the write refuses and the stream latches
+  // 62 + 3 > 64: write misuse, a throw, and nothing latches (U9)
   const overflows = new WriteStream(new Uint8Array(8));
   overflows.serializeBits({ value: 0 }, 32);
   overflows.serializeBits({ value: 0 }, 30);
-  assert.equal(overflows.serializeInt({ value: 3 }, 0, 7), false);
-  assert.equal(overflows.error, SerializeError.PastEnd);
+  assert.throws(() => overflows.serializeInt({ value: 3 }, 0, 7), RangeError);
+  assert.equal(overflows.error, SerializeError.None);
   assert.equal(overflows.bitsProcessed(), 62); // nothing was written
 });
 

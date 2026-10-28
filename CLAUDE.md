@@ -60,12 +60,15 @@ classes export in one of two variants — the JS #ifdef:
   type, and a value the declaration cannot carry (out of range, wider than
   its bits (U8), not finite, text that is not well-formed or holds U+0000,
   too long for its buffer). The always-on form of the family's
-  checked-build assertions. A write past the end of the buffer is not
-  misuse: it latches PastEnd in every mode. Develop and test here.
+  checked-build assertions. An operation that does not fit the room left
+  is write misuse too and throws before any bit is written (U9, U10).
+  Write misuse never latches: a write or measure stream's error is always
+  None. Develop and test here.
 - **PRODUCTION** (`NODE_ENV=production`): per-op caller validation removed
   from WriteStream/MeasureStream/BitWriter, the C/C++ release shape. Every
-  write keeps the sticky-error gate and the buffer-end check (its false
-  latches PastEnd). Misuse yields wire garbage, never memory unsafety.
+  write keeps the room check, which throws as in checked. Output after any
+  other misuse is unspecified (U3, U9; a lenient encoder's U+FFFD is never
+  documented behaviour), never memory unsafety.
 - **Reads validate everything in EVERY mode.** The wire is a trust
   boundary; ReadStream has no variants; ruling #8 content refusals always
   bind. **A read never throws** (U7): caller misuse on read (a bad
@@ -73,9 +76,10 @@ classes export in one of two variants — the JS #ifdef:
   type) refuses as `value_out_of_range` before any bits move, and the
   failure state is checked first, so a failed stream keeps its first
   reason.
-- **Errors are values**: serialize methods return `bool`, and the stream
-  carries a **sticky latched error** (serialize.cs's shape). Once a stream
-  has failed, every subsequent operation on it fails.
+- **Read refusals are values**: serialize methods return `bool`, and a
+  read stream carries a **sticky latched error** (serialize.cs's shape).
+  Once a read has failed, every subsequent operation on it fails. A write
+  or measure never latches (U6, U9).
 - **Hostile input NEVER throws.** A doctored buffer produces `false` and a
   latched error, never an exception.
 - `serializeEnd` on a write or measure is a no-op returning true (U12);

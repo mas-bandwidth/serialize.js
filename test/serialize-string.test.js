@@ -198,11 +198,11 @@ test('the length check counts UTF-8 bytes, not UTF-16 code units', () => {
   assert.throws(() => refused.serializeString({ value: '\u00E9' }, 2), RangeError);
 });
 
-test('a string that does not fit the write buffer latches PastEnd', () => {
+test('a string that does not fit the write buffer throws (U9) and writes nothing', () => {
   // 10 payload bytes cannot fit an 8-byte buffer whatever the bufferSize
   const writer = new WriteStream(new Uint8Array(8));
-  assert.equal(writer.serializeString({ value: 'abcdefghij' }, 16), false);
-  assert.equal(writer.error, SerializeError.PastEnd);
+  assert.throws(() => writer.serializeString({ value: 'abcdefghij' }, 16), RangeError);
+  assert.equal(writer.error, SerializeError.None);
 });
 
 test('bufferSize 1 is the degenerate length field: the empty string in zero bits', () => {

@@ -1,7 +1,7 @@
-// The uniform rules of IMPLEMENTING.md (reference v2.1.0, U1 to U16), the
+// The uniform rules of IMPLEMENTING.md (reference v2.1.1, U1 to U16), the
 // parts that hold in EVERY mode: the read side (a reader never traps, and a
 // bad declaration refuses as value_out_of_range before any bits move), the
-// whole-operation room check on write, end on a write or measure, the
+// whole-operation room check on write (a throw, never a latch: U9), end on a write or measure, the
 // refusal names and the public fail, re-initialisation, the precomputed
 // compressed float, and the audit's overlapping-copy finding. This file runs
 // on both legs. The checked runtime's write-misuse throws (U1, U3, U4, U5,
@@ -18,6 +18,7 @@ import {
   SerializeError,
   WriteStream,
   compressedFloatParams,
+  copyString,
   refusalName,
 } from '../src/index.js';
 
@@ -129,22 +130,78 @@ test('U7: a read stream over something that is not a Uint8Array refuses, never t
   }
 });
 
-test('U10: bytes checks the room for align and payload before writing either', () => {
+test('U9, U10: bytes checks the room for align and payload before writing either, and throws', () => {
   const writer = new WriteStream(new Uint8Array(8));
   assert.equal(writer.serializeBits({ value: 1 }, 3), true);
   // 5 align bits + 8 bytes do not fit in the 61 bits left
-  assert.equal(writer.serializeBytes(new Uint8Array(8)), false);
-  assert.equal(writer.error, SerializeError.PastEnd);
+  assert.throws(() => writer.serializeBytes(new Uint8Array(8)), RangeError);
+  assert.equal(writer.error, SerializeError.None);
   assert.equal(writer.bitsProcessed(), 3);
 });
 
-test('U10: string checks the room for length, align and payload before writing any', () => {
+test('U9, U10: string checks the room for length, align and payload before writing any, and throws', () => {
   const writer = new WriteStream(new Uint8Array(8));
   assert.equal(writer.serializeBits({ value: 1 }, 3), true);
   // the length takes 5 bits, then a 0 bit align, then 8 bytes: 3 + 5 + 64 > 64
-  assert.equal(writer.serializeString({ value: 'abcdefgh' }, 32), false);
-  assert.equal(writer.error, SerializeError.PastEnd);
+  assert.throws(() => writer.serializeString({ value: 'abcdefgh' }, 32), RangeError);
+  assert.equal(writer.error, SerializeError.None);
   assert.equal(writer.bitsProcessed(), 3);
+});
+
+// U9: an operation that does not fit the room left is write misuse. It
+// throws at the call, before any bit of it is written (U10), and never
+// latches: no past_end is recorded, and a later write that fits is written
+// exactly as it would have been without the misuse. Every write operation.
+const ROOM = [
+  ['bits', (s) => s.serializeBits({ value: 0 }, 5)],
+  ['bits64', (s) => s.serializeBits64({ value: 0n }, 40)],
+  ['uint8', (s) => s.serializeUint8({ value: 0 })],
+  ['uint16', (s) => s.serializeUint16({ value: 0 })],
+  ['uint32', (s) => s.serializeUint32({ value: 0 })],
+  ['uint64', (s) => s.serializeUint64({ value: 0n })],
+  ['uint128', (s) => s.serializeUint128({ value: 0n })],
+  ['int', (s) => s.serializeInt({ value: 0 }, 0, 255)],
+  ['int64', (s) => s.serializeInt64({ value: 0n }, 0n, 2n ** 40n)],
+  ['int128', (s) => s.serializeInt128({ value: 0n }, 0n, 2n ** 100n)],
+  ['int_relative', (s) => s.serializeIntRelative(0, { value: 1000 })],
+  ['fixed', (s) => s.serializeFixed({ value: 0 }, 8, 8, 0, 1)],
+  ['fixed wide', (s) => s.serializeFixed({ value: 0n }, 32, 32, 0n, 1n)],
+  ['float', (s) => s.serializeFloat({ value: 0 })],
+  ['double', (s) => s.serializeDouble({ value: 0 })],
+  ['compressed float', (s) => s.serializeCompressedFloat({ value: 0 }, 0, 10, 0.01)],
+  ['precomputed compressed float', (s) => s.serializeCompressedFloatPrecomputed({ value: 0 }, 1000, 10, 10, 0)],
+  ['bytes', (s) => s.serializeBytes(new Uint8Array(1))],
+  ['bytes span (js#31)', (s) => s.serializeBytes(new Uint8Array(4), 1, 1)],
+  ['string', (s) => s.serializeString({ value: 'a' }, 2)],
+  ['object', (s) => s.serializeObject((o) => o.serializeBits({ value: 0 }, 5))],
+];
+
+test('U9, U10: every operation that does not fit the room left throws, writes nothing and latches nothing', () => {
+  for (const [name, call] of ROOM) {
+    const writer = new WriteStream(new Uint8Array(8));
+    assert.equal(writer.serializeBits({ value: 0 }, 32), true);
+    assert.equal(writer.serializeBits({ value: 0 }, 28), true);
+    assert.throws(() => call(writer), RangeError, name);
+    assert.equal(writer.bitsProcessed(), 60, name);
+    assert.equal(writer.error, SerializeError.None, name);
+    assert.equal(writer.ok, true, name);
+    // no latch: the room that is left is still written, exactly
+    assert.equal(writer.serializeBits({ value: 0xf }, 4), true, name);
+    writer.flush();
+    assert.deepEqual(Array.from(writer.data()), [0, 0, 0, 0, 0, 0, 0, 0xf0], name);
+  }
+  // the 1-bit operations, on a full buffer
+  for (const [name, call] of [
+    ['bool', (s) => s.serializeBool({ value: true })],
+    ['bits 1', (s) => s.serializeBits({ value: 1 }, 1)],
+  ]) {
+    const writer = new WriteStream(new Uint8Array(8));
+    writer.serializeBits({ value: 0 }, 32);
+    writer.serializeBits({ value: 0 }, 32);
+    assert.throws(() => call(writer), RangeError, name);
+    assert.equal(writer.bitsProcessed(), 64, name);
+    assert.equal(writer.error, SerializeError.None, name);
+  }
 });
 
 test('U10: reversed witness, an operation that fits exactly is written whole', () => {
@@ -158,16 +215,15 @@ test('U10: reversed witness, an operation that fits exactly is written whole', (
   assert.equal(bytes.bitsProcessed(), 128);
 });
 
-test('U12: end on a write or a measure is a no-op returning true, even after a refusal', () => {
+test('U12: end on a write or a measure is a no-op returning true, even after misuse', () => {
   const writer = new WriteStream(new Uint8Array(8));
   assert.equal(writer.serializeEnd(), true);
   assert.equal(writer.serializeBits({ value: 0 }, 32), true);
   assert.equal(writer.serializeBits({ value: 0 }, 32), true);
-  assert.equal(writer.serializeBits({ value: 0 }, 1), false);
-  assert.equal(writer.error, SerializeError.PastEnd);
+  assert.throws(() => writer.serializeBits({ value: 0 }, 1), RangeError);
   assert.equal(writer.serializeEnd(), true);
   assert.equal(writer.bitsProcessed(), 64);
-  assert.equal(writer.error, SerializeError.PastEnd);
+  assert.equal(writer.error, SerializeError.None);
 
   const measure = new MeasureStream();
   assert.equal(measure.serializeEnd(), true);
@@ -229,7 +285,7 @@ test('U6, U9, U14: fail on a write or a measure returns false, records nothing a
   }
 });
 
-test('U13: reset re-initialises every stream and clears its latch', () => {
+test('U13: reset re-initialises every stream, and clears a reader\'s latch', () => {
   const reader = new ReadStream(new Uint8Array(1));
   reader.reject();
   reader.reset(Uint8Array.of(0x01));
@@ -241,7 +297,7 @@ test('U13: reset re-initialises every stream and clears its latch', () => {
   const writer = new WriteStream(new Uint8Array(8));
   writer.serializeBits({ value: 0 }, 32);
   writer.serializeBits({ value: 0 }, 32);
-  writer.serializeBits({ value: 0 }, 1);
+  assert.throws(() => writer.serializeBits({ value: 0 }, 1), RangeError);
   writer.reset(new Uint8Array(8));
   assert.equal(writer.ok, true);
   assert.equal(writer.bitsProcessed(), 0);
@@ -322,6 +378,42 @@ test('U15: the precomputed read refuses a smuggled integer above maxIntegerValue
   assert.equal(stream.serializeCompressedFloatPrecomputed(ref, 1000, 10, 10, 0), false);
   assert.equal(stream.error, VOOR);
   assert.equal(ref.value, 'untouched');
+});
+
+// U15, serialize_copy_string (reference v2.1.1, test_copy_string): the
+// longest prefix of the text before its first NUL whose strict UTF-8
+// encoding fits destSize - 1 bytes and does not end inside a character.
+// JavaScript strings are UTF-16, so destSize counts UTF-8 bytes. The two
+// ill-formed byte vectors have no UTF-16 source and are skipped.
+const COPY_STRING = [
+  ['abc', 8, 'abc'],
+  ['a\0bc', 8, 'a'],
+  ['abcdefghij', 4, 'abc'],
+  ['\u00e9\u00e9', 4, '\u00e9'],
+  ['\u00e9\u00e9', 3, '\u00e9'],
+  ['a\u{1F600}', 3, 'a'],
+  ['a\u{1F600}', 4, 'a'],
+  ['a\u{1F600}', 5, 'a'],
+  ['a\u{1F600}', 6, 'a\u{1F600}'],
+  ['abc', 1, ''],
+];
+
+test('U15: copyString keeps the longest whole-character UTF-8 prefix that fits destSize - 1', () => {
+  for (const [source, destSize, expected] of COPY_STRING) {
+    assert.equal(copyString(source, destSize), expected, `${JSON.stringify(source)}, ${destSize}`);
+  }
+});
+
+test('U15: what copyString returns, serializeString with bufferSize = destSize writes and reads back', () => {
+  for (const [source, destSize] of COPY_STRING) {
+    const text = copyString(source, destSize);
+    const writer = new WriteStream(new Uint8Array(64));
+    assert.equal(writer.serializeString({ value: text }, destSize), true);
+    writer.flush();
+    const ref = { value: null };
+    assert.equal(new ReadStream(writer.data()).serializeString(ref, destSize), true);
+    assert.equal(ref.value, text);
+  }
 });
 
 // Audit L (js): a copy whose source and destination share memory must copy

@@ -1,17 +1,17 @@
-// The uniform rules of IMPLEMENTING.md (reference v2.1.0) that the CHECKED
+// The uniform rules of IMPLEMENTING.md (reference v2.1.1) that the CHECKED
 // write path keeps: write misuse, the family's checked-build assertion, is
 // ONE mechanism in this port (U9). The checked WriteStream, MeasureStream
 // and BitWriter throw on every write misuse, on every operation,
 // compressed_float included: a bad declaration or argument, and a value the
 // declaration cannot carry (out of range, wider than its bits, not finite,
 // text that is not well-formed or holds U+0000, too long for its buffer).
-// The production variants validate none of it. A write past the end of the
-// buffer is not misuse: it latches past_end in every mode. Dev leg only.
+// The production variants validate none of it. A write that does not fit
+// the room left throws too, and nothing ever latches. Dev leg only.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { BitWriter, MeasureStream, ReadStream, SerializeError, WriteStream } from '../src/index.js';
+import { BitWriter, MeasureStream, ReadStream, SerializeError, WriteStream, copyString } from '../src/index.js';
 
 const both = () => [new WriteStream(new Uint8Array(64)), new MeasureStream()];
 
@@ -173,4 +173,16 @@ test('U16: precomputed constants the params cannot derive throw on write and mea
     assert.throws(() => stream.serializeCompressedFloatPrecomputed({ value: 0 }, 1, 1, 3.4e38, 3.4e38), RangeError);
     assert.equal(stream.serializeCompressedFloatPrecomputed({ value: 0 }, 1000, 10, 10, 0), true);
   }
+});
+
+test('U9, U15: copyString with destSize below 1, or a source holding a lone surrogate, throws (U3)', () => {
+  for (const destSize of [0, -1, 1.5, NaN, '8']) {
+    assert.throws(() => copyString('abc', destSize), RangeError, String(destSize));
+  }
+  for (const source of ['a\ud800b', '\udc00', 'ab\ud83d']) {
+    assert.throws(() => copyString(source, 8), RangeError, JSON.stringify(source));
+  }
+  assert.throws(() => copyString(42, 8), TypeError);
+  // reversed witness: a surrogate pair is one well-formed character
+  assert.equal(copyString('a😀', 8), 'a\u{1F600}');
 });

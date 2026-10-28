@@ -170,13 +170,13 @@ test('truncated data refused as PastEnd with NOTHING consumed', () => {
   assert.equal(accepted.bitsProcessed(), 64);
 });
 
-test('a write past the end latches PastEnd with NOTHING written', () => {
+test('a write past the end throws (U9) and writes nothing', () => {
   // 62 bits available, a 33-bit write would dangle its low dword without
   // the up-front total check
   const overflows = new WriteStream(new Uint8Array(8));
   overflows.serializeBits({ value: 0 }, 31);
-  assert.equal(overflows.serializeBits64({ value: 0n }, 34), false);
-  assert.equal(overflows.error, SerializeError.PastEnd);
+  assert.throws(() => overflows.serializeBits64({ value: 0n }, 34), RangeError);
+  assert.equal(overflows.error, SerializeError.None);
   assert.equal(overflows.bitsProcessed(), 31); // nothing written
 
   // the accept-boundary neighbor: 33 bits fit exactly
@@ -187,14 +187,14 @@ test('a write past the end latches PastEnd with NOTHING written', () => {
   assert.equal(fits.bitsProcessed(), 64);
 });
 
-test('a latched stream refuses the wide operations without touching refs', () => {
+test('a full write stream throws on the wide operations and latches nothing; a latched reader refuses', () => {
   const writer = new WriteStream(new Uint8Array(8));
   writer.serializeBits64({ value: 0n }, 64);
-  writer.serializeBool({ value: true }); // latches PastEnd
-  assert.equal(writer.error, SerializeError.PastEnd);
-  assert.equal(writer.serializeBits64({ value: 1n }, 1), false);
-  assert.equal(writer.serializeUint64({ value: 1n }), false);
-  assert.equal(writer.error, SerializeError.PastEnd);
+  assert.throws(() => writer.serializeBool({ value: true }), RangeError);
+  assert.equal(writer.error, SerializeError.None);
+  assert.throws(() => writer.serializeBits64({ value: 1n }, 1), RangeError);
+  assert.throws(() => writer.serializeUint64({ value: 1n }), RangeError);
+  assert.equal(writer.error, SerializeError.None);
 
   const reader = new ReadStream(new Uint8Array(0));
   const ref = { value: 999n };

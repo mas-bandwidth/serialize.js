@@ -44,45 +44,43 @@ spine('the mode is frozen at load: this leg sees the production variants', gate,
   assert.equal(process.env.NODE_ENV, 'production');
 });
 
-spine('overflow still latches in production: sticky, wire intact, reset clears', gate, () => {
+spine('production keeps the room check: a write that does not fit throws, writes nothing and latches nothing', gate, () => {
+  // IMPLEMENTING.md U9: an operation that does not fit the room left is
+  // write misuse. Production may compile checks out, but this port keeps the
+  // room check (it is what keeps the writer inside its buffer), and it takes
+  // the trap's form there too: a throw, never a latch, never a false.
   const buffer = new Uint8Array(8);
   const stream = new WriteStream(buffer);
 
   assert.equal(stream.serializeUint32(ref(1)), true);
-  assert.equal(stream.serializeUint32(ref(2)), true);
+  assert.equal(stream.serializeUint16(ref(2)), true);
 
-  // the third word does not fit: the buffer-end refusal is the retained
-  // hard check, and it is a latched value, never a throw
-  assert.equal(stream.serializeUint32(ref(3)), false);
-  assert.equal(stream.error, SerializeError.PastEnd);
-  assert.equal(stream.ok, false);
+  assert.throws(() => stream.serializeUint32(ref(3)), RangeError);
+  assert.equal(stream.error, SerializeError.None);
+  assert.equal(stream.ok, true);
+  assert.equal(stream.bitsProcessed(), 48);
 
-  // sticky: every later call fails without touching the stream
-  assert.equal(stream.serializeBool(ref(true)), false);
+  // nothing latched: what still fits is written
+  assert.equal(stream.serializeUint16(ref(4)), true);
   assert.equal(stream.bitsProcessed(), 64);
-  assert.equal(stream.error, SerializeError.PastEnd);
 
-  // the accepted words are intact on the wire
   stream.flush();
   const readStream = new ReadStream(stream.data());
   const out = ref(0);
   assert.equal(readStream.serializeUint32(out), true);
   assert.equal(out.value, 1);
-  assert.equal(readStream.serializeUint32(out), true);
+  assert.equal(readStream.serializeUint16(out), true);
   assert.equal(out.value, 2);
-
-  // reset clears the latch
-  stream.reset(buffer);
-  assert.equal(stream.ok, true);
-  assert.equal(stream.error, SerializeError.None);
+  assert.equal(readStream.serializeUint16(out), true);
+  assert.equal(out.value, 4);
 });
 
 spine('wide writes are still checked as one total width up front', gate, () => {
   const stream = new WriteStream(new Uint8Array(8));
   assert.equal(stream.serializeUint32(ref(7)), true);
-  // 128 bits cannot fit the remaining 32: refused up front, NOTHING written
-  assert.equal(stream.serializeUint128(ref(1n)), false);
-  assert.equal(stream.error, SerializeError.PastEnd);
+  // 128 bits cannot fit the remaining 32: a throw up front, NOTHING written
+  assert.throws(() => stream.serializeUint128(ref(1n)), RangeError);
+  assert.equal(stream.error, SerializeError.None);
   assert.equal(stream.bitsProcessed(), 32);
 });
 
@@ -194,7 +192,7 @@ spine('the production bitpacker keeps exactly one hard check: tryWriteBits at th
   assert.equal(writer.bitsWritten(), 0);
 
   // the retained hard check: a past-end tryWriteBits refuses as a value,
-  // writing nothing -- the false the stream layer latches PastEnd from
+  // writing nothing -- the false the stream layer throws on (U9)
   assert.equal(writer.tryWriteBits(0xffffffff, 32), true);
   assert.equal(writer.tryWriteBits(0xffffffff, 32), true);
   assert.equal(writer.tryWriteBits(1, 1), false);

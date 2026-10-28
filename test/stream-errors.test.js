@@ -14,7 +14,7 @@ import {
   SerializeError,
 } from '../src/index.js';
 
-test('write overflow latches as a value, boundary fill accepted', () => {
+test('a write that does not fit throws and latches nothing (U9), boundary fill accepted', () => {
   // accept neighbor first: fill an 8-byte buffer to exactly 64 bits
   const exact = new WriteStream(new Uint8Array(8));
   assert.equal(exact.serializeBits({ value: 0xffffffff }, 32), true);
@@ -22,25 +22,26 @@ test('write overflow latches as a value, boundary fill accepted', () => {
   assert.equal(exact.ok, true);
   assert.equal(exact.bitsAvailable(), 0);
 
-  // one more bit does not fit: false and PastEnd, not a throw
-  assert.equal(exact.serializeBits({ value: 1 }, 1), false);
-  assert.equal(exact.error, SerializeError.PastEnd);
-  assert.equal(exact.ok, false);
+  // one more bit does not fit: write misuse, a throw, never a latch (U9)
+  assert.throws(() => exact.serializeBits({ value: 1 }, 1), RangeError);
+  assert.equal(exact.error, SerializeError.None);
+  assert.equal(exact.ok, true);
   assert.equal(exact.bitsProcessed(), 64);
 });
 
-test('a latched write error is sticky: later calls no-op', () => {
+test('write misuse never latches: after a throw, a write that fits is written exactly (U9)', () => {
   const writer = new WriteStream(new Uint8Array(8));
   writer.serializeBits({ value: 0 }, 32);
-  writer.serializeBits({ value: 0 }, 32);
-  assert.equal(writer.serializeBits({ value: 1 }, 1), false); // latches
+  writer.serializeBits({ value: 0 }, 24);
+  assert.throws(() => writer.serializeBits({ value: 1 }, 9), RangeError);
 
-  // plenty of conceptual room for these -- but the stream has failed, so
-  // every later call returns false and writes nothing
-  assert.equal(writer.serializeBits({ value: 0x42 }, 8), false);
-  assert.equal(writer.serializeAlign(), false);
+  // nothing failed the stream: the room left is still written
+  assert.equal(writer.serializeBits({ value: 0x42 }, 8), true);
+  assert.equal(writer.serializeAlign(), true);
   assert.equal(writer.bitsProcessed(), 64);
-  assert.equal(writer.error, SerializeError.PastEnd);
+  assert.equal(writer.error, SerializeError.None);
+  writer.flush();
+  assert.equal(writer.data()[7], 0x42);
 });
 
 test('read past the end latches PastEnd and leaves the ref unmodified', () => {
@@ -232,12 +233,12 @@ test('every read failure is terminal: the next valid read fails and writes nothi
   }
 });
 
-test('reset clears a latched error on every stream', () => {
+test('reset re-initialises a writer and clears a reader\'s latched error', () => {
   const writer = new WriteStream(new Uint8Array(8));
   writer.serializeBits({ value: 0 }, 32);
   writer.serializeBits({ value: 0 }, 32);
-  writer.serializeBits({ value: 0 }, 1); // latches PastEnd
-  assert.equal(writer.ok, false);
+  assert.throws(() => writer.serializeBits({ value: 0 }, 1), RangeError);
+  assert.equal(writer.ok, true);
   writer.reset(new Uint8Array(8));
   assert.equal(writer.ok, true);
   assert.equal(writer.serializeBits({ value: 7 }, 3), true);

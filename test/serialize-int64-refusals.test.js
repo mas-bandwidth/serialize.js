@@ -113,15 +113,12 @@ test('truncated data refused as PastEnd with NOTHING consumed', () => {
   assert.equal(accepted.bitsProcessed(), 32);
 });
 
-test('a write past the end latches PastEnd with NOTHING written', () => {
+test('a write past the end throws (U9) and writes nothing', () => {
   // 33 bits available, a 34-bit range write refuses up front
   const overflows = new WriteStream(new Uint8Array(8));
   overflows.serializeBits({ value: 0 }, 31);
-  assert.equal(
-    overflows.serializeInt64({ value: 0n }, -5000000000n, 5000000000n),
-    false,
-  );
-  assert.equal(overflows.error, SerializeError.PastEnd);
+  assert.throws(() => overflows.serializeInt64({ value: 0n }, -5000000000n, 5000000000n), RangeError);
+  assert.equal(overflows.error, SerializeError.None);
   assert.equal(overflows.bitsProcessed(), 31); // nothing written
 
   // the exact fit succeeds: 30 + 34 = 64

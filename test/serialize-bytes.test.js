@@ -126,10 +126,10 @@ test('truncated data refused as PastEnd, exact-fit neighbor accepted', () => {
   assert.equal(accepted.ok, true);
 });
 
-test('write past the end of the buffer latches PastEnd, exact fit accepted', () => {
+test('write past the end of the buffer throws (U9) and writes nothing, exact fit accepted', () => {
   const refused = new WriteStream(new Uint8Array(8));
-  assert.equal(refused.serializeBytes(new Uint8Array(9)), false);
-  assert.equal(refused.error, SerializeError.PastEnd);
+  assert.throws(() => refused.serializeBytes(new Uint8Array(9)), RangeError);
+  assert.equal(refused.error, SerializeError.None);
 
   const accepted = new WriteStream(new Uint8Array(8));
   assert.equal(accepted.serializeBytes(new Uint8Array(8)), true);
@@ -138,11 +138,11 @@ test('write past the end of the buffer latches PastEnd, exact fit accepted', () 
   assert.equal(accepted.bytesProcessed(), 8);
 });
 
-test('a latched stream refuses serializeBytes without touching anything', () => {
+test('a write that does not fit throws and latches nothing; a latched reader refuses serializeBytes', () => {
   const writer = new WriteStream(new Uint8Array(8));
-  assert.equal(writer.serializeBytes(new Uint8Array(9)), false); // latch PastEnd
-  assert.equal(writer.serializeBytes(new Uint8Array(1)), false); // still refused
-  assert.equal(writer.error, SerializeError.PastEnd);
+  assert.throws(() => writer.serializeBytes(new Uint8Array(9)), RangeError);
+  assert.equal(writer.serializeBytes(new Uint8Array(1)), true); // no latch (U9)
+  assert.equal(writer.error, SerializeError.None);
 
   const reader = new ReadStream(Uint8Array.from([0x01]));
   const big = new Uint8Array(2);

@@ -13,13 +13,15 @@
 // it is checked as the write would check it. Holders can be preallocated and reused: the streams never
 // retain them.
 //
-// The error model: errors are VALUES. Every serialize method returns true on
-// success. The first failure latches on the stream -- see SerializeError --
-// and every later serialize call returns false without touching the stream
-// or the ref. Check every call, or serialize a whole object and check
-// stream.ok once at the end. Reads validate everything in EVERY mode: the
-// wire is a trust boundary, and a read NEVER throws, on hostile input or
-// on caller misuse.
+// The error model: a read's refusals are VALUES. Every serialize method
+// returns true on success. The first read refusal latches on the stream --
+// see SerializeError -- and every later serialize call returns false without
+// touching the stream or the ref. Check every call, or serialize a whole
+// object and check stream.ok once at the end. Reads validate everything in
+// EVERY mode: the wire is a trust boundary, and a read NEVER throws, on
+// hostile input or on caller misuse. A write or a measure refuses nothing:
+// write misuse is a throw (IMPLEMENTING.md U9), never a latch, and only
+// fail() or a failing nested object makes a write call return false.
 //
 // The write side ships in two variants, selected once at module load on
 // NODE_ENV (see mode.js) -- the JS translation of the family's
@@ -33,19 +35,22 @@
 //   wider than its bits, not finite, text that is not well-formed or holds
 //   U+0000, too long for its buffer) are bugs in the calling code, not
 //   data, and throw on the write and measure streams: the always-on form
-//   of the family's checked-build assertion. A write past the end of the
-//   buffer is not misuse: it latches PastEnd in every mode.
+//   of the family's checked-build assertion. An operation that does not fit
+//   the room left in the buffer is write misuse too, and throws RangeError
+//   before any bit of it is written (U9, U10). Write misuse never latches:
+//   a write stream records no reason, and a later write that fits is
+//   written exactly as it would have been.
 // - The READ stream never throws (U7): the same bad declarations, a span
 //   outside its array, a destination of the wrong type, and data that is
 //   not a Uint8Array refuse as ValueOutOfRange before any bits move, and a
 //   stream that already failed keeps its first reason.
 // - PRODUCTION (NODE_ENV=production): the caller is trusted, exactly as a
-//   C/C++ release build trusts it. Per-op caller validation is gone; what
-//   remains on every write is the sticky-error gate and the buffer-end
-//   check, whose false latches PastEnd -- identical semantics in both
-//   modes, because a message that does not fit is a runtime condition, not
-//   a caller bug. Misused production writes produce garbage on the wire
-//   (which conforming readers refuse), never memory unsafety.
+//   C/C++ release build trusts it. Per-op caller validation is gone, and
+//   the output after write misuse is unspecified (U9): nothing about it is
+//   promised and a caller must never depend on it. What remains on every
+//   write is the room check, which keeps the writer inside its buffer, and
+//   it throws as the checked build does; it never latches. Misused
+//   production writes are never memory unsafe.
 
 import { BitWriter, BitReader, spanIsValid, validateSpan } from './bitpacker.js';
 import { bitsRequired, bitsRequired64, bitsRequired128, bitLength64 } from './bits.js';
@@ -86,6 +91,8 @@ const VALUE_NON_FINITE_MESSAGE = 'value is not finite: the format carries finite
 const STRING_NUL_MESSAGE = 'a string holding U+0000 cannot be written';
 const STRING_UTF16_MESSAGE = 'a string holding a lone surrogate has no UTF-8 encoding';
 const STRING_LENGTH_MESSAGE = 'the string does not fit bufferSize - 1 UTF-8 bytes';
+const WRITE_ROOM_MESSAGE = 'the operation does not fit the room left in the buffer';
+const DEST_SIZE_MESSAGE = 'destSize must be an integer of at least 1';
 
 const INT64_MIN = -(2n ** 63n);
 const INT64_MAX = 2n ** 63n - 1n;
@@ -103,11 +110,13 @@ const FLOAT_SCRATCH = new DataView(new ArrayBuffer(8));
 
 // The string wire codecs, shared module-wide (stateless between calls).
 //
-// The encoder is WHATWG UTF-8, which silently replaces a lone surrogate --
-// ill-formed UTF-16, with no UTF-8 encoding at all -- by U+FFFD. The writer
-// is handed well-formed text (STANDARD.md, "string"), so the CHECKED write
-// path refuses a lone surrogate as InvalidUtf8 before the encoder can launder
-// it, and a U+0000 as EmbeddedNul; the production path trusts the caller.
+// The encoder is WHATWG UTF-8, which is lenient: it would encode a lone
+// surrogate -- ill-formed UTF-16, with no UTF-8 encoding at all -- as
+// U+FFFD. The writer is handed well-formed text (STANDARD.md, "string"), so
+// a lone surrogate, like a U+0000, is write misuse (IMPLEMENTING.md U3, U9),
+// and the CHECKED write path throws on it before the encoder sees it. The
+// production path does not check; its bytes after that misuse are
+// unspecified output, never a documented behaviour (U3).
 //
 // The decoder is the read-side refusal's platform crystal: fatal true makes
 // every malformed payload throw (caught and latched as InvalidUtf8, never
@@ -129,19 +138,19 @@ const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
  * echoes, and the reason that stands is the FIRST one's. reset() clears it.
  *
  * Every read refusal names one of these nine reasons, and every refused
- * conformance vector states the one it expects. A write stream latches one
- * of them, PastEnd, for a write past the end of the buffer; every other
- * write misuse throws in the checked runtime (IMPLEMENTING.md U9), and a
- * measure latches nothing at all (U6).
+ * conformance vector states the one it expects. They are a reader's
+ * reasons only: a write or a measure stream latches none of them, and its
+ * error is always None. Write misuse, an operation that does not fit the
+ * room left included, throws (IMPLEMENTING.md U6, U9).
  */
 export const SerializeError = Object.freeze({
   /** No error: the stream is healthy. */
   None: null,
 
   /**
-   * On read, a read needs more bits than the stream holds: the packet is
-   * truncated or maliciously crafted. On write, a write would go past the
-   * end of the buffer: the message does not fit.
+   * A read needs more bits than the stream holds: the packet is truncated
+   * or maliciously crafted. (On write, an operation that does not fit the
+   * room left is write misuse, a throw, never this reason: U9.)
    */
   PastEnd: 'past_end',
 
@@ -149,9 +158,9 @@ export const SerializeError = Object.freeze({
    * A value outside its declared range or domain. On read: a ranged offset
    * past its span (int, int64, int128, fixed), a string length past its
    * buffer, a compressed integer past max_integer_value, or an int_relative
-   * outside its domain or not increasing. On write and measure: the value
-   * passed in is outside its range, which the checked runtime refuses
-   * instead of writing a value the range cannot carry.
+   * outside its domain or not increasing, and caller misuse on read (U7).
+   * (On write and measure a value outside its range is write misuse, a
+   * throw in the checked runtime, never this reason: U9.)
    */
   ValueOutOfRange: 'value_out_of_range',
 
@@ -168,24 +177,24 @@ export const SerializeError = Object.freeze({
   /**
    * A float or double that is NaN or an infinity, or a compressed float
    * decode that is not finite. The format carries finite values only
-   * (STANDARD.md, "Finite values only, every one bit exact"); on write the
-   * checked runtime latches a non-finite value.
+   * (STANDARD.md, "Finite values only, every one bit exact"). A read
+   * reason only: on write a non-finite value is misuse, a throw (U9).
    */
   NonFiniteFloat: 'non_finite_float',
 
   /**
    * A string payload that is not well-formed UTF-8 (overlong forms, encoded
    * surrogates, code points above U+10FFFF, truncated sequences, stray
-   * continuation bytes). On write the checked runtime latches a string
-   * holding a lone surrogate -- ill-formed UTF-16, which has no UTF-8
-   * encoding at all.
+   * continuation bytes). A read reason only: on write a string holding a
+   * lone surrogate -- ill-formed UTF-16, with no UTF-8 encoding at all --
+   * is misuse, a throw in the checked runtime (U3, U9).
    */
   InvalidUtf8: 'invalid_utf8',
 
   /**
    * A zero byte among a string's transmitted bytes: the two-lengths
-   * smuggling primitive, refused BEFORE the encoding is checked. On write
-   * the checked runtime latches a string holding U+0000.
+   * smuggling primitive, refused BEFORE the encoding is checked. A read
+   * reason only: on write a string holding U+0000 is misuse, a throw (U9).
    */
   EmbeddedNul: 'embedded_nul',
 
@@ -225,6 +234,49 @@ export function refusalName(error) {
     return 'none';
   }
   return REFUSAL_REASONS.has(error) ? error : '';
+}
+
+/**
+ * serialize_copy_string (IMPLEMENTING.md U15, ruling of reference v2.1.1):
+ * bounds text for a serializeString with bufferSize = destSize. Returns the
+ * longest prefix of source, before its first U+0000, whose UTF-8 encoding
+ * fits destSize - 1 bytes and does not end inside a character: the first
+ * destSize - 1 bytes, then bytes dropped from the end while the first byte
+ * left out is a continuation byte. JavaScript strings are UTF-16 values, so
+ * the prefix is returned, and destSize counts the bytes of the strict UTF-8
+ * encoding. destSize below 1 (or not an integer), and a source holding a
+ * lone surrogate, which the strict codec refuses (U3), are write misuse and
+ * throw RangeError (U9); this helper checks them in every mode.
+ * @param {string} source the text to bound.
+ * @param {number} destSize the buffer size the text must fit, an integer of at least 1.
+ * @returns {string} the bounded prefix.
+ */
+export function copyString(source, destSize) {
+  if (typeof source !== 'string') {
+    throw new TypeError(STRING_VALUE_MESSAGE);
+  }
+  if (!Number.isInteger(destSize) || destSize < 1) {
+    throw new RangeError(DEST_SIZE_MESSAGE);
+  }
+  if (!source.isWellFormed()) {
+    throw new RangeError(STRING_UTF16_MESSAGE);
+  }
+  const nul = source.indexOf('\0');
+  const text = nul === -1 ? source : source.slice(0, nul);
+  const limit = destSize - 1;
+  // a UTF-16 unit encodes to at most 3 UTF-8 bytes
+  if (text.length * 3 <= limit) {
+    return text;
+  }
+  const utf8 = UTF8_ENCODER.encode(text);
+  if (utf8.length <= limit) {
+    return text;
+  }
+  let end = limit;
+  while (end > 0 && (utf8[end] & 0xc0) === 0x80) {
+    end--;
+  }
+  return UTF8_DECODER.decode(utf8.subarray(0, end));
 }
 
 /**
@@ -716,10 +768,11 @@ function deriveFixedPointParams(integerBits, fractionBits, min, max) {
 
 /**
  * Writes bitpacked data to a buffer, wrapping BitWriter with the serialize
- * surface so unified serialize functions can write with it. A write that
- * would pass the end of the buffer latches SerializeError.PastEnd and
- * returns false -- in every mode -- so a message that does not fit surfaces
- * as a value, not a throw.
+ * surface so unified serialize functions can write with it. An operation
+ * that does not fit the room left in the buffer is write misuse: it throws
+ * RangeError before any bit of it is written, in every mode, and nothing
+ * latches (IMPLEMENTING.md U9, U10). Size the buffer with a MeasureStream,
+ * or check bitsAvailable() first.
  *
  * This is the CHECKED variant (the development default): write misuse
  * throws, one mechanism on every operation (IMPLEMENTING.md U9), as the
@@ -729,7 +782,6 @@ function deriveFixedPointParams(integerBits, fractionBits, min, max) {
  */
 class CheckedWriteStream {
   #writer;
-  #error;
 
   /**
    * Creates a write stream that writes to the given buffer. The buffer size
@@ -739,17 +791,15 @@ class CheckedWriteStream {
    */
   constructor(buffer) {
     this.#writer = new BitWriter(buffer);
-    this.#error = SerializeError.None;
   }
 
   /**
-   * Points the stream at a buffer and clears all write state including any
-   * latched error, allowing a single stream to be reused without allocation.
+   * Points the stream at a buffer and clears all write state, allowing a
+   * single stream to be reused without allocation.
    * @param {Uint8Array} buffer destination; length must be a multiple of 8.
    */
   reset(buffer) {
     this.#writer.reset(buffer);
-    this.#error = SerializeError.None;
   }
 
   /** True: this stream consumes ref values. */
@@ -762,26 +812,24 @@ class CheckedWriteStream {
     return false;
   }
 
-  #fail(error) {
-    if (this.#error === SerializeError.None) {
-      this.#error = error;
-    }
-    return false;
+  /**
+   * U9: an operation that does not fit the room left is write misuse. It
+   * throws at the call, before any bit of the operation is written (U10),
+   * and records nothing: a write stream has no refusal state.
+   */
+  #noRoom() {
+    throw new RangeError(WRITE_ROOM_MESSAGE);
   }
 
   /**
    * Writes bits that have already been validated to [1,32]: the shared tail
-   * of every fixed-width write. A latched error and a write past the end of
-   * the buffer are refused as values; the bit writer masks the value to the
-   * bit count. The bounds check lives in tryWriteBits and runs exactly
-   * once: its false IS the overflow refusal.
+   * of every fixed-width write. A write past the end of the buffer is
+   * write misuse and throws (U9). The bounds check lives in tryWriteBits
+   * and runs exactly once: its false is what #noRoom throws on.
    */
   #writeBits(value, bits) {
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     if (!this.#writer.tryWriteBits(value, bits)) {
-      return this.#fail(SerializeError.PastEnd);
+      return this.#noRoom();
     }
     return true;
   }
@@ -815,23 +863,20 @@ class CheckedWriteStream {
    * an integer in [1,64] and ref.value a BigInt in [0,2^bits-1]: a
    * negative value or one wider than its bits is write misuse and throws
    * (IMPLEMENTING.md U8, masking is not checking). Values wider than 32 bits are written as the
-   * low 32-bit dword first, then the high remainder. Returns false and
-   * latches PastEnd if the write would pass the end of the buffer --
+   * low 32-bit dword first, then the high remainder. Throws RangeError (U9,
+   * latching nothing) if the write would pass the end of the buffer --
    * checked against the TOTAL width up front, so nothing is written on
-   * refusal.
+   * misuse.
    * @param {{value: bigint}} ref holder of the value to write.
    * @param {number} bits width in [1,64].
    * @returns {boolean} true on success.
    */
   serializeBits64(ref, bits) {
     validateBits64(bits);
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     const value = ref.value;
     checkFitsBig(value, bits);
     if (bits > this.#writer.bitsAvailable()) {
-      return this.#fail(SerializeError.PastEnd);
+      return this.#noRoom();
     }
     this.#writeWide64(value, bits);
     return true;
@@ -840,7 +885,7 @@ class CheckedWriteStream {
   /**
    * Writes the low order bits of ref.value, without padding to the nearest
    * byte. bits must be an integer in [1,32] and ref.value an integer in
-   * [0,2^bits-1]: anything else is write misuse and throws (U8). Returns false and latches PastEnd
+   * [0,2^bits-1]: anything else is write misuse and throws (U8). Throws RangeError (U9, latching nothing)
    * if the write would pass the end of the buffer.
    * @param {{value: number}} ref holder of the value to write.
    * @param {number} bits width in [1,32].
@@ -871,9 +916,6 @@ class CheckedWriteStream {
    */
   serializeInt(ref, min, max) {
     validateIntRange(min, max);
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     const value = ref.value;
     if (typeof value !== 'number') {
       throw new TypeError(VALUE_TYPE_MESSAGE);
@@ -886,10 +928,10 @@ class CheckedWriteStream {
       return true; // degenerate range: the value IS the range, nothing to send
     }
     // subtract in the unsigned domain: the range may be wider than 2^31.
-    // #error was checked above, so the tail goes straight to tryWriteBits:
-    // the overflow check runs exactly once and its false IS the refusal.
+    // the tail goes straight to tryWriteBits: the room check runs exactly
+    // once, and its false is the misuse #noRoom throws (U9).
     return this.#writer.tryWriteBits(((value >>> 0) - (min >>> 0)) >>> 0, bits) ||
-      this.#fail(SerializeError.PastEnd);
+      this.#noRoom();
   }
 
   /**
@@ -898,11 +940,11 @@ class CheckedWriteStream {
    * unsigned 64-bit domain so ranges wider than 2^63 are exact. min and max
    * must be BigInts representable in int64 with min <= max: the range is
    * part of the message format, so violating that is caller misuse and
-   * throws, as is a non-BigInt value. A value outside [min,max] latches
-   * SerializeError.ValueOutOfRange and writes nothing. Where the offset
+   * throws, as is a non-BigInt value. A value outside [min,max] is
+   * write misuse and throws, writing nothing (U9). Where the offset
    * needs more than 32 bits it is written low 32-bit dword first, then the
    * high remainder -- serializeBits64's convention -- checked against the
-   * TOTAL width up front, so a refused write puts nothing on the wire. A
+   * TOTAL width up front, so a write that does not fit puts nothing on the wire. A
    * degenerate range where min === max costs ZERO bits.
    * @param {{value: bigint}} ref holder of the integer to write.
    * @param {bigint} min the minimum value, an int64 BigInt.
@@ -911,9 +953,6 @@ class CheckedWriteStream {
    */
   serializeInt64(ref, min, max) {
     validateInt64Range(min, max);
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     const value = ref.value;
     if (typeof value !== 'bigint') {
       throw new TypeError(BIGINT_VALUE_MESSAGE);
@@ -926,7 +965,7 @@ class CheckedWriteStream {
       return true; // degenerate range: the value IS the range, nothing to send
     }
     if (bits > this.#writer.bitsAvailable()) {
-      return this.#fail(SerializeError.PastEnd);
+      return this.#noRoom();
     }
     // subtract in the unsigned domain: the range may be wider than 2^63
     this.#writeWide64(BigInt.asUintN(64, value - min), bits);
@@ -977,9 +1016,6 @@ class CheckedWriteStream {
    */
   serializeInt128(ref, min, max) {
     validateInt128Range(min, max);
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     const value = ref.value;
     if (typeof value !== 'bigint') {
       throw new TypeError(BIGINT_VALUE_MESSAGE);
@@ -992,7 +1028,7 @@ class CheckedWriteStream {
       return true; // degenerate range: the value IS the range, nothing to send
     }
     if (bits > this.#writer.bitsAvailable()) {
-      return this.#fail(SerializeError.PastEnd);
+      return this.#noRoom();
     }
     // subtract in the unsigned domain: the range may be wider than 2^127
     this.#writeGroups128(BigInt.asUintN(128, value - min), bits);
@@ -1012,10 +1048,10 @@ class CheckedWriteStream {
    * ref.value must exceed previous. previous is the caller's own sequence
    * state, part of the contract on both sides, so an invalid previous is
    * caller misuse and throws; a ref.value that is not an integer in the
-   * domain above previous latches SerializeError.ValueOutOfRange and writes
-   * nothing -- the checked runtime's always-on form of the family's
+   * domain above previous is write misuse and throws, writing
+   * nothing (U9) -- the checked runtime's always-on form of the family's
    * checked-build ordering assertion. The tier is checked against the
-   * buffer as one total width up front, so a refused write puts NOTHING on
+   * buffer as one total width up front, so a write that does not fit puts NOTHING on
    * the wire.
    * @param {number} previous the previous value, an integer in [0,2^31-1].
    * @param {{value: number}} ref holder of the current value to write.
@@ -1023,9 +1059,6 @@ class CheckedWriteStream {
    */
   serializeIntRelative(previous, ref) {
     validatePrevious(previous);
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     const current = ref.value;
     if (typeof current !== 'number') {
       throw new TypeError(VALUE_TYPE_MESSAGE);
@@ -1037,32 +1070,32 @@ class CheckedWriteStream {
     // bits, the one flag above them, the payload offset above that -- which
     // is bit-identical to the reference's flag-by-flag serialize_bool /
     // serialize_int sequence, because sequential writes pack from the least
-    // significant bit upward. #error was checked above, so each tail goes
+    // significant bit upward. each tail goes
     // straight to tryWriteBits: one overflow check, its false the refusal.
     const difference = current - previous;
     if (difference === 1) {
-      return this.#writer.tryWriteBits(1, 1) || this.#fail(SerializeError.PastEnd);
+      return this.#writer.tryWriteBits(1, 1) || this.#noRoom();
     }
     if (difference <= 6) {
-      return this.#writer.tryWriteBits(0b10 | ((difference - 2) << 2), 5) || this.#fail(SerializeError.PastEnd);
+      return this.#writer.tryWriteBits(0b10 | ((difference - 2) << 2), 5) || this.#noRoom();
     }
     if (difference <= 23) {
-      return this.#writer.tryWriteBits(0b100 | ((difference - 7) << 3), 8) || this.#fail(SerializeError.PastEnd);
+      return this.#writer.tryWriteBits(0b100 | ((difference - 7) << 3), 8) || this.#noRoom();
     }
     if (difference <= 280) {
-      return this.#writer.tryWriteBits(0b1000 | ((difference - 24) << 4), 13) || this.#fail(SerializeError.PastEnd);
+      return this.#writer.tryWriteBits(0b1000 | ((difference - 24) << 4), 13) || this.#noRoom();
     }
     if (difference <= 4377) {
-      return this.#writer.tryWriteBits(0b10000 | ((difference - 281) << 5), 18) || this.#fail(SerializeError.PastEnd);
+      return this.#writer.tryWriteBits(0b10000 | ((difference - 281) << 5), 18) || this.#noRoom();
     }
     if (difference <= 69914) {
-      return this.#writer.tryWriteBits(0b100000 | ((difference - 4378) << 6), 23) || this.#fail(SerializeError.PastEnd);
+      return this.#writer.tryWriteBits(0b100000 | ((difference - 4378) << 6), 23) || this.#noRoom();
     }
     // the final tier: six zero flags, then current itself -- the ABSOLUTE
     // value, not the difference -- as 32 raw bits, 38 bits total, checked
-    // up front so a refused write puts nothing on the wire
+    // up front so a write that does not fit puts nothing on the wire
     if (this.#writer.bitsAvailable() < 38) {
-      return this.#fail(SerializeError.PastEnd);
+      return this.#noRoom();
     }
     this.#writer.writeBits(0, 6);
     this.#writer.writeBits(current, 32);
@@ -1091,7 +1124,7 @@ class CheckedWriteStream {
    * costs ZERO bits on every storage width (STANDARD.md, adopted
    * 2026-08-15): the value must be exactly min << fractionBits, and
    * nothing is written. Wide writes are checked against the TOTAL width up
-   * front, so a refused write puts nothing on the wire.
+   * front, so a write that does not fit puts nothing on the wire.
    * @param {{value: number|bigint}} ref holder of the raw fixed point value.
    * @param {number} integerBits integer bits of the Q format, at least 1.
    * @param {number} fractionBits fractional bits of the Q format.
@@ -1101,9 +1134,6 @@ class CheckedWriteStream {
    */
   serializeFixed(ref, integerBits, fractionBits, min, max) {
     const params = fixedPointParams(integerBits, fractionBits, min, max);
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     const value = ref.value;
     if (!params.wide) {
       if (typeof value !== 'number') {
@@ -1116,9 +1146,9 @@ class CheckedWriteStream {
       if (params.bits === 0) {
         return true; // degenerate range: the value IS the range, nothing to send
       }
-      // #error was checked above: the tail goes straight to tryWriteBits
+      // the tail goes straight to tryWriteBits: its false is #noRoom (U9)
       return this.#writer.tryWriteBits(offset, params.bits) ||
-        this.#fail(SerializeError.PastEnd);
+        this.#noRoom();
     }
     if (typeof value !== 'bigint') {
       throw new TypeError(BIGINT_VALUE_MESSAGE);
@@ -1131,7 +1161,7 @@ class CheckedWriteStream {
       return true; // degenerate range: the value IS the range, nothing to send
     }
     if (params.bits > this.#writer.bitsAvailable()) {
-      return this.#fail(SerializeError.PastEnd);
+      return this.#noRoom();
     }
     this.#writeGroups128(offset, params.bits);
     return true;
@@ -1195,21 +1225,18 @@ class CheckedWriteStream {
    * (STANDARD.md "uint128"). When the stream is byte aligned the result is
    * the 16 bytes of the value in little-endian order. ref.value must be a
    * BigInt in [0,2^128-1]: anything else is write misuse and throws (U8).
-   * Returns false and
-   * latches PastEnd if the write would pass the end of the buffer --
+   * Throws RangeError (U9,
+   * latching nothing) if the write would pass the end of the buffer --
    * checked against the full 128 bits up front, so nothing is written on
-   * refusal. Do not confuse it with serializeInt128, which is ranged.
+   * misuse. Do not confuse it with serializeInt128, which is ranged.
    * @param {{value: bigint}} ref holder of the value to write.
    * @returns {boolean} true on success.
    */
   serializeUint128(ref) {
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     const value = ref.value;
     checkFitsBig(value, 128);
     if (this.#writer.bitsAvailable() < 128) {
-      return this.#fail(SerializeError.PastEnd);
+      return this.#noRoom();
     }
     this.#writeGroups128(value, 128);
     return true;
@@ -1236,15 +1263,12 @@ class CheckedWriteStream {
    * FLT_MAX, which narrows to one -- is write misuse
    * and throws, writing nothing (U9), the checked runtime's always-on form of the family's
    * checked-build assertion. Negative zero and the subnormals are finite and
-   * travel bit exact. ref.value must be a number (misuse throws). Returns
-   * false and latches PastEnd if the write would pass the end of the buffer.
+   * travel bit exact. ref.value must be a number (misuse throws). Throws
+   * RangeError (U9, latching nothing) if the write would pass the end of the buffer.
    * @param {{value: number}} ref holder of the value to write.
    * @returns {boolean} true on success.
    */
   serializeFloat(ref) {
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     const value = ref.value;
     if (typeof value !== 'number') {
       throw new TypeError(VALUE_TYPE_MESSAGE);
@@ -1253,9 +1277,9 @@ class CheckedWriteStream {
     if (!floatBitsAreFinite(bits)) {
       throw new RangeError(VALUE_NON_FINITE_MESSAGE);
     }
-    // #error was checked above: the tail goes straight to tryWriteBits
+    // the tail goes straight to tryWriteBits: its false is #noRoom (U9)
     return this.#writer.tryWriteBits(bits, 32) ||
-      this.#fail(SerializeError.PastEnd);
+      this.#noRoom();
   }
 
   /**
@@ -1266,16 +1290,13 @@ class CheckedWriteStream {
    * only: NaN and the infinities are write misuse and
    * throw, writing nothing (U9), the checked runtime's always-on form of the family's
    * checked-build assertion. Negative zero and the subnormals travel bit
-   * exact. ref.value must be a number (misuse throws). Returns false and
-   * latches PastEnd if the write would pass the end of the buffer, checked
-   * against the full 64 bits up front so nothing is written on refusal.
+   * exact. ref.value must be a number (misuse throws). Throws RangeError (U9,
+   * latching nothing) if the write would pass the end of the buffer, checked
+   * against the full 64 bits up front so nothing is written on misuse.
    * @param {{value: number}} ref holder of the value to write.
    * @returns {boolean} true on success.
    */
   serializeDouble(ref) {
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     const value = ref.value;
     if (typeof value !== 'number') {
       throw new TypeError(VALUE_TYPE_MESSAGE);
@@ -1286,7 +1307,7 @@ class CheckedWriteStream {
       throw new RangeError(VALUE_NON_FINITE_MESSAGE);
     }
     if (this.#writer.bitsAvailable() < 64) {
-      return this.#fail(SerializeError.PastEnd);
+      return this.#noRoom();
     }
     // low dword first, then the high dword: the 64-bit group rule
     this.#writer.writeBits(FLOAT_SCRATCH.getUint32(0, true), 32);
@@ -1304,8 +1325,8 @@ class CheckedWriteStream {
    * is float32 with TWO roundings -- the product rounds via Math.fround
    * BEFORE 0.5 is added, which is part of the format and changes the bytes
    * (STANDARD.md pins vectors that discriminate). Writing a non-finite
-   * value (NaN, +/-Infinity in float32) is non-conforming and latches
-   * SerializeError.NonFiniteFloat -- the checked runtime's always-on form
+   * value (NaN, +/-Infinity in float32) is write misuse and throws
+   * (U9), never clamped in the checked runtime -- the checked runtime's always-on form
    * of the family's checked-build assertion. A declaration whose top
    * (min + delta, rounded once) decodes to an infinity is non-conforming as
    * a whole and throws, even for a value that would decode finite: a writer
@@ -1345,9 +1366,6 @@ class CheckedWriteStream {
 
   #writeCompressedFloat(ref, maxIntegerValue, bits, delta, min) {
     validateCompressedFloatTop(min, delta);
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     const value = ref.value;
     if (typeof value !== 'number') {
       throw new TypeError(VALUE_TYPE_MESSAGE);
@@ -1357,7 +1375,7 @@ class CheckedWriteStream {
       throw new RangeError(VALUE_NON_FINITE_MESSAGE);
     }
     if (bits > this.#writer.bitsAvailable()) {
-      return this.#fail(SerializeError.PastEnd);
+      return this.#noRoom();
     }
     let normalized = Math.fround(Math.fround(value32 - min) / delta);
     if (!(normalized >= 0.0)) {
@@ -1393,9 +1411,9 @@ class CheckedWriteStream {
    * sides must already agree on it, which in this API means the reader
    * passes an array of the same length. A zero-length array still aligns
    * and writes nothing else (ratified 2026-08-15). data must be a
-   * Uint8Array (misuse throws). Returns false and latches PastEnd if the
-   * bytes would pass the end of the buffer; the align padding, written
-   * before the check, is part of the latched stream's dead wire.
+   * Uint8Array (misuse throws). Throws RangeError (U9, latching nothing) if the
+   * align and the bytes would pass the end of the buffer, checked before
+   * either is written (U10).
    *
    * offset and length select a span of data without a subarray view, so a
    * fixed-capacity array's used prefix costs no allocation per call:
@@ -1415,12 +1433,9 @@ class CheckedWriteStream {
     const start = offset === undefined ? 0 : offset;
     const bytes = length === undefined ? data.length - start : length;
     validateSpan(data, start, bytes);
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     // U10: the room for the align AND the payload, before either is written
     if (this.#writer.alignBits() + bytes * 8 > this.#writer.bitsAvailable()) {
-      return this.#fail(SerializeError.PastEnd);
+      return this.#noRoom();
     }
     this.#writer.writeAlign();
     this.#writer.writeBytes(data, start, bytes);
@@ -1438,10 +1453,10 @@ class CheckedWriteStream {
    * UTF-8 bytes is write misuse and throws, writing nothing (U9):
    * the checked runtime's always-on form of the family's checked-build
    * assertion. The writer is handed text a reader accepts (STANDARD.md,
-   * "string"), so a U+0000 latches EmbeddedNul and a lone surrogate --
-   * ill-formed UTF-16, which TextEncoder would silently replace by U+FFFD --
-   * latches InvalidUtf8, both before anything is written. Returns false and
-   * latches PastEnd if the string does not fit the buffer.
+   * "string"), so a U+0000 and a lone surrogate -- ill-formed UTF-16, with
+   * no UTF-8 encoding -- are write misuse and throw before anything is
+   * written (U3, U4, U9). Throws RangeError (U9, latching nothing) if the
+   * length, align and payload do not fit the buffer (U10).
    * @param {{value: string}} ref holder of the string to write.
    * @param {number} bufferSize the agreed buffer size; the payload must fit
    *   in bufferSize - 1 bytes.
@@ -1449,9 +1464,6 @@ class CheckedWriteStream {
    */
   serializeString(ref, bufferSize) {
     validateBufferSize(bufferSize);
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     const value = ref.value;
     if (typeof value !== 'string') {
       throw new TypeError(STRING_VALUE_MESSAGE);
@@ -1467,7 +1479,7 @@ class CheckedWriteStream {
       throw new RangeError(STRING_LENGTH_MESSAGE);
     }
     return this.#writeStringPayload(utf8, bitsRequired(0, bufferSize - 1)) ||
-      this.#fail(SerializeError.PastEnd);
+      this.#noRoom();
   }
 
   /**
@@ -1495,12 +1507,9 @@ class CheckedWriteStream {
    * already byte aligned, writes nothing. This can never pass the end of the
    * buffer: the buffer size is a multiple of 8 bytes, so an unaligned bit
    * index is always strictly inside a byte the buffer contains.
-   * @returns {boolean} true on success (false only after a latched error).
+   * @returns {boolean} true, always.
    */
   serializeAlign() {
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     this.#writer.writeAlign();
     return true;
   }
@@ -1508,9 +1517,9 @@ class CheckedWriteStream {
   /**
    * Writes the end of the object (STANDARD.md, "end"): nothing. The object
    * ends at the bit index after its last field, and the unused bits of that
-   * field's final byte are the zeros the flush already writes. Returns false
-   * only after a latched error, so a unified serialize function can end with
-   * it on every stream.
+   * field's final byte are the zeros the flush already writes. A no-op
+   * returning true (U12), so a unified serialize function can end with it
+   * on every stream.
    * @returns {boolean} true on success.
    */
   serializeEnd() {
@@ -1519,17 +1528,13 @@ class CheckedWriteStream {
 
   /**
    * Writes a nested object (STANDARD.md, "object"): calls serialize(this)
-   * inline and adds no bytes of its own. A latched error refuses before the
-   * callback runs, and a callback that returns false, or leaves an error
-   * latched, refuses the whole.
+   * inline and adds no bytes of its own. A callback that returns false makes
+   * it return false, and records nothing (U9).
    * @param {(stream: CheckedWriteStream) => boolean} serialize the object's serialize function.
    * @returns {boolean} true on success.
    */
   serializeObject(serialize) {
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
-    return serialize(this) === true && this.#error === SerializeError.None;
+    return serialize(this) === true;
   }
 
   /**
@@ -1601,14 +1606,19 @@ class CheckedWriteStream {
     return this.#writer.bitsAvailable();
   }
 
-  /** The first error latched on the stream, or SerializeError.None (null). */
+  /**
+   * Always SerializeError.None (null): a write stream refuses nothing and has no
+   * refusal state, so no misuse, fail, reject or failing nested object
+   * records a reason here (IMPLEMENTING.md U6, U9). Kept so a serialize
+   * function shared with the read side can read it on every stream.
+   */
   get error() {
-    return this.#error;
+    return SerializeError.None;
   }
 
-  /** True while no error is latched. */
+  /** Always true: nothing latches on a write stream (U6, U9). */
   get ok() {
-    return this.#error === SerializeError.None;
+    return true;
   }
 }
 
@@ -1709,31 +1719,29 @@ function productionFixedPointParams(integerBits, fractionBits, min, max) {
  *
  * What every operation KEEPS, in both modes identically:
  *
- * - The sticky-error gate: after the first failure every call returns
- *   false without touching the stream.
- * - The buffer-end refusal: a write that would pass the end of the buffer
- *   latches SerializeError.PastEnd and writes nothing (wide operations
- *   check their TOTAL width up front, exactly as the checked variant
- *   does). A message that does not fit is a runtime condition, not a
- *   caller bug, so overflow stays a hard, latched value -- the JS
- *   equivalent of what the C port's writer-trusted model retained.
+ * - The room check: an operation that does not fit the room left in the
+ *   buffer throws RangeError and writes nothing (wide operations, bytes
+ *   and string check their TOTAL width up front, exactly as the checked
+ *   variant does). It is write misuse (IMPLEMENTING.md U9, U10); this
+ *   port keeps the check in production because it keeps the writer inside
+ *   its buffer, and keeps the trap's form for it. Nothing latches.
  * - The wire arithmetic, unchanged and byte identical: the golden pins
  *   are re-run in production mode.
  *
- * What is GONE, per the standard's writer-trusted doctrine: parameter
- * validation throws (bits counts, ranges, declarations, previous, buffer
- * sizes, value types) and value refusal latches (ValueOutOfRange,
- * NonFiniteFloat, and the string writer's O(n) UTF-16 well-formedness and
- * NUL scans -- the standard's type case of a check no release path should
- * carry). A caller that violates those
- * contracts gets garbage on the wire -- which conforming readers refuse --
+ * What is GONE, per the standard's writer-trusted doctrine: every other
+ * write-misuse check (bits counts, ranges, declarations, previous, buffer
+ * sizes, value types, values out of range or width, non-finite values,
+ * and the string writer's O(n) UTF-16 well-formedness and NUL scans -- the
+ * standard's type case of a check no release path should carry). A caller
+ * that violates those contracts gets unspecified output (U9): nothing about
+ * it is promised -- a lone surrogate's bytes, for one, are whatever the
+ * lenient encoder makes of it, never a documented behaviour (U3) -- and
  * never memory unsafety: JavaScript's own bounds semantics are the
  * backstop. The read side is not touched by any of this: ReadStream
  * validates everything in every mode.
  */
 class ProductionWriteStream {
   #writer;
-  #error;
 
   /**
    * Creates a write stream that writes to the given buffer. The buffer size
@@ -1743,17 +1751,15 @@ class ProductionWriteStream {
    */
   constructor(buffer) {
     this.#writer = new BitWriter(buffer);
-    this.#error = SerializeError.None;
   }
 
   /**
-   * Points the stream at a buffer and clears all write state including any
-   * latched error, allowing a single stream to be reused without allocation.
+   * Points the stream at a buffer and clears all write state, allowing a
+   * single stream to be reused without allocation.
    * @param {Uint8Array} buffer destination; length must be a multiple of 8.
    */
   reset(buffer) {
     this.#writer.reset(buffer);
-    this.#error = SerializeError.None;
   }
 
   /** True: this stream consumes ref values. */
@@ -1766,24 +1772,23 @@ class ProductionWriteStream {
     return false;
   }
 
-  #fail(error) {
-    if (this.#error === SerializeError.None) {
-      this.#error = error;
-    }
-    return false;
+  /**
+   * U9: an operation that does not fit the room left is write misuse. It
+   * throws at the call, before any bit of the operation is written (U10),
+   * and records nothing: a write stream has no refusal state.
+   */
+  #noRoom() {
+    throw new RangeError(WRITE_ROOM_MESSAGE);
   }
 
   /**
-   * The shared tail of every fixed-width write: the sticky-error gate, then
-   * tryWriteBits, whose false IS the overflow refusal -- the production
-   * write path's two retained checks in one place.
+   * The shared tail of every fixed-width write: tryWriteBits, whose false
+   * is the room misuse #noRoom throws on -- the production write path's one
+   * retained check.
    */
   #writeBits(value, bits) {
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     if (!this.#writer.tryWriteBits(value, bits)) {
-      return this.#fail(SerializeError.PastEnd);
+      return this.#noRoom();
     }
     return true;
   }
@@ -1829,7 +1834,7 @@ class ProductionWriteStream {
 
   /**
    * serializeBits, trusted: bits in [1,32] and a Number value are the
-   * caller's contract. PastEnd latches, as in every mode.
+   * caller's contract. A write that does not fit throws, as in every mode.
    * @param {{value: number}} ref holder of the value to write.
    * @param {number} bits width in [1,32].
    * @returns {boolean} true on success.
@@ -1847,11 +1852,8 @@ class ProductionWriteStream {
    * @returns {boolean} true on success.
    */
   serializeBits64(ref, bits) {
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     if (bits > this.#writer.bitsAvailable()) {
-      return this.#fail(SerializeError.PastEnd);
+      return this.#noRoom();
     }
     this.#writeWide64(BigInt.asUintN(bits, ref.value), bits);
     return true;
@@ -1860,23 +1862,21 @@ class ProductionWriteStream {
   /**
    * serializeInt, trusted: an int32 range with min <= max and an integer
    * value within it are the caller's contract; the offset arithmetic and
-   * the wire are exactly the checked variant's. PastEnd latches.
+   * the wire are exactly the checked variant's. A write that does not fit
+   * throws.
    * @param {{value: number}} ref holder of the integer to write.
    * @param {number} min the minimum value, an int32.
    * @param {number} max the maximum value, an int32, at least min.
    * @returns {boolean} true on success.
    */
   serializeInt(ref, min, max) {
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     const bits = uncheckedBitsRequired(min >>> 0, max >>> 0);
     if (bits === 0) {
       return true; // degenerate range: the value IS the range, nothing to send
     }
     // subtract in the unsigned domain: the range may be wider than 2^31
     return this.#writer.tryWriteBits(((ref.value >>> 0) - (min >>> 0)) >>> 0, bits) ||
-      this.#fail(SerializeError.PastEnd);
+      this.#noRoom();
   }
 
   /**
@@ -1889,15 +1889,12 @@ class ProductionWriteStream {
    * @returns {boolean} true on success.
    */
   serializeInt64(ref, min, max) {
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     const bits = uncheckedBitsRequired64(BigInt.asUintN(64, min), BigInt.asUintN(64, max));
     if (bits === 0) {
       return true; // degenerate range: the value IS the range, nothing to send
     }
     if (bits > this.#writer.bitsAvailable()) {
-      return this.#fail(SerializeError.PastEnd);
+      return this.#noRoom();
     }
     // subtract in the unsigned domain: the range may be wider than 2^63
     this.#writeWide64(BigInt.asUintN(64, ref.value - min), bits);
@@ -1914,15 +1911,12 @@ class ProductionWriteStream {
    * @returns {boolean} true on success.
    */
   serializeInt128(ref, min, max) {
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     const bits = uncheckedBitsRequired128(BigInt.asUintN(128, min), BigInt.asUintN(128, max));
     if (bits === 0) {
       return true; // degenerate range: the value IS the range, nothing to send
     }
     if (bits > this.#writer.bitsAvailable()) {
-      return this.#fail(SerializeError.PastEnd);
+      return this.#noRoom();
     }
     // subtract in the unsigned domain: the range may be wider than 2^127
     this.#writeGroups128(BigInt.asUintN(128, ref.value - min), bits);
@@ -1933,40 +1927,37 @@ class ProductionWriteStream {
    * serializeIntRelative, trusted: previous and ref.value integers in the
    * int_relative domain, 0 to 2^31 - 1, with ref.value strictly above
    * previous are the caller's contract. The fused tier groups are exactly
-   * the checked variant's; each tail's single overflow check latches.
+   * the checked variant's; each tail's single room check throws.
    * @param {number} previous the previous value, an integer in [0,2^31-1].
    * @param {{value: number}} ref holder of the current value to write.
    * @returns {boolean} true on success.
    */
   serializeIntRelative(previous, ref) {
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     const current = ref.value;
     const difference = current - previous;
     if (difference === 1) {
-      return this.#writer.tryWriteBits(1, 1) || this.#fail(SerializeError.PastEnd);
+      return this.#writer.tryWriteBits(1, 1) || this.#noRoom();
     }
     if (difference <= 6) {
-      return this.#writer.tryWriteBits(0b10 | ((difference - 2) << 2), 5) || this.#fail(SerializeError.PastEnd);
+      return this.#writer.tryWriteBits(0b10 | ((difference - 2) << 2), 5) || this.#noRoom();
     }
     if (difference <= 23) {
-      return this.#writer.tryWriteBits(0b100 | ((difference - 7) << 3), 8) || this.#fail(SerializeError.PastEnd);
+      return this.#writer.tryWriteBits(0b100 | ((difference - 7) << 3), 8) || this.#noRoom();
     }
     if (difference <= 280) {
-      return this.#writer.tryWriteBits(0b1000 | ((difference - 24) << 4), 13) || this.#fail(SerializeError.PastEnd);
+      return this.#writer.tryWriteBits(0b1000 | ((difference - 24) << 4), 13) || this.#noRoom();
     }
     if (difference <= 4377) {
-      return this.#writer.tryWriteBits(0b10000 | ((difference - 281) << 5), 18) || this.#fail(SerializeError.PastEnd);
+      return this.#writer.tryWriteBits(0b10000 | ((difference - 281) << 5), 18) || this.#noRoom();
     }
     if (difference <= 69914) {
-      return this.#writer.tryWriteBits(0b100000 | ((difference - 4378) << 6), 23) || this.#fail(SerializeError.PastEnd);
+      return this.#writer.tryWriteBits(0b100000 | ((difference - 4378) << 6), 23) || this.#noRoom();
     }
     // the final tier: six zero flags, then current itself -- the ABSOLUTE
     // value, not the difference -- as 32 raw bits, 38 bits total, checked
-    // up front so a refused write puts nothing on the wire
+    // up front so a write that does not fit puts nothing on the wire
     if (this.#writer.bitsAvailable() < 38) {
-      return this.#fail(SerializeError.PastEnd);
+      return this.#noRoom();
     }
     this.#writer.writeBits(0, 6);
     this.#writer.writeBits(current, 32);
@@ -1985,19 +1976,16 @@ class ProductionWriteStream {
    * @returns {boolean} true on success.
    */
   serializeFixed(ref, integerBits, fractionBits, min, max) {
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     const params = productionFixedPointParams(integerBits, fractionBits, min, max);
     if (params.bits === 0) {
       return true; // degenerate range: the value IS the range, nothing to send
     }
     if (!params.wide) {
       return this.#writer.tryWriteBits(ref.value - params.rawMin, params.bits) ||
-        this.#fail(SerializeError.PastEnd);
+        this.#noRoom();
     }
     if (params.bits > this.#writer.bitsAvailable()) {
-      return this.#fail(SerializeError.PastEnd);
+      return this.#noRoom();
     }
     this.#writeGroups128(ref.value - params.rawMinBig, params.bits);
     return true;
@@ -2047,11 +2035,8 @@ class ProductionWriteStream {
    * @returns {boolean} true on success.
    */
   serializeUint128(ref) {
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     if (this.#writer.bitsAvailable() < 128) {
-      return this.#fail(SerializeError.PastEnd);
+      return this.#noRoom();
     }
     this.#writeGroups128(BigInt.asUintN(128, ref.value), 128);
     return true;
@@ -2073,11 +2058,8 @@ class ProductionWriteStream {
    * @returns {boolean} true on success.
    */
   serializeFloat(ref) {
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     return this.#writer.tryWriteBits(float32BitsFromNumber(ref.value), 32) ||
-      this.#fail(SerializeError.PastEnd);
+      this.#noRoom();
   }
 
   /**
@@ -2087,11 +2069,8 @@ class ProductionWriteStream {
    * @returns {boolean} true on success.
    */
   serializeDouble(ref) {
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     if (this.#writer.bitsAvailable() < 64) {
-      return this.#fail(SerializeError.PastEnd);
+      return this.#noRoom();
     }
     FLOAT_SCRATCH.setFloat64(0, ref.value, true);
     // low dword first, then the high dword: the 64-bit group rule
@@ -2133,11 +2112,8 @@ class ProductionWriteStream {
   }
 
   #writeCompressedFloat(ref, maxIntegerValue, bits, delta, min) {
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     if (bits > this.#writer.bitsAvailable()) {
-      return this.#fail(SerializeError.PastEnd);
+      return this.#noRoom();
     }
     const value32 = Math.fround(ref.value); // the float parameter type of the other ports
     let normalized = Math.fround(Math.fround(value32 - min) / delta);
@@ -2164,9 +2140,8 @@ class ProductionWriteStream {
 
   /**
    * serializeBytes, trusted: a Uint8Array is the caller's contract. The
-   * align, the overflow latch and the bulk copy are exactly the checked
-   * variant's; the align padding, written before the check, is part of a
-   * latched stream's dead wire, as in every mode. offset defaults to 0 and
+   * room check (align and payload, before either is written), the align and
+   * the bulk copy are exactly the checked variant's. offset defaults to 0 and
    * length to data.length - offset; a span inside data is the caller's
    * contract.
    * @param {Uint8Array} data the bytes to write, in order.
@@ -2175,14 +2150,11 @@ class ProductionWriteStream {
    * @returns {boolean} true on success.
    */
   serializeBytes(data, offset, length) {
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     const start = offset === undefined ? 0 : offset;
     const bytes = length === undefined ? data.length - start : length;
     // U10: the room for the align AND the payload, before either is written
     if (this.#writer.alignBits() + bytes * 8 > this.#writer.bitsAvailable()) {
-      return this.#fail(SerializeError.PastEnd);
+      return this.#noRoom();
     }
     this.#writer.writeAlign();
     this.#writer.writeBytes(data, start, bytes);
@@ -2201,16 +2173,13 @@ class ProductionWriteStream {
    * @returns {boolean} true on success.
    */
   serializeString(ref, bufferSize) {
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     const utf8 = UTF8_ENCODER.encode(ref.value);
     // U10: the room for the length, the align and the payload, before any
     const writer = this.#writer;
     const lengthBits = uncheckedBitsRequired(0, (bufferSize - 1) >>> 0);
     const align = (8 - ((writer.bitsWritten() + lengthBits) % 8)) % 8;
     if (lengthBits + align + utf8.length * 8 > writer.bitsAvailable()) {
-      return this.#fail(SerializeError.PastEnd);
+      return this.#noRoom();
     }
     if (lengthBits > 0) {
       writer.writeBits(utf8.length, lengthBits);
@@ -2224,12 +2193,9 @@ class ProductionWriteStream {
    * Pads the stream with zero bits to the next byte boundary; if it is
    * already byte aligned, writes nothing. This can never pass the end of the
    * buffer: the buffer size is a multiple of 8 bytes.
-   * @returns {boolean} true on success (false only after a latched error).
+   * @returns {boolean} true, always.
    */
   serializeAlign() {
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     this.#writer.writeAlign();
     return true;
   }
@@ -2249,10 +2215,7 @@ class ProductionWriteStream {
    * @returns {boolean} true on success.
    */
   serializeObject(serialize) {
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
-    return serialize(this) === true && this.#error === SerializeError.None;
+    return serialize(this) === true;
   }
 
   /**
@@ -2318,14 +2281,19 @@ class ProductionWriteStream {
     return this.#writer.bitsAvailable();
   }
 
-  /** The first error latched on the stream, or SerializeError.None (null). */
+  /**
+   * Always SerializeError.None (null): a write stream refuses nothing and has no
+   * refusal state, so no misuse, fail, reject or failing nested object
+   * records a reason here (IMPLEMENTING.md U6, U9). Kept so a serialize
+   * function shared with the read side can read it on every stream.
+   */
   get error() {
-    return this.#error;
+    return SerializeError.None;
   }
 
-  /** True while no error is latched. */
+  /** Always true: nothing latches on a write stream (U6, U9). */
   get ok() {
-    return this.#error === SerializeError.None;
+    return true;
   }
 }
 
@@ -3333,18 +3301,15 @@ export class ReadStream {
  */
 class CheckedMeasureStream {
   #bitsWritten;
-  #error;
 
   /** Creates a measure stream. */
   constructor() {
     this.#bitsWritten = 0;
-    this.#error = SerializeError.None;
   }
 
-  /** Clears the measured bit count and any latched error. */
+  /** Clears the measured bit count. */
   reset() {
     this.#bitsWritten = 0;
-    this.#error = SerializeError.None;
   }
 
   /**
@@ -3361,9 +3326,6 @@ class CheckedMeasureStream {
   }
 
   #measure(bits) {
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     this.#bitsWritten += bits;
     return true;
   }
@@ -3398,9 +3360,8 @@ class CheckedMeasureStream {
    * Measures a ranged integer: exactly bitsRequired(min,max) bits, zero for
    * a degenerate range where min === max. min and max must be integers
    * representable in int32 with min <= max (misuse throws). Like a write,
-   * ref.value must be an integer in [min,max] or the measure latches
-   * SerializeError.ValueOutOfRange: a message that cannot be written cannot
-   * be measured either.
+   * ref.value must be an integer in [min,max] or the measure throws
+   * (U6, U9): a message that cannot be written cannot be measured either.
    * @param {{value: number}} ref holder of the integer that would be written.
    * @param {number} min the minimum value, an int32.
    * @param {number} max the maximum value, an int32, at least min.
@@ -3408,9 +3369,6 @@ class CheckedMeasureStream {
    */
   serializeInt(ref, min, max) {
     validateIntRange(min, max);
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     const value = ref.value;
     if (typeof value !== 'number') {
       throw new TypeError(VALUE_TYPE_MESSAGE);
@@ -3435,9 +3393,6 @@ class CheckedMeasureStream {
    */
   serializeInt64(ref, min, max) {
     validateInt64Range(min, max);
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     const value = ref.value;
     if (typeof value !== 'bigint') {
       throw new TypeError(BIGINT_VALUE_MESSAGE);
@@ -3462,9 +3417,6 @@ class CheckedMeasureStream {
    */
   serializeInt128(ref, min, max) {
     validateInt128Range(min, max);
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     const value = ref.value;
     if (typeof value !== 'bigint') {
       throw new TypeError(BIGINT_VALUE_MESSAGE);
@@ -3482,9 +3434,8 @@ class CheckedMeasureStream {
    * tier (int_relative never aligns, so the measure is exact, not a
    * bound). Like a write, previous must be an integer in [0,2^31-1]
    * (misuse throws, as is a non-number ref.value) and ref.value must be an
-   * integer in the same domain above previous, or the measure latches
-   * SerializeError.ValueOutOfRange: a message that cannot be written
-   * cannot be measured either.
+   * integer in the same domain above previous, or the measure throws
+   * (U6, U9): a message that cannot be written cannot be measured either.
    * @param {number} previous the previous value, an integer in [0,2^31-1].
    * @param {{value: number}} ref holder of the current value that would be
    * written.
@@ -3492,9 +3443,6 @@ class CheckedMeasureStream {
    */
   serializeIntRelative(previous, ref) {
     validatePrevious(previous);
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     const current = ref.value;
     if (typeof current !== 'number') {
       throw new TypeError(VALUE_TYPE_MESSAGE);
@@ -3543,9 +3491,6 @@ class CheckedMeasureStream {
    */
   serializeFixed(ref, integerBits, fractionBits, min, max) {
     const params = fixedPointParams(integerBits, fractionBits, min, max);
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     const value = ref.value;
     if (!params.wide) {
       if (typeof value !== 'number') {
@@ -3693,9 +3638,6 @@ class CheckedMeasureStream {
 
   #measureCompressedFloat(ref, bits, delta, min) {
     validateCompressedFloatTop(min, delta);
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     const value = ref.value;
     if (typeof value !== 'number') {
       throw new TypeError(VALUE_TYPE_MESSAGE);
@@ -3724,9 +3666,6 @@ class CheckedMeasureStream {
     const start = offset === undefined ? 0 : offset;
     const bytes = length === undefined ? data.length - start : length;
     validateSpan(data, start, bytes);
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     this.serializeAlign();
     return this.#measure(bytes * 8);
   }
@@ -3735,10 +3674,9 @@ class CheckedMeasureStream {
    * Measures a string: the length prefix (bitsRequired(0, bufferSize - 1)
    * bits), a worst case 7-bit align, and the UTF-8 payload bytes. ref.value
    * must be a string and bufferSize an integer in [1,2^31-1] (misuse
-   * throws). Like a write, a string holding U+0000 latches EmbeddedNul, one
-   * holding a lone surrogate latches InvalidUtf8, and a string of bufferSize
-   * or more UTF-8 bytes latches SerializeError.ValueOutOfRange: a message
-   * that cannot be written cannot be measured either.
+   * throws). Like a write, a string holding U+0000 or a lone surrogate, or
+   * of bufferSize or more UTF-8 bytes, throws (U6, U9): a message that
+   * cannot be written cannot be measured either.
    * @param {{value: string}} ref holder of the string that would be written.
    * @param {number} bufferSize the agreed buffer size; the payload must fit
    *   in bufferSize - 1 bytes.
@@ -3746,9 +3684,6 @@ class CheckedMeasureStream {
    */
   serializeString(ref, bufferSize) {
     validateBufferSize(bufferSize);
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
     const value = ref.value;
     if (typeof value !== 'string') {
       throw new TypeError(STRING_VALUE_MESSAGE);
@@ -3792,15 +3727,13 @@ class CheckedMeasureStream {
 
   /**
    * Measures a nested object: calls serialize(this) inline and adds no bits
-   * of its own. A latched error refuses before the callback runs.
+   * of its own. A callback that returns false makes it return false, and
+   * records nothing (U6, U9).
    * @param {(stream: CheckedMeasureStream) => boolean} serialize the object's serialize function.
    * @returns {boolean} true on success.
    */
   serializeObject(serialize) {
-    if (this.#error !== SerializeError.None) {
-      return false;
-    }
-    return serialize(this) === true && this.#error === SerializeError.None;
+    return serialize(this) === true;
   }
 
   /**
@@ -3842,14 +3775,19 @@ class CheckedMeasureStream {
     return Math.ceil(this.#bitsWritten / 8);
   }
 
-  /** The first error latched on the stream, or SerializeError.None (null). */
+  /**
+   * Always SerializeError.None (null): a measure stream refuses nothing and has no
+   * refusal state, so no misuse, fail, reject or failing nested object
+   * records a reason here (IMPLEMENTING.md U6, U9). Kept so a serialize
+   * function shared with the read side can read it on every stream.
+   */
   get error() {
-    return this.#error;
+    return SerializeError.None;
   }
 
-  /** True while no error is latched. */
+  /** Always true: nothing latches on a measure stream (U6, U9). */
   get ok() {
-    return this.#error === SerializeError.None;
+    return true;
   }
 }
 
@@ -4219,8 +4157,8 @@ class ProductionMeasureStream {
 /**
  * The write-side streams, selected once at module load (see mode.js): the
  * CHECKED variants by default, the PRODUCTION variants when NODE_ENV is
- * 'production'. The wire and the sticky PastEnd contract are identical in
- * both; the difference is caller validation. ReadStream has no variants:
+ * 'production'. The wire and the room check (a throw, U9) are identical
+ * in both; the difference is the other write-misuse checks. ReadStream has no variants:
  * the wire is a trust boundary in every mode.
  */
 export const WriteStream = PRODUCTION ? ProductionWriteStream : CheckedWriteStream;

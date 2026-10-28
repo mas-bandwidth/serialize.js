@@ -125,11 +125,11 @@ test('truncated data refused as PastEnd with NOTHING consumed', () => {
   assert.equal(ref.value, 0n);
 });
 
-test('a write past the end latches PastEnd with NOTHING written', () => {
+test('a write past the end throws (U9) and writes nothing', () => {
   const overflows = new WriteStream(new Uint8Array(16));
   overflows.serializeBits({ value: 0 }, 1);
-  assert.equal(overflows.serializeUint128({ value: 0n }), false);
-  assert.equal(overflows.error, SerializeError.PastEnd);
+  assert.throws(() => overflows.serializeUint128({ value: 0n }), RangeError);
+  assert.equal(overflows.error, SerializeError.None);
   assert.equal(overflows.bitsProcessed(), 1); // nothing written
 
   const fits = new WriteStream(new Uint8Array(16));
@@ -138,12 +138,12 @@ test('a write past the end latches PastEnd with NOTHING written', () => {
   assert.equal(fits.bitsProcessed(), 128);
 });
 
-test('a latched stream refuses the uint128 without touching refs', () => {
+test('a full write stream throws on the uint128 and latches nothing; a latched reader refuses', () => {
   const writer = new WriteStream(new Uint8Array(16));
   writer.serializeUint128({ value: 0n });
-  writer.serializeBool({ value: true }); // latches PastEnd
-  assert.equal(writer.serializeUint128({ value: 1n }), false);
-  assert.equal(writer.error, SerializeError.PastEnd);
+  assert.throws(() => writer.serializeBool({ value: true }), RangeError);
+  assert.throws(() => writer.serializeUint128({ value: 1n }), RangeError);
+  assert.equal(writer.error, SerializeError.None);
 
   const reader = new ReadStream(new Uint8Array(0));
   const ref = { value: 999n };

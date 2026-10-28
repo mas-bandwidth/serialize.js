@@ -14,7 +14,7 @@
 // - the shared conformance corpus (test/conformance.test.js): every vector
 //   in conformance/ decodes to its value and its bit count, or is refused,
 //   under this leg exactly as under the dev leg;
-// - the production spine (test/production/): overflow still latches sticky,
+// - the production spine (test/production/): a write that does not fit throws,
 //   and every dev assert is proven ABSENT -- calls that throw or latch in
 //   dev pass through, the caller-trust contract.
 //
