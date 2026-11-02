@@ -38,6 +38,7 @@ const files = [
   'test/consumer/package-consumer.test.js',
   'test/golden-wire.test.js',
   'test/measure.test.js',
+  'test/fuzz-controls.test.js',
   'test/property-sweep.test.js',
   'test/serialize-compressed-float.test.js',
   'test/serialize-fixed.test.js',
