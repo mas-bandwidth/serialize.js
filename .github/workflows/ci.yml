@@ -74,7 +74,21 @@ jobs:
         run: npx --no-install jazzer read.fuzz.js --sync --timeout=10000 -- -max_total_time=60 -print_final_stats=1
       - name: Fuzz the round trip
         run: npx --no-install jazzer roundtrip.fuzz.js --sync --timeout=10000 -- -max_total_time=60 -print_final_stats=1
-      - name: "Negative control: a planted asymmetry is caught within the smoke budget"
+      - name: "Negative control (hostile read): a planted sentinel clobber is caught within the smoke budget"
+        run: |
+          set +e
+          SERIALIZE_FUZZ_SABOTAGE=sentinel-clobber npx --no-install jazzer read.fuzz.js --sync --timeout=10000 -- -max_total_time=60 -artifact_prefix=sabotage-read- -print_final_stats=1 > sabotage-read.log 2>&1
+          status=$?
+          set -e
+          tail -n 40 sabotage-read.log
+          if [ "$status" -eq 0 ]; then
+            echo "the planted sentinel clobber was NOT caught in 60 s"
+            exit 1
+          fi
+          grep -q "fuzz check failed: bits refused but modified its destination" sabotage-read.log
+          ls sabotage-read-crash-*
+          echo "caught: the hostile-read fuzzer exited $status on the planted sentinel clobber"
+      - name: "Negative control (round trip): a planted asymmetry is caught within the smoke budget"
         run: |
           set +e
           SERIALIZE_FUZZ_SABOTAGE=int-relative-tier npx --no-install jazzer roundtrip.fuzz.js --sync --timeout=10000 -- -max_total_time=60 -artifact_prefix=sabotage- -print_final_stats=1 > sabotage.log 2>&1

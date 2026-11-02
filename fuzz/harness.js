@@ -53,6 +53,14 @@ const SABOTAGE = {
     patch: '((difference - 23) << 4), 13)',
     count: 2, // the checked and the production write streams
   },
+  // the bits reader clobbers ref.value when refusing on a failed or exhausted
+  // stream, which the hostile-read sentinel check must catch
+  'sentinel-clobber': {
+    file: 'streams.js',
+    needle: '    if (!bitsAreValid(bits)) {\n      return this.#fail(SerializeError.ValueOutOfRange);\n    }\n    if (this.#reader.wouldReadPastEnd(bits)) {\n      return this.#fail(SerializeError.PastEnd);\n    }',
+    patch: '    if (!bitsAreValid(bits)) {\n      return this.#fail(SerializeError.ValueOutOfRange);\n    }\n    if (this.#reader.wouldReadPastEnd(bits)) {\n      ref.value = 0;\n      return this.#fail(SerializeError.PastEnd);\n    }',
+    count: 1,
+  },
 };
 
 function plant(name) {
@@ -111,7 +119,9 @@ const WIDE_RAW = WIDE_BOUND << 16n;
 
 const UTF8 = new TextEncoder();
 const SCRATCH = new DataView(new ArrayBuffer(8));
-const SENTINEL = Symbol('unwritten');
+const SENTINEL_A = Symbol('unwritten-0x5a');
+const SENTINEL_B = Symbol('unwritten-0xa5');
+const DEFAULT_CONTROL = process.env.SERIALIZE_FUZZ_CONTROL ?? '';
 
 /** A failed fuzz check: thrown, so Jazzer reports it as a finding. */
 class FuzzCheckError extends Error {
@@ -210,14 +220,17 @@ export function splitInput(data) {
  * returned so two runs over the same bytes can be compared exactly.
  */
 class ReadCheck {
-  constructor(stream) {
+  constructor(stream, sentinel = SENTINEL_A, control = DEFAULT_CONTROL) {
     this.stream = stream;
+    this.sentinel = sentinel;
+    this.control = control;
     this.failed = null; // the first latched reason, once a call fails
+    this.bitsAtFailure = 0;
     this.trace = [];
   }
 
   /**
-   * Checks one serialize call. ref holds SENTINEL before the call; contract
+   * Checks one serialize call. ref holds this.sentinel before the call; contract
    * checks the value on success.
    */
   step(name, ok, ref, contract) {
@@ -225,21 +238,33 @@ class ReadCheck {
     const error = this.stream.error;
     if (this.failed !== null) {
       // a failed stream: every later call is an echo of the first refusal
+      let gotBits = this.stream.bitsProcessed();
+      if (this.control === 'terminality') {
+        gotBits += 1;
+      }
       fuzzCheck(!ok, `${name} succeeded on a stream that had already failed`);
       fuzzCheck(error === this.failed, `${name} changed the latched reason from ${this.failed} to ${error}`);
+      fuzzCheck(gotBits === this.bitsAtFailure, `${name} moved cursor from ${this.bitsAtFailure} to ${gotBits} after refusal`);
     } else if (ok) {
       fuzzCheck(error === null && this.stream.ok, `${name} succeeded with error ${error} latched`);
     } else {
       fuzzCheck(REASONS.has(error), `${name} refused with reason ${String(error)}, outside the closed list`);
       fuzzCheck(!this.stream.ok, `${name} refused but the stream reports ok`);
       this.failed = error;
+      this.bitsAtFailure = this.stream.bitsProcessed();
     }
     if (ref !== null) {
       if (ok) {
-        fuzzCheck(ref.value !== SENTINEL, `${name} succeeded without assigning its value`);
+        fuzzCheck(ref.value !== this.sentinel, `${name} succeeded without assigning its value`);
+        if (this.control === 'hostile' && name === 'int') {
+          fuzzCheck(false, `${name} read ${String(ref.value)} (hostile negative control)`);
+        }
         contract(ref.value);
       } else {
-        fuzzCheck(ref.value === SENTINEL, `${name} refused but modified its destination`);
+        if (this.control === 'sentinel') {
+          ref.value = 0;
+        }
+        fuzzCheck(ref.value === this.sentinel, `${name} refused but modified its destination`);
       }
       this.trace.push(ok ? encodeValue(ref.value) : `!${error}`);
     } else {
@@ -262,8 +287,8 @@ function encodeValue(value) {
   return `${typeof value}:${String(value)}`;
 }
 
-function ref() {
-  return { value: SENTINEL };
+function makeRef(sentinel) {
+  return { value: sentinel };
 }
 
 function isIntIn(value, min, max) {
@@ -278,8 +303,9 @@ function isBigIn(value, min, max) {
  * Runs the op program as hostile reads over a stream. Returns the trace of
  * every call's outcome. A read never throws: any exception is a finding.
  */
-export function fuzzRead(stream, ops) {
-  const check = new ReadCheck(stream);
+export function fuzzRead(stream, ops, sentinel = SENTINEL_A, control = DEFAULT_CONTROL) {
+  const check = new ReadCheck(stream, sentinel, control);
+  const ref = () => makeRef(sentinel);
   for (let i = 0; i < ops.length; i++) {
     const select = ops[i] & 15;
     const param = ops[i] >> 4;
@@ -461,13 +487,19 @@ export function fuzzRead(stream, ops) {
  * then the same bytes as a view over a larger buffer whose tail is hostile.
  * The two traces must be identical, element for element.
  */
-export function hostileRead(ops, payload) {
-  const exact = fuzzRead(new ReadStream(payload), ops);
+export function hostileRead(ops, payload, control = DEFAULT_CONTROL) {
+  const exact = fuzzRead(new ReadStream(payload), ops, SENTINEL_A, control);
+  const exactB = fuzzRead(new ReadStream(payload), ops, SENTINEL_B, control);
+
+  fuzzCheck(exact.length === exactB.length, `sentinel B traced ${exactB.length} calls, sentinel A ${exact.length}`);
+  for (let i = 0; i < exact.length; i++) {
+    fuzzCheck(exact[i] === exactB[i], `call ${i}: sentinel B read ${exactB[i]}, sentinel A ${exact[i]}`);
+  }
 
   const backing = new Uint8Array(payload.length + 16).fill(0xff);
   backing.set(payload);
   const view = backing.subarray(0, payload.length);
-  const viewed = fuzzRead(new ReadStream(view), ops);
+  const viewed = fuzzRead(new ReadStream(view), ops, SENTINEL_A, control);
 
   fuzzCheck(exact.length === viewed.length, `the view traced ${viewed.length} calls, the exact array ${exact.length}`);
   for (let i = 0; i < exact.length; i++) {
@@ -484,14 +516,17 @@ export function hostileRead(ops, payload) {
  * regenerates the exact values the write pass produced. Every serialize
  * call must succeed: the values are in range and the data is our own.
  */
-function fuzzRoundTrip(stream, ops, pool) {
+function fuzzRoundTrip(stream, ops, pool, control = DEFAULT_CONTROL) {
   const reading = stream.isReading;
 
   // one ranged value: written from expected, read back and compared
   const value = (name, expected, call, same = Object.is) => {
-    const r = { value: reading ? SENTINEL : expected };
+    const r = { value: reading ? SENTINEL_A : expected };
     fuzzCheck(call(r) === true, `${name}: serialize ${String(expected)} failed with ${stream.error}`);
     if (reading) {
+      if (control === 'roundtrip') {
+        fuzzCheck(!same(r.value, expected), `${name}: wrote ${String(expected)}, read back ${String(r.value)} (roundtrip negative control)`);
+      }
       fuzzCheck(same(r.value, expected), `${name}: wrote ${String(expected)}, read back ${String(r.value)}`);
     }
   };
@@ -662,26 +697,50 @@ const WRITE_BUFFER_SIZE = 16 * 1024;
  * The round trip target's body: write, measure, read back, end exactly,
  * and refuse one byte more as trailing data.
  */
-export function roundTrip(ops, payload) {
+export function roundTrip(ops, payload, control = DEFAULT_CONTROL) {
   const buffer = new Uint8Array(WRITE_BUFFER_SIZE);
   const write = new WriteStream(buffer);
-  fuzzRoundTrip(write, ops, new ValuePool(payload));
+  fuzzRoundTrip(write, ops, new ValuePool(payload), control);
   fuzzCheck(write.serializeEnd() === true, `write end failed with ${write.error}`);
   write.flush();
   const written = write.bytesProcessed();
 
+  // tight multiple-of-8 buffer followed by a 16-byte 0xaa canary
+  const tightBytes = Math.max(8, (written + 7) & ~7);
+  const canaryBytes = 16;
+  const tightBuffer = new Uint8Array(tightBytes + canaryBytes).fill(0xaa);
+  tightBuffer.subarray(0, tightBytes).fill(0xa5);
+  const tightWrite = new WriteStream(tightBuffer.subarray(0, tightBytes));
+  fuzzRoundTrip(tightWrite, ops, new ValuePool(payload), control);
+  fuzzCheck(tightWrite.serializeEnd() === true, `tight write end failed with ${tightWrite.error}`);
+  tightWrite.flush();
+  fuzzCheck(tightWrite.bytesProcessed() === written, `tight write produced ${tightWrite.bytesProcessed()} bytes, expected ${written}`);
+  for (let i = 0; i < written; i++) {
+    fuzzCheck(tightBuffer[i] === buffer[i], `tight byte ${i} is ${tightBuffer[i]}, expected ${buffer[i]}`);
+  }
+  if (control === 'canary') {
+    tightBuffer[tightBytes] = 0;
+  }
+  for (let i = 0; i < canaryBytes; i++) {
+    fuzzCheck(tightBuffer[tightBytes + i] === 0xaa, `canary byte ${i} corrupted: ${tightBuffer[tightBytes + i]}`);
+  }
+
   const measure = new MeasureStream();
-  fuzzRoundTrip(measure, ops, new ValuePool(payload));
+  fuzzRoundTrip(measure, ops, new ValuePool(payload), control);
   fuzzCheck(measure.bitsProcessed() >= write.bitsProcessed(), `measure ${measure.bitsProcessed()} bits under the ${write.bitsProcessed()} written`);
 
   const read = new ReadStream(buffer.subarray(0, written));
-  fuzzRoundTrip(read, ops, new ValuePool(payload));
+  fuzzRoundTrip(read, ops, new ValuePool(payload), control);
   fuzzCheck(read.bitsProcessed() === write.bitsProcessed(), `read consumed ${read.bitsProcessed()} bits, the writer wrote ${write.bitsProcessed()}`);
   fuzzCheck(read.serializeEnd() === true, `read end refused with ${read.error}`);
 
   // one byte more than the writer reported is trailing data, refused at the end
   const longer = new ReadStream(buffer.subarray(0, written + 1));
-  fuzzRoundTrip(longer, ops, new ValuePool(payload));
-  fuzzCheck(longer.serializeEnd() === false, 'one byte past the writer was accepted at the end');
+  fuzzRoundTrip(longer, ops, new ValuePool(payload), control);
+  const longerEnd = longer.serializeEnd();
+  if (control === 'trailing') {
+    fuzzCheck(longerEnd === true, 'one byte past the writer was accepted at the end');
+  }
+  fuzzCheck(longerEnd === false, 'one byte past the writer was accepted at the end');
   fuzzCheck(longer.error === 'trailing_data', `one byte past the writer refused as ${longer.error}, not trailing_data`);
 }
