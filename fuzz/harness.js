@@ -73,7 +73,7 @@ function plant(name) {
   mkdirSync(root, { recursive: true });
   cpSync(join(HERE, '..', 'src'), root, { recursive: true });
   const path = join(root, sabotage.file);
-  const source = readFileSync(path, 'utf8');
+  const source = readFileSync(path, 'utf8').replaceAll('\r\n', '\n');
   const found = source.split(sabotage.needle).length - 1;
   if (found !== sabotage.count) {
     throw new Error(`sabotage '${name}': needle matched ${found} times, expected ${sabotage.count}`);
