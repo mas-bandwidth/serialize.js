@@ -257,7 +257,7 @@ class ReadCheck {
       if (ok) {
         fuzzCheck(ref.value !== this.sentinel, `${name} succeeded without assigning its value`);
         if (this.control === 'hostile' && name === 'int') {
-          fuzzCheck(false, `${name} read ${String(ref.value)} (hostile negative control)`);
+          ref.value = 1000000;
         }
         contract(ref.value);
       } else {
@@ -266,9 +266,9 @@ class ReadCheck {
         }
         fuzzCheck(ref.value === this.sentinel, `${name} refused but modified its destination`);
       }
-      this.trace.push(ok ? encodeValue(ref.value) : `!${error}`);
+      this.trace.push(ok ? encodeValue(ref.value) : `!${name}:${error}`);
     } else {
-      this.trace.push(ok ? 'ok' : `!${error}`);
+      this.trace.push(ok ? `${name}:ok` : `!${name}:${error}`);
     }
     return ok;
   }
@@ -525,7 +525,7 @@ function fuzzRoundTrip(stream, ops, pool, control = DEFAULT_CONTROL) {
     fuzzCheck(call(r) === true, `${name}: serialize ${String(expected)} failed with ${stream.error}`);
     if (reading) {
       if (control === 'roundtrip') {
-        fuzzCheck(!same(r.value, expected), `${name}: wrote ${String(expected)}, read back ${String(r.value)} (roundtrip negative control)`);
+        r.value = typeof r.value === 'boolean' ? !r.value : Symbol('corrupted');
       }
       fuzzCheck(same(r.value, expected), `${name}: wrote ${String(expected)}, read back ${String(r.value)}`);
     }
@@ -737,9 +737,9 @@ export function roundTrip(ops, payload, control = DEFAULT_CONTROL) {
   // one byte more than the writer reported is trailing data, refused at the end
   const longer = new ReadStream(buffer.subarray(0, written + 1));
   fuzzRoundTrip(longer, ops, new ValuePool(payload), control);
-  const longerEnd = longer.serializeEnd();
+  let longerEnd = longer.serializeEnd();
   if (control === 'trailing') {
-    fuzzCheck(longerEnd === true, 'one byte past the writer was accepted at the end');
+    longerEnd = true;
   }
   fuzzCheck(longerEnd === false, 'one byte past the writer was accepted at the end');
   fuzzCheck(longer.error === 'trailing_data', `one byte past the writer refused as ${longer.error}, not trailing_data`);
