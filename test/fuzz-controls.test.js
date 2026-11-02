@@ -26,6 +26,11 @@ function makeInputs(count) {
   };
 
   const inputs = [];
+  const tierSeed = new Uint8Array(NUM_OPS + 8);
+  tierSeed[0] = 13;
+  tierSeed[NUM_OPS + 3] = 50;
+  inputs.push(splitInput(tierSeed));
+
   for (let n = 0; n < count; n++) {
     const payloadLen = 1 + (nextByte() % 96);
     const buf = new Uint8Array(NUM_OPS + payloadLen);
@@ -92,6 +97,14 @@ test('fuzz negative controls: roundTrip traps on roundtrip, canary, and trailing
 test('fuzz SABOTAGE controls: sentinel-clobber and int-relative-tier trap on replay', () => {
   const script = `
     import { NUM_OPS, splitInput, hostileRead, roundTrip } from ${JSON.stringify(HARNESS_PATH)};
+    const tierSeed = new Uint8Array(NUM_OPS + 8);
+    tierSeed[0] = 13;
+    tierSeed[NUM_OPS + 3] = 50;
+    {
+      const { ops, payload } = splitInput(tierSeed);
+      hostileRead(ops, payload);
+      roundTrip(ops, payload);
+    }
     let state = 0x9e3779b9;
     const nextByte = () => {
       state = (state ^ (state << 13)) >>> 0;
