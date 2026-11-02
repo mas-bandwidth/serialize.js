@@ -9,12 +9,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { NUM_OPS, splitInput, hostileRead, roundTrip } from '../fuzz/harness.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const HARNESS_PATH = join(HERE, '..', 'fuzz', 'harness.js');
+const HARNESS_URL = pathToFileURL(join(HERE, '..', 'fuzz', 'harness.js')).href;
 
 function makeInputs(count) {
   let state = 0x9e3779b9;
@@ -96,7 +96,7 @@ test('fuzz negative controls: roundTrip traps on roundtrip, canary, and trailing
 
 test('fuzz SABOTAGE controls: sentinel-clobber and int-relative-tier trap on replay', () => {
   const script = `
-    import { NUM_OPS, splitInput, hostileRead, roundTrip } from ${JSON.stringify(HARNESS_PATH)};
+    import { NUM_OPS, splitInput, hostileRead, roundTrip } from ${JSON.stringify(HARNESS_URL)};
     const tierSeed = new Uint8Array(NUM_OPS + 8);
     tierSeed[0] = 13;
     tierSeed[NUM_OPS + 3] = 50;
