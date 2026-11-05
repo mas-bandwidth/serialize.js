@@ -262,6 +262,18 @@ function encodeValue(value) {
   return `${typeof value}:${String(value)}`;
 }
 
+/** A BigInt, a Symbol or an object that cannot be coerced, chosen by n. */
+function hostileDeclaration(n) {
+  switch (n % 3) {
+    case 0:
+      return 5n;
+    case 1:
+      return Symbol('declaration');
+    default:
+      return Object.create(null);
+  }
+}
+
 function ref() {
   return { value: SENTINEL };
 }
@@ -423,6 +435,24 @@ export function fuzzRead(stream, ops) {
 
       case 12: {
         check.step('align', stream.serializeAlign(), null, null);
+        // a declaration that is not a Number: refused, never thrown
+        const bad = hostileDeclaration(param);
+        const r = ref();
+        const sites = [
+          () => stream.serializeBits(r, bad),
+          () => stream.serializeBits64(r, bad),
+          () => stream.serializeInt(r, bad, 10),
+          () => stream.serializeInt(r, 0, bad),
+          () => stream.serializeFixed(r, bad, 8, -10, 10),
+          () => stream.serializeFixed(r, 8, bad, -10, 10),
+          () => stream.serializeBytes(new Uint8Array(1), bad),
+        ];
+        const refused = sites[param % sites.length]();
+        fuzzCheck(refused === false, 'a declaration that is not a Number was accepted');
+        fuzzCheck(r.value === SENTINEL, 'a declaration that is not a Number modified its destination');
+        fuzzCheck(!stream.ok, 'a declaration that is not a Number left the stream ok');
+        check.failed = check.failed ?? stream.error;
+        check.trace.push(`!${stream.error}`);
         break;
       }
 
