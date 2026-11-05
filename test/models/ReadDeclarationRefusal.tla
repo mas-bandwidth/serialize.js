@@ -42,7 +42,10 @@ PastEnd ==
   /\ err' = "past_end" /\ calls' = calls + 1
   /\ UNCHANGED <<cursor, assigned, threw>>
 
-Next == (\E k \in Kinds : Call(k)) \/ PastEnd
+\* the call budget is spent: the model rests
+Done == calls = MaxCalls /\ UNCHANGED <<err, cursor, assigned, threw, calls>>
+
+Next == (\E k \in Kinds : Call(k)) \/ PastEnd \/ Done
 
 Spec == Init /\ [][Next]_<<err, cursor, assigned, threw, calls>>
 
