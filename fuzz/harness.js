@@ -266,6 +266,18 @@ function ref() {
   return { value: SENTINEL };
 }
 
+/** A BigInt, a Symbol or an object that cannot be coerced, chosen by n. */
+function hostileDeclaration(n) {
+  switch (n % 3) {
+    case 0:
+      return 5n;
+    case 1:
+      return Symbol('declaration');
+    default:
+      return Object.create(null);
+  }
+}
+
 function isIntIn(value, min, max) {
   return Number.isInteger(value) && value >= min && value <= max;
 }
@@ -423,6 +435,29 @@ export function fuzzRead(stream, ops) {
 
       case 12: {
         check.step('align', stream.serializeAlign(), null, null);
+        // one declaration site, not a Number: refused, never thrown
+        const bad = hostileDeclaration(param);
+        const which = param % 7;
+        const sites = [
+          (r) => stream.serializeBits(r, bad),
+          (r) => stream.serializeBits64(r, bad),
+          (r) => stream.serializeInt(r, bad, 10),
+          (r) => stream.serializeInt(r, 0, bad),
+          (r) => stream.serializeFixed(r, bad, 8, -10, 10),
+          (r) => stream.serializeFixed(r, 8, bad, -10, 10),
+          null,
+        ];
+        if (sites[which] === null) {
+          const ok = stream.serializeBytes(new Uint8Array(1), bad);
+          check.step('foreign bytes offset', ok, null, null);
+          fuzzCheck(ok === false, 'a declaration that is not a Number was accepted');
+        } else {
+          const r = ref();
+          const ok = sites[which](r);
+          check.step('foreign declaration', ok, r, () => {
+            fuzzCheck(false, 'a declaration that is not a Number was accepted');
+          });
+        }
         break;
       }
 
