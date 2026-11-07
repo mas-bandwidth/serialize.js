@@ -538,3 +538,14 @@ test('foreign declaration: an earlier past_end reason is preserved', () => {
     }
   }
 });
+
+// int32 read times for the declaration check. Full int32 domain, 1024
+// values, 8000 passes, 8192000 reads a run. Eight pairs, the parent tree
+// and this tree, alternating, one process a run. Odd pairs ran before
+// then after; even pairs ran after then before. Bounds were loaded on
+// each call. Before ms: 417.553, 333.274, 306.159, 335.427, 347.179,
+// 354.395, 322.423, 367.508 (mean 347.990, min 306.159, max 417.553,
+// spread 111.394). After ms: 340.707, 359.566, 326.961, 328.534,
+// 355.208, 356.065, 345.862, 341.576 (mean 344.310, min 326.961,
+// max 359.566, spread 32.605). Shift after minus before -3.680 ms.
+// The ranges overlap, and the shift sits inside the spread.
