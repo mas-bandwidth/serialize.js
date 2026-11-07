@@ -471,3 +471,70 @@ test('audit overlap: the bitpacker copies an overlapping span exactly too', () =
   reader.readBytesInto(data, 6, 20);
   assert.deepEqual(Array.from(data.subarray(6, 26)), want);
 });
+
+// A declaration argument that is not a native integer Number -- a BigInt, a
+// Symbol, or an object that cannot be coerced -- is refused as
+// value_out_of_range before any arithmetic. The same argument on a stream
+// that has already failed leaves the first reason in place. Nothing is
+// assigned and the cursor does not move.
+const FOREIGN_DECLARATIONS = {
+  bigint: () => 5n,
+  symbol: () => Symbol('declaration'),
+  'non-coercible object': () => Object.create(null),
+};
+
+const FOREIGN_SITES = {
+  'serializeBits bits': (stream, ref, buf, bad) => stream.serializeBits(ref, bad),
+  'serializeBits64 bits': (stream, ref, buf, bad) => stream.serializeBits64(ref, bad),
+  'serializeInt min': (stream, ref, buf, bad) => stream.serializeInt(ref, bad, 10),
+  'serializeInt max': (stream, ref, buf, bad) => stream.serializeInt(ref, 0, bad),
+  'serializeFixed integerBits': (stream, ref, buf, bad) => stream.serializeFixed(ref, bad, 8, -10, 10),
+  'serializeFixed fractionBits': (stream, ref, buf, bad) => stream.serializeFixed(ref, 8, bad, -10, 10),
+  'serializeBytes offset': (stream, ref, buf, bad) => stream.serializeBytes(buf, bad),
+};
+
+test('foreign declaration: a BigInt, a Symbol or a non-coercible object refuses value_out_of_range', () => {
+  const data = new Uint8Array(8).fill(0xff);
+  for (const [site, call] of Object.entries(FOREIGN_SITES)) {
+    for (const [kind, make] of Object.entries(FOREIGN_DECLARATIONS)) {
+      const stream = new ReadStream(data);
+      const ref = { value: 'untouched' };
+      const buf = Uint8Array.of(1, 2);
+      const before = Array.from(buf);
+      const name = `${site} / ${kind}`;
+      let result;
+      assert.doesNotThrow(() => {
+        result = call(stream, ref, buf, make());
+      }, name);
+      assert.equal(result, false, name);
+      assert.equal(stream.error, VOOR, name);
+      assert.equal(stream.bitsProcessed(), 0, name);
+      assert.equal(ref.value, 'untouched', name);
+      assert.deepEqual(Array.from(buf), before, name);
+    }
+  }
+});
+
+test('foreign declaration: an earlier past_end reason is preserved', () => {
+  for (const [site, call] of Object.entries(FOREIGN_SITES)) {
+    for (const [kind, make] of Object.entries(FOREIGN_DECLARATIONS)) {
+      const stream = new ReadStream(new Uint8Array(1));
+      assert.equal(stream.serializeBits({ value: 0 }, 16), false);
+      assert.equal(stream.error, SerializeError.PastEnd);
+      const cursor = stream.bitsProcessed();
+      const ref = { value: 'untouched' };
+      const buf = Uint8Array.of(1, 2);
+      const before = Array.from(buf);
+      const name = `${site} / ${kind}`;
+      let result;
+      assert.doesNotThrow(() => {
+        result = call(stream, ref, buf, make());
+      }, name);
+      assert.equal(result, false, name);
+      assert.equal(stream.error, SerializeError.PastEnd, name);
+      assert.equal(stream.bitsProcessed(), cursor, name);
+      assert.equal(ref.value, 'untouched', name);
+      assert.deepEqual(Array.from(buf), before, name);
+    }
+  }
+});
