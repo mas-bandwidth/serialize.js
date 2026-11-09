@@ -39,6 +39,7 @@ const WRITE_UNALIGNED_MESSAGE = 'writeBytes requires a byte-aligned bit index';
 const READ_UNALIGNED_MESSAGE = 'readBytes requires a byte-aligned bit index';
 const VALUE_WIDTH_MESSAGE = 'value must be an unsigned integer that fits its bit count';
 const SPAN_MESSAGE = 'offset and length must be non-negative integers with offset + length at most data.length';
+const WRITE_AFTER_FLUSH_MESSAGE = 'write after flushBits of a partial word';
 
 /**
  * Validates the caller contract of a byte span: offset and length must be
@@ -172,6 +173,9 @@ class CheckedBitWriter {
     if ((value >>> 0) !== value || value > (bits === 32 ? 0xffffffff : ((1 << bits) >>> 0) - 1)) {
       throw new RangeError(VALUE_WIDTH_MESSAGE);
     }
+    if (this.#scratchBits !== this.#bitsWritten % 32) {
+      throw new Error(WRITE_AFTER_FLUSH_MESSAGE);
+    }
     if (this.#bitsWritten + bits > this.#numBits) {
       throw new RangeError(WRITE_OVERFLOW_MESSAGE);
     }
@@ -228,6 +232,9 @@ class CheckedBitWriter {
     // misuse, caught here on the caller's value; masking is not checking
     if ((value >>> 0) !== value || value > (bits === 32 ? 0xffffffff : ((1 << bits) >>> 0) - 1)) {
       throw new RangeError(VALUE_WIDTH_MESSAGE);
+    }
+    if (this.#scratchBits !== this.#bitsWritten % 32) {
+      throw new Error(WRITE_AFTER_FLUSH_MESSAGE);
     }
     if (this.#bitsWritten + bits > this.#numBits) {
       return false;
@@ -303,6 +310,9 @@ class CheckedBitWriter {
     let start = offset === undefined ? 0 : offset;
     const bytes = length === undefined ? data.length - start : length;
     validateSpan(data, start, bytes);
+    if (this.#scratchBits !== this.#bitsWritten % 32) {
+      throw new Error(WRITE_AFTER_FLUSH_MESSAGE);
+    }
     if (this.#bitsWritten % 8 !== 0) {
       throw new RangeError(WRITE_UNALIGNED_MESSAGE);
     }
