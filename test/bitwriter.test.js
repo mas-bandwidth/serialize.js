@@ -4,8 +4,58 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { Buffer } from 'node:buffer';
 
-import { BitWriter } from '../src/index.js';
+import { BitWriter, BitReader } from '../src/index.js';
+
+test('offset views preserve canaries for every wire length 1..128', () => {
+  for (let bytes = 1; bytes <= 128; bytes++) {
+    // Writer capacity is a multiple of eight; the wire may have any length.
+    const capacity = Math.ceil(bytes / 8) * 8;
+    const backing = new Uint8Array(24 + capacity + 24);
+    backing.fill(0xaa, 0, 24);
+    backing.fill(0x55, 24 + capacity);
+    const view = new Uint8Array(backing.buffer, 24, capacity);
+    if (bytes % 8 !== 0) {
+      assert.throws(() => new BitWriter(new Uint8Array(backing.buffer, 24, bytes)), RangeError);
+    }
+    const expected = Uint8Array.from({ length: bytes }, (_, i) => (i * 73 + bytes) & 0xff);
+    const writer = new BitWriter(view);
+    for (const value of expected) {
+      writer.writeBits(value & 7, 3);
+      writer.writeBits(value >>> 3, 5);
+    }
+    writer.flushBits();
+    assert.equal(writer.bitsWritten(), bytes * 8);
+    assert.deepEqual(writer.data(), expected, `wire length ${bytes}`);
+    const reader = new BitReader(writer.data());
+    for (const value of expected) {
+      assert.equal(reader.readBits(3), value & 7);
+      assert.equal(reader.readBits(5), value >>> 3);
+    }
+    assert.equal(reader.bitsRemaining(), 0);
+    assert.deepEqual(backing.subarray(0, 24), new Uint8Array(24).fill(0xaa));
+    assert.deepEqual(backing.subarray(24 + capacity), new Uint8Array(24).fill(0x55));
+  }
+});
+
+test('Buffer subarrays write and round-trip within their own bounds', () => {
+  for (const backing of [Buffer.alloc(96), Buffer.allocUnsafe(96)]) {
+    backing.fill(0xaa, 0, 13);
+    backing.fill(0x55, 85);
+    const view = backing.subarray(13, 85);
+    const writer = new BitWriter(view);
+    const expected = Uint8Array.from({ length: 72 }, (_, i) => (i * 37 + 19) & 0xff);
+    for (const value of expected) writer.writeBits(value, 8);
+    writer.flushBits();
+    assert.deepEqual(Array.from(writer.data()), Array.from(expected));
+    const reader = new BitReader(view);
+    for (const value of expected) assert.equal(reader.readBits(8), value);
+    assert.equal(reader.bitsRemaining(), 0);
+    assert.deepEqual(Array.from(backing.subarray(0, 13)), Array(13).fill(0xaa));
+    assert.deepEqual(Array.from(backing.subarray(85)), Array(11).fill(0x55));
+  }
+});
 
 test('known sequence A: 1+7+8 bits inside one byte pair', () => {
   // writeBits(1,1); writeBits(42,7); writeBits(0xFF,8)
