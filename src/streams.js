@@ -2496,7 +2496,7 @@ export class ReadStream {
     }
     const bits = bitsRequired(min >>> 0, max >>> 0);
     if (bits === 0) {
-      ref.value = min; // degenerate range: the value IS the range
+      ref.value = min | 0; // degenerate range: the value IS the range
       return true;
     }
     if (this.#reader.wouldReadPastEnd(bits)) {
@@ -2756,7 +2756,7 @@ export class ReadStream {
     }
     if (!params.wide) {
       if (params.bits === 0) {
-        ref.value = params.rawMin; // degenerate range: the value IS the range
+        ref.value = params.rawMin + 0; // degenerate range: the value IS the range
         return true;
       }
       if (this.#reader.wouldReadPastEnd(params.bits)) {
