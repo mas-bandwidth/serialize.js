@@ -104,7 +104,7 @@ const CONTROLS = [
         '    }',
         '    if (!params.wide) {',
         '      if (params.bits === 0) {',
-        '        ref.value = params.rawMin;',
+        '        ref.value = params.rawMin + 0;',
       ].join('\n'),
       patch: [
         '    const params = deriveFixedPointParams(integerBits, fractionBits, min, max);',
@@ -116,7 +116,7 @@ const CONTROLS = [
         '    }',
         '    if (!params.wide) {',
         '      if (params.bits === 0) {',
-        '        ref.value = params.rawMin;',
+        '        ref.value = params.rawMin + 0;',
       ].join('\n'),
     }],
   },
