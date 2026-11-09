@@ -25,9 +25,9 @@ test('U1: a write buffer is a multiple of 8 bytes, never 4', () => {
   }
 });
 
-// Audit M (js), U8: a value wider than its field was masked and sent; the
-// reader handed back a different value with no error anywhere
-// (audit-repro/bits-overwide.mjs).
+// U8: a value wider than its field must not be masked and sent, or the
+// reader hands back a different value with no error anywhere. Each call
+// below is such a value.
 const OVERWIDE = [
   ['serializeBits(256, 8)', (s) => s.serializeBits({ value: 256 }, 8)],
   ['serializeBits(-1, 4)', (s) => s.serializeBits({ value: -1 }, 4)],

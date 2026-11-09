@@ -35,9 +35,9 @@ test('known sequence B: two full words then one bit into the next word', () => {
   //
   // Derivation. The first 32-bit group occupies bits 0..31, stored little
   // endian: bytes 0..3 = EF BE AD DE. The second occupies bits 32..63:
-  // bytes 4..7 = 78 56 34 12. That fills the 64-bit scratch exactly (the
-  // qword flushes with zero spill). The final 1 bit lands at bit 64:
-  // byte 8 = 01. 65 bits -> 9 bytes on the wire.
+  // bytes 4..7 = 78 56 34 12. Each write fills the 32-bit staging word
+  // exactly, so each word stores with zero spill. The final 1 bit lands at
+  // bit 64: byte 8 = 01. 65 bits -> 9 bytes on the wire.
   const buffer = new Uint8Array(16);
   const writer = new BitWriter(buffer);
   writer.writeBits(0xdeadbeef, 32);
@@ -52,7 +52,7 @@ test('known sequence B: two full words then one bit into the next word', () => {
   );
 });
 
-test('known sequence C: a value straddling the 64-bit scratch boundary', () => {
+test('known sequence C: a value straddling a 32-bit word boundary at bit 64', () => {
   // writeBits(0,32); writeBits(0,30); writeBits(0b101,3)
   //
   // Derivation. 62 zero bits, then value 5 = 101b at bits 62..64 LSB-first:
@@ -60,9 +60,9 @@ test('known sequence C: a value straddling the 64-bit scratch boundary', () => {
   // Byte 7 holds bits 56..63: only bit 62 is set -> 0x40.
   // Byte 8 holds bit 64 in its bit 0 -> 0x01.
   // 65 bits -> 9 bytes: 00 00 00 00 00 00 00 40 01
-  // This exercises the spill: the write crosses 64 bits mid-value, so the
-  // low two bits of the value complete the first qword and the third bit
-  // carries into the next scratch.
+  // This exercises the spill: the write crosses bit 64 mid-value, so the
+  // low two bits of the value complete the second 32-bit word and the third
+  // bit carries into the next staging word.
   const buffer = new Uint8Array(16);
   const writer = new BitWriter(buffer);
   writer.writeBits(0, 32);
@@ -140,7 +140,7 @@ test('flush is a no-op at an exact word boundary and when empty', () => {
   assert.equal(writer.bytesWritten(), 0);
   assert.equal(writer.data().length, 0);
   writer.writeBits(0x11223344, 32);
-  writer.writeBits(0x55667788, 32); // fills the qword: flushed by the write
+  writer.writeBits(0x55667788, 32); // fills the second word: stored by the write
   writer.flushBits(); // scratch is empty: must not store another word
   assert.equal(writer.bytesWritten(), 8);
   assert.deepEqual(
