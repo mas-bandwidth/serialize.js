@@ -321,7 +321,7 @@ class CheckedBitWriter {
     }
     if (data.buffer === this.#data.buffer) {
       // the source shares memory with the destination: copy it out first,
-      // so the copy is exact whatever the overlap (audit L, js)
+      // so the copy is exact whatever the overlap
       data = Uint8Array.prototype.slice.call(data, start, start + bytes);
       start = 0;
     }
@@ -628,7 +628,7 @@ class ProductionBitWriter {
     const bytes = length === undefined ? data.length - start : length;
     if (data.buffer === this.#data.buffer) {
       // the source shares memory with the destination: copy it out first,
-      // so the copy is exact whatever the overlap (audit L, js)
+      // so the copy is exact whatever the overlap
       data = Uint8Array.prototype.slice.call(data, start, start + bytes);
       start = 0;
     }
@@ -780,7 +780,7 @@ export const BitWriter = PRODUCTION ? ProductionBitWriter : CheckedBitWriter;
  * window load, and nothing past the data is ever loaded. A capacity-reading
  * variant, which would offer the 8-byte slack contract the way the Go port
  * reads cap(), is possible and not yet measured against this one (ROADMAP,
- * issue #22: the timing runs belong on amd-3).
+ * issue #22: the timing runs belong on a dedicated, otherwise idle machine).
  *
  * The wire is a trust boundary. The refusal surface -- wouldReadPastEnd(),
  * tryReadBits(), readAlign() -- never throws on hostile data: past-end reads
@@ -1043,8 +1043,8 @@ export class BitReader {
         dest[start + i] = data[byteIndex + i];
       }
     } else {
-      // set copies as if through a temporary when the two share memory
-      // (audit L, js): the byte loop smeared an overlapping source
+      // set copies as if through a temporary when the two share memory:
+      // a byte loop would smear an overlapping source
       dest.set(data.subarray(byteIndex, byteIndex + bytes), start);
     }
     this.#bitsRead += bytes * 8;
