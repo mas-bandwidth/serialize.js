@@ -9,6 +9,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { Buffer } from 'node:buffer';
 
 import {
   BitReader,
@@ -446,6 +447,38 @@ for (const n of [1, 4, 16, 63, 64, 65, 66, 68, 128]) {
     const dest = data.subarray(12, 12 + n);
     assert.equal(reader.serializeBytes(dest), true);
     assert.deepEqual(Array.from(dest), expected);
+  });
+}
+
+// Audit L (js): the same overlap guarantee holds when the source is a Node
+// Buffer, both as the destination's own storage and as a view of it.
+for (const n of [12, 64, 65, 80]) {
+  test(`audit overlap: a write from a Buffer into its own backing buffer copies exactly (${n} bytes)`, () => {
+    const buffer = Buffer.alloc(256);
+    for (let i = 0; i < 256; i++) {
+      buffer[i] = i;
+    }
+    const expected = Array.from(buffer.subarray(0, n));
+    const writer = new WriteStream(buffer);
+    writer.serializeUint8({ value: 0xee });
+    assert.equal(writer.serializeBytes(buffer.subarray(0, n)), true);
+    writer.flush();
+    assert.deepEqual(Array.from(writer.data().subarray(1, 1 + n)), expected);
+  });
+
+  test(`audit overlap: a write from a Buffer view of the writer's ArrayBuffer copies exactly (${n} bytes)`, () => {
+    const backing = new ArrayBuffer(256);
+    const buffer = new Uint8Array(backing);
+    for (let i = 0; i < 256; i++) {
+      buffer[i] = i;
+    }
+    const source = Buffer.from(backing);
+    const expected = Array.from(buffer.subarray(0, n));
+    const writer = new WriteStream(buffer);
+    writer.serializeUint8({ value: 0xee });
+    assert.equal(writer.serializeBytes(source.subarray(0, n)), true);
+    writer.flush();
+    assert.deepEqual(Array.from(writer.data().subarray(1, 1 + n)), expected);
   });
 }
 
