@@ -182,6 +182,8 @@ function getterHolderReport({ WriteStream, MeasureStream }) {
     ['serializeUint32', 9, (stream, ref) => stream.serializeUint32(ref)],
     ['serializeFixed', 9, (stream, ref) => stream.serializeFixed(ref, 8, 0, 0, 100)],
     ['serializeFixed wide', 9n, (stream, ref) => stream.serializeFixed(ref, 32, 32, 0n, 100n)],
+    ['serializeFloat', 1.5, (stream, ref) => stream.serializeFloat(ref)],
+    ['serializeDouble', 1.5, (stream, ref) => stream.serializeDouble(ref)],
   ];
   const reads = operations.map(([name, value, operation]) => {
     const writeRef = counting(value);
