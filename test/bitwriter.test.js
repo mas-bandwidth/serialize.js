@@ -214,3 +214,30 @@ test('writer checks: overflow refused, boundary accepted', () => {
   assert.throws(() => writer.writeBits(0, 1), RangeError);
   assert.equal(writer.bitsWritten(), 64); // the failed write landed nothing
 });
+
+test('writer checks: write after flushBits', () => {
+  {
+    const writer = new BitWriter(new Uint8Array(8));
+    writer.writeBits(0xab, 8);
+    writer.flushBits();
+    assert.throws(() => writer.writeBits(0xcd, 8), Error);
+    assert.equal(writer.bitsWritten(), 8);
+    assert.deepEqual(Array.from(writer.data()), [0xab]);
+  }
+  {
+    const writer = new BitWriter(new Uint8Array(8));
+    writer.writeBits(0xab, 8);
+    writer.flushBits();
+    assert.throws(() => writer.tryWriteBits(0xcd, 8), Error);
+    assert.equal(writer.bitsWritten(), 8);
+    assert.deepEqual(Array.from(writer.data()), [0xab]);
+  }
+  {
+    const writer = new BitWriter(new Uint8Array(8));
+    writer.writeBits(0xab, 8);
+    writer.flushBits();
+    assert.throws(() => writer.writeBytes(new Uint8Array([0xcd])), Error);
+    assert.equal(writer.bitsWritten(), 8);
+    assert.deepEqual(Array.from(writer.data()), [0xab]);
+  }
+});

@@ -186,3 +186,22 @@ test('U9, U15: copyString with destSize below 1, or a source holding a lone surr
   // reversed witness: a surrogate pair is one well-formed character
   assert.equal(copyString('a😀', 8), 'a\u{1F600}');
 });
+
+test('WriteStream checks: serialize after flush', () => {
+  {
+    const stream = new WriteStream(new Uint8Array(8));
+    assert.equal(stream.serializeUint8({ value: 0xab }), true);
+    stream.flush();
+    assert.throws(() => stream.serializeUint8({ value: 0xcd }), Error);
+    assert.equal(stream.bytesProcessed(), 1);
+    assert.deepEqual(Array.from(stream.data()), [0xab]);
+  }
+  {
+    const stream = new WriteStream(new Uint8Array(8));
+    assert.equal(stream.serializeUint8({ value: 0xab }), true);
+    stream.flush();
+    assert.throws(() => stream.serializeBytes(new Uint8Array([0xcd])), Error);
+    assert.equal(stream.bytesProcessed(), 1);
+    assert.deepEqual(Array.from(stream.data()), [0xab]);
+  }
+});
