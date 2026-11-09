@@ -5,6 +5,7 @@
 // function, measure it, pin the wire bytes -- plus the flags, reset reuse,
 // and the shared caller contract.
 
+import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -157,3 +158,85 @@ test('an invalid bits count is caller misuse: it throws on write and measure, an
     assert.equal(stream.bitsProcessed(), 0);
   }
 });
+
+// A ref may be any object with a value property, a getter included. Each
+// write and measure reads ref.value exactly once, so the value it checks is
+// the value it encodes, and a getter that runs another serializeFixed cannot
+// change the outer call's declaration. Self-contained: it runs in a child
+// process under each mode, because the mode is fixed at module load.
+function getterHolderReport({ WriteStream, MeasureStream }) {
+  const counting = (value) => {
+    const holder = { reads: 0 };
+    Object.defineProperty(holder, 'value', {
+      get() {
+        holder.reads += 1;
+        return value;
+      },
+    });
+    return holder;
+  };
+  const operations = [
+    ['serializeBits', 9, (stream, ref) => stream.serializeBits(ref, 8)],
+    ['serializeUint8', 9, (stream, ref) => stream.serializeUint8(ref)],
+    ['serializeUint16', 9, (stream, ref) => stream.serializeUint16(ref)],
+    ['serializeUint32', 9, (stream, ref) => stream.serializeUint32(ref)],
+    ['serializeFixed', 9, (stream, ref) => stream.serializeFixed(ref, 8, 0, 0, 100)],
+    ['serializeFixed wide', 9n, (stream, ref) => stream.serializeFixed(ref, 32, 32, 0n, 100n)],
+    ['serializeFloat', 1.5, (stream, ref) => stream.serializeFloat(ref)],
+    ['serializeDouble', 1.5, (stream, ref) => stream.serializeDouble(ref)],
+  ];
+  const reads = operations.map(([name, value, operation]) => {
+    const writeRef = counting(value);
+    operation(new WriteStream(new Uint8Array(16)), writeRef);
+    const measureRef = counting(value);
+    operation(new MeasureStream(), measureRef);
+    return { name, write: writeRef.reads, measure: measureRef.reads };
+  });
+
+  // the getter runs a serializeFixed with another declaration before it
+  // answers: the outer call must still use its own
+  const reentrant = {
+    get value() {
+      new WriteStream(new Uint8Array(8)).serializeFixed({ value: 0 }, 16, 0, -1000, 1000);
+      new MeasureStream().serializeFixed({ value: 0 }, 16, 0, -1000, 1000);
+      return 42;
+    },
+  };
+  const fixed = (ref) => {
+    const writer = new WriteStream(new Uint8Array(8));
+    writer.serializeFixed(ref, 8, 0, 0, 100);
+    writer.flush();
+    const measure = new MeasureStream();
+    measure.serializeFixed(ref, 8, 0, 0, 100);
+    return { bytes: Array.from(writer.data()), bits: writer.bitsProcessed(), measured: measure.bitsProcessed() };
+  };
+  return { reads, reentrant: fixed(reentrant), plain: fixed({ value: 42 }) };
+}
+
+function getterHolderReportUnder(nodeEnv) {
+  const index = new URL('../src/index.js', import.meta.url).href;
+  const script = `import * as api from ${JSON.stringify(index)};\n` +
+    `process.stdout.write(JSON.stringify((${getterHolderReport.toString()})(api)));\n`;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    encoding: 'utf8',
+    env: { ...process.env, NODE_ENV: nodeEnv },
+  });
+  assert.equal(result.status, 0, `NODE_ENV=${nodeEnv} child exited with ${result.status}: ${result.stderr}`);
+  return JSON.parse(result.stdout);
+}
+
+for (const nodeEnv of ['development', 'production']) {
+  test(`a getter on ref.value is read once per write and measure, and cannot clobber serializeFixed (NODE_ENV=${nodeEnv})`, () => {
+    const report = getterHolderReportUnder(nodeEnv);
+    for (const { name, write, measure } of report.reads) {
+      assert.equal(write, 1, `${name}: write reads ref.value ${write} times`);
+      // a production measure trusts the value and may not read it at all
+      if (nodeEnv === 'production') {
+        assert.ok(measure <= 1, `${name}: measure reads ref.value ${measure} times`);
+      } else {
+        assert.equal(measure, 1, `${name}: measure reads ref.value ${measure} times`);
+      }
+    }
+    assert.deepEqual(report.reentrant, report.plain);
+  });
+}
