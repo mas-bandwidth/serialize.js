@@ -139,7 +139,7 @@ there is no past-end allocation requirement on the caller's buffer. This is
 the zero-slack option, which IMPLEMENTING.md ("The buffer contract") calls
 the slower correct option: it costs a copy or window assembly at reset and a
 compare per window load. The 8-byte slack contract has not been measured
-against it on amd-3, so the choice does not yet stand on cost (ROADMAP,
+against it on a dedicated, otherwise idle machine, so the choice does not yet stand on cost (ROADMAP,
 issue #22). Document the contract the reader actually has wherever the read
 API is described.
 
@@ -148,8 +148,6 @@ API is described.
 - **Clip in often.** Commit AND push at every green sub-step — after each
   passing test group, never only at chunk end. Small commits, present-tense
   subjects stating what now works.
-- Commit as Rowan:
-  `git -c user.name="Rowan" -c user.email="rowan@mas-bandwidth.com" commit ...`
 - Run `node --test`, `node production-tests.mjs` and `npm run lint` before
   every commit.
 - `package.json`'s `version` is the one place this repository carries its
