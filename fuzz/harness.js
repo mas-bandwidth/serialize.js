@@ -79,7 +79,7 @@ const library = SABOTAGE_NAME === ''
   ? await import('../src/index.js')
   : await import(plant(SABOTAGE_NAME));
 
-const { WriteStream, ReadStream, MeasureStream } = library;
+const { WriteStream, ReadStream, MeasureStream, compressedFloatParams } = library;
 
 export const NUM_OPS = 32;
 export const MAX_PAYLOAD = 4096;
@@ -87,7 +87,7 @@ export const MAX_PAYLOAD = 4096;
 /** The standard's closed list of refusal reasons, spelled exactly. */
 const REASONS = new Set([
   'past_end', 'value_out_of_range', 'nonzero_padding', 'trailing_data',
-  'non_finite_float', 'invalid_utf8', 'embedded_nul', 'non_canonical',
+  'non_finite_float', 'invalid_utf8', 'embedded_nul', 'non_canonical', 'rejected',
 ]);
 
 const INT32_MIN = -(2 ** 31);
@@ -108,6 +108,28 @@ const FIXED64_BOUND = 100000000000n;
 const FIXED64_RAW = FIXED64_BOUND * 65536n;
 const WIDE_BOUND = 2n ** 60n;
 const WIDE_RAW = WIDE_BOUND << 16n;
+
+// The high nibble chooses both the declaration and its precomputed entry point.
+const COMPRESSED_FLOATS = [
+  [-10, 10, 0.01], [0, 1, 1 / 255], [-1000, 1000, 0.5], [10, 20, 0.25],
+].map(([min, max, resolution]) => ({ min, max, resolution, ...compressedFloatParams(min, max, resolution) }));
+
+function compressedFloat(stream, ref, param) {
+  const declaration = COMPRESSED_FLOATS[param & 3];
+  const { min, max, resolution, maxIntegerValue, bits, delta } = declaration;
+  return (param & 4) !== 0
+    ? stream.serializeCompressedFloatPrecomputed(ref, maxIntegerValue, bits, delta, min)
+    : stream.serializeCompressedFloat(ref, min, max, resolution);
+}
+
+function byteView(length, offset) {
+  const backing = new Uint8Array(offset + length + 16).fill(0xa5);
+  return backing.subarray(offset, offset + length);
+}
+
+function viewOffset(ops, payload) {
+  return 1 + (((ops[0] ?? 0) ^ (payload[0] ?? 0)) & 15);
+}
 
 const UTF8 = new TextEncoder();
 const SCRATCH = new DataView(new ArrayBuffer(8));
@@ -364,10 +386,11 @@ export function fuzzRead(stream, ops) {
 
       case 7: {
         const r = ref();
-        check.step('compressed float', stream.serializeCompressedFloat(r, -10, 10, 0.01), r, (v) => {
+        const { min, max } = COMPRESSED_FLOATS[param & 3];
+        check.step('compressed float', compressedFloat(stream, r, param), r, (v) => {
           fuzzCheck(typeof v === 'number' && Number.isFinite(v), `compressed float read ${v}`);
           fuzzCheck(Object.is(Math.fround(v), v), `compressed float read ${v}, not a float32`);
-          fuzzCheck(v >= -10.001 && v <= 10.001, `compressed float read ${v}, outside its declaration`);
+          fuzzCheck(v >= min - 0.001 && v <= max + 0.001, `compressed float read ${v}, outside its declaration`);
         });
         break;
       }
@@ -388,7 +411,7 @@ export function fuzzRead(stream, ops) {
       case 9: {
         // the caller-owned buffer's contents after a refusal are unspecified
         // (STANDARD.md, "Reader Obligations"), so only a success is traced
-        const bytes = new Uint8Array(param * 16 + 1); // [1,241]
+        const bytes = byteView(param * 16 + 1, param + 1); // [1,241]
         const ok = stream.serializeBytes(bytes);
         check.step('bytes', ok, null, null);
         if (ok) {
@@ -435,10 +458,23 @@ export function fuzzRead(stream, ops) {
       }
 
       case 14: {
-        // ranges of varying width exercise bitsRequired
-        const max = (param + 1) * 1000;
-        const r = ref();
-        check.step('int', stream.serializeInt(r, 0, max), r, (v) => fuzzCheck(isIntIn(v, 0, max), `int [0,${max}] read ${v}`));
+        if ((param & 3) === 0) {
+          const max = (param + 1) * 1000;
+          const r = ref();
+          check.step('int', stream.serializeInt(r, 0, max), r, (v) => fuzzCheck(isIntIn(v, 0, max), `int [0,${max}] read ${v}`));
+        } else if ((param & 3) === 2) {
+          fuzzCheck(check.step('reject', stream.reject(), null, null) === false, 'reject succeeded');
+        } else {
+          const r = ref();
+          const failed = check.failed !== null;
+          let called = false;
+          const ok = stream.serializeObject((nested) => {
+            called = true;
+            return nested.serializeBits(r, param + 1);
+          });
+          check.step('object', ok, r, (v) => fuzzCheck(isIntIn(v, 0, 2 ** (param + 1) - 1), `object read ${v}`));
+          fuzzCheck(!failed || !called, 'object callback ran after refusal');
+        }
         break;
       }
 
@@ -464,9 +500,10 @@ export function fuzzRead(stream, ops) {
 export function hostileRead(ops, payload) {
   const exact = fuzzRead(new ReadStream(payload), ops);
 
-  const backing = new Uint8Array(payload.length + 16).fill(0xff);
-  backing.set(payload);
-  const view = backing.subarray(0, payload.length);
+  const offset = viewOffset(ops, payload);
+  const backing = new Uint8Array(offset + payload.length + 16).fill(0xff);
+  backing.set(payload, offset);
+  const view = backing.subarray(offset, offset + payload.length);
   const viewed = fuzzRead(new ReadStream(view), ops);
 
   fuzzCheck(exact.length === viewed.length, `the view traced ${viewed.length} calls, the exact array ${exact.length}`);
@@ -557,17 +594,14 @@ function fuzzRoundTrip(stream, ops, pool) {
       }
 
       case 7: {
-        // finite input only (non-finite writes are non-conforming); out of
-        // range values clamp on write, in range values come back within
-        // the resolution
         const raw = pool.nextUint32();
         const bits = (raw & 0x7f800000) !== 0x7f800000 ? raw : (raw & 0x807fffff) >>> 0;
         const expected = float32FromBits(bits);
-        value('compressed float', expected, (r) => stream.serializeCompressedFloat(r, -10, 10, 0.01), (read, written) => {
-          if (typeof read !== 'number' || !(read >= -10.001 && read <= 10.001)) {
-            return false;
-          }
-          return !(written >= -10 && written <= 10) || Math.abs(read - written) <= 0.011;
+        const { min, max, resolution } = COMPRESSED_FLOATS[param & 3];
+        value('compressed float', expected, (r) => compressedFloat(stream, r, param), (read, written) => {
+          const clamped = Math.max(min, Math.min(max, written));
+          return typeof read === 'number' && Number.isFinite(read) &&
+            read >= min - 0.001 && read <= max + 0.001 && Math.abs(read - clamped) <= resolution * 1.1;
         });
         break;
       }
@@ -582,11 +616,11 @@ function fuzzRoundTrip(stream, ops, pool) {
 
       case 9: {
         const length = param * 16 + 1; // [1,241]
-        const expected = new Uint8Array(length);
+        const expected = byteView(length, param + 1);
         for (let j = 0; j < length; j++) {
           expected[j] = pool.nextByte();
         }
-        const data = reading ? new Uint8Array(length) : expected;
+        const data = reading ? byteView(length, param + 1) : expected;
         fuzzCheck(stream.serializeBytes(data) === true, `bytes(${length}) failed with ${stream.error}`);
         if (reading) {
           for (let j = 0; j < length; j++) {
@@ -639,8 +673,21 @@ function fuzzRoundTrip(stream, ops, pool) {
       }
 
       case 14: {
-        const max = (param + 1) * 1000;
-        value(`int [0,${max}]`, pool.nextUint32() % (max + 1), (r) => stream.serializeInt(r, 0, max));
+        if ((param & 3) === 0) {
+          const max = (param + 1) * 1000;
+          value(`int [0,${max}]`, pool.nextUint32() % (max + 1), (r) => stream.serializeInt(r, 0, max));
+        } else {
+          // Explicit rejection belongs to the hostile read pass: valid writes
+          // and measures cannot reject. Here the same selector nests real fields.
+          const expected = pool.nextUint32() % 2 ** (param + 1);
+          let called = false;
+          const ok = stream.serializeObject((nested) => {
+            called = true;
+            value('object bits', expected, (r) => nested.serializeBits(r, param + 1));
+            return true;
+          });
+          fuzzCheck(ok === true && called, `object failed or skipped its callback with ${stream.error}`);
+        }
         break;
       }
 
@@ -663,7 +710,8 @@ const WRITE_BUFFER_SIZE = 16 * 1024;
  * and refuse one byte more as trailing data.
  */
 export function roundTrip(ops, payload) {
-  const buffer = new Uint8Array(WRITE_BUFFER_SIZE);
+  const offset = viewOffset(ops, payload);
+  const buffer = byteView(WRITE_BUFFER_SIZE, offset);
   const write = new WriteStream(buffer);
   fuzzRoundTrip(write, ops, new ValuePool(payload));
   fuzzCheck(write.serializeEnd() === true, `write end failed with ${write.error}`);
