@@ -904,11 +904,11 @@ class CheckedWriteStream {
    * the offset from min, computed in the unsigned domain so ranges wider
    * than 2^31 are exact. min and max must be integers representable in
    * int32 with min <= max: the range is part of the message format, so
-   * violating that is caller misuse and throws. A value outside [min,max]
-   * -- including NaN and non-integers, which the int32 domain cannot carry
-   * -- is write misuse and throws, writing nothing (U9). A
-   * degenerate range where min === max costs ZERO bits: the value IS the
-   * range and nothing is written.
+   * violating that is caller misuse and throws. A value that is not an
+   * integer in [min,max] -- NaN and non-integers included, since the int32
+   * domain cannot carry them -- is write misuse and throws, writing nothing
+   * (U9). A degenerate range where min === max costs ZERO bits: the value IS
+   * the range and nothing is written.
    * @param {{value: number}} ref holder of the integer to write.
    * @param {number} min the minimum value, an int32.
    * @param {number} max the maximum value, an int32, at least min.
