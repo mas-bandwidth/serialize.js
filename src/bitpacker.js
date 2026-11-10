@@ -173,7 +173,7 @@ class CheckedBitWriter {
     if ((value >>> 0) !== value || value > (bits === 32 ? 0xffffffff : ((1 << bits) >>> 0) - 1)) {
       throw new RangeError(VALUE_WIDTH_MESSAGE);
     }
-    if (this.#scratchBits !== this.#bitsWritten % 32) {
+    if (this.#wordIndex * 32 + this.#scratchBits !== this.#bitsWritten) {
       throw new Error(WRITE_AFTER_FLUSH_MESSAGE);
     }
     if (this.#bitsWritten + bits > this.#numBits) {
@@ -233,7 +233,7 @@ class CheckedBitWriter {
     if ((value >>> 0) !== value || value > (bits === 32 ? 0xffffffff : ((1 << bits) >>> 0) - 1)) {
       throw new RangeError(VALUE_WIDTH_MESSAGE);
     }
-    if (this.#scratchBits !== this.#bitsWritten % 32) {
+    if (this.#wordIndex * 32 + this.#scratchBits !== this.#bitsWritten) {
       throw new Error(WRITE_AFTER_FLUSH_MESSAGE);
     }
     if (this.#bitsWritten + bits > this.#numBits) {
@@ -310,7 +310,7 @@ class CheckedBitWriter {
     let start = offset === undefined ? 0 : offset;
     const bytes = length === undefined ? data.length - start : length;
     validateSpan(data, start, bytes);
-    if (this.#scratchBits !== this.#bitsWritten % 32) {
+    if (this.#wordIndex * 32 + this.#scratchBits !== this.#bitsWritten) {
       throw new Error(WRITE_AFTER_FLUSH_MESSAGE);
     }
     if (this.#bitsWritten % 8 !== 0) {
@@ -392,11 +392,14 @@ class CheckedBitWriter {
     // second half of the enclosing 8-byte span has never been written, and
     // zeroing it here is what keeps "bytes past the end of the written data
     // are only ever written as zeros" true for every bit count. The store is
-    // in bounds because the buffer's length is a multiple of 8, and it does
-    // not advance the cursor, so calling flushBits again is a no-op rather
+    // in bounds because the buffer's length is a multiple of 8. It advances
+    // the cursor past the zeroed half, so the write checks see a flushed
+    // partial 8-byte word (wordIndex * 32 + scratchBits exceeds bitsWritten,
+    // IMPLEMENTING.md U11) and calling flushBits again is a no-op rather
     // than a walk off the end.
     if ((this.#wordIndex & 1) !== 0) {
       this.#view.setUint32(this.#wordIndex * 4, 0, true);
+      this.#wordIndex++;
     }
   }
 

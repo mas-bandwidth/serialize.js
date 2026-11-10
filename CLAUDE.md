@@ -40,9 +40,11 @@ never delete the control.
 - **Zero third-party dependencies**, including test frameworks. Node's
   built-in `node:test` and `node:assert` are the entire harness.
 - ESM (`"type": "module"`), **no build step**, Node 20+.
-- `npm test` = `node --test` (argument-free: Node 22's runner rejects a bare
-  directory positional, and the default matcher finds every `*.test.js`).
-  That command must be green before every commit. Never push red.
+- `npm test` = `node --test` with the functional tier off (argument-free:
+  Node 22's runner rejects a bare directory positional, and the default
+  matcher finds every `*.test.js`). `npm run test:functional` runs the
+  `functional: …` tests, the negative controls among them. Both must be
+  green before every commit. Never push red.
 - A green run prints test names and nothing else, the family's convention.
   The production spine's skips are silent under the dev sweep;
   `SERIALIZE_TEST_VERBOSE=1` restores them with their reason.
@@ -148,8 +150,8 @@ API is described.
 - **Clip in often.** Commit AND push at every green sub-step — after each
   passing test group, never only at chunk end. Small commits, present-tense
   subjects stating what now works.
-- Run `node --test`, `node production-tests.mjs` and `npm run lint` before
-  every commit.
+- Run `npm test`, `npm run test:production`, `npm run test:functional` and
+  `npm run lint` before every commit.
 - `package.json`'s `version` is the one place this repository carries its
   version, and it must equal the tag the commit ships in: bump it in the
   release PR, before the tag is cut.

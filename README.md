@@ -214,21 +214,31 @@ gives the family spelling, `'none'` for no refusal.
 ## Testing
 
 ```
-npm test                  # dev leg: the checked variants, every suite
+npm test                  # dev leg: the checked variants, every unit suite
 npm run test:production   # production leg: wire, trust boundary and
                           # caller-trust contract under the production variants
+npm run test:functional   # functional tier: the negative controls, the
+                          # package consumer and production operation parity
 npm run lint              # ESLint at a pinned release through npx, zero warnings
 ```
 
-`npm test` is nothing more than `node --test` — the runner's default matcher
-picks up every `*.test.js` under `test/`. (A bare directory argument stopped
-being accepted by Node 22's runner, so the invocation stays argument-free.)
+`npm test` runs `node --test` with the functional tier switched off — the
+runner's default matcher picks up every `*.test.js` under `test/`. (A bare
+directory argument stopped being accepted by Node 22's runner, so the
+invocation stays argument-free.) The functional tier's tests are named
+`functional: …` and run only under `npm run test:functional`, which sets
+`SERIALIZE_TEST_FUNCTIONAL=1`. It holds the negative controls
+(`test/conformance-controls.test.js`): each copies `src/` with one refusal
+rule deleted and requires the corpus to fail exactly the vectors
+`conformance-controls/<rule>.expected` names; a control whose needle no
+longer matches the library fails rather than passing silently.
 The production leg runs `production-tests.mjs`, which spawns the same runner
 with `NODE_ENV=production` pinned over every test file that asserts no
 dev-only caller validation, plus `test/production/` — where each dev assert
 is proven **absent**: calls that throw in dev pass through in production,
-and a write that does not fit still throws. CI runs both legs on every OS and
-Node version, and lint as its own failing check.
+and a write that does not fit still throws. CI runs both legs and the
+functional tier on every OS and Node version, and lint as its own failing
+check.
 
 ### Fuzzing
 
