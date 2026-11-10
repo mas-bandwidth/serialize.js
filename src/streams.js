@@ -906,8 +906,7 @@ class CheckedWriteStream {
    * int32 with min <= max: the range is part of the message format, so
    * violating that is caller misuse and throws. A value outside [min,max]
    * -- including NaN and non-integers, which the int32 domain cannot carry
-   * -- is write misuse and throws, writing nothing (U9): checks
-   * run in every build, so the refusal is a value, not a throw. A
+   * -- is write misuse and throws, writing nothing (U9). A
    * degenerate range where min === max costs ZERO bits: the value IS the
    * range and nothing is written.
    * @param {{value: number}} ref holder of the integer to write.
