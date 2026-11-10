@@ -893,8 +893,9 @@ class CheckedWriteStream {
    */
   serializeBits(ref, bits) {
     validateBits(bits);
-    checkFits(ref.value, bits);
-    return this.#writeBits(ref.value, bits);
+    const value = ref.value;
+    checkFits(value, bits);
+    return this.#writeBits(value, bits);
   }
 
   /**
@@ -1133,8 +1134,8 @@ class CheckedWriteStream {
    * @returns {boolean} true on success.
    */
   serializeFixed(ref, integerBits, fractionBits, min, max) {
+    const value = ref.value; // before the shared params: a getter may re-enter
     const params = fixedPointParams(integerBits, fractionBits, min, max);
-    const value = ref.value;
     if (!params.wide) {
       if (typeof value !== 'number') {
         throw new TypeError(VALUE_TYPE_MESSAGE);
@@ -1176,8 +1177,9 @@ class CheckedWriteStream {
    * @returns {boolean} true on success.
    */
   serializeUint8(ref) {
-    checkFits(ref.value, 8);
-    return this.#writeBits(ref.value, 8);
+    const value = ref.value;
+    checkFits(value, 8);
+    return this.#writeBits(value, 8);
   }
 
   /**
@@ -1188,8 +1190,9 @@ class CheckedWriteStream {
    * @returns {boolean} true on success.
    */
   serializeUint16(ref) {
-    checkFits(ref.value, 16);
-    return this.#writeBits(ref.value, 16);
+    const value = ref.value;
+    checkFits(value, 16);
+    return this.#writeBits(value, 16);
   }
 
   /**
@@ -1200,8 +1203,9 @@ class CheckedWriteStream {
    * @returns {boolean} true on success.
    */
   serializeUint32(ref) {
-    checkFits(ref.value, 32);
-    return this.#writeBits(ref.value, 32);
+    const value = ref.value;
+    checkFits(value, 32);
+    return this.#writeBits(value, 32);
   }
 
   /**
@@ -1976,18 +1980,19 @@ class ProductionWriteStream {
    * @returns {boolean} true on success.
    */
   serializeFixed(ref, integerBits, fractionBits, min, max) {
+    const value = ref.value; // before the shared params: a getter may re-enter
     const params = productionFixedPointParams(integerBits, fractionBits, min, max);
     if (params.bits === 0) {
       return true; // degenerate range: the value IS the range, nothing to send
     }
     if (!params.wide) {
-      return this.#writer.tryWriteBits(ref.value - params.rawMin, params.bits) ||
+      return this.#writer.tryWriteBits(value - params.rawMin, params.bits) ||
         this.#noRoom();
     }
     if (params.bits > this.#writer.bitsAvailable()) {
       return this.#noRoom();
     }
-    this.#writeGroups128(ref.value - params.rawMinBig, params.bits);
+    this.#writeGroups128(value - params.rawMinBig, params.bits);
     return true;
   }
 
@@ -3490,8 +3495,8 @@ class CheckedMeasureStream {
    * @returns {boolean} true on success.
    */
   serializeFixed(ref, integerBits, fractionBits, min, max) {
+    const value = ref.value; // before the shared params: a getter may re-enter
     const params = fixedPointParams(integerBits, fractionBits, min, max);
-    const value = ref.value;
     if (!params.wide) {
       if (typeof value !== 'number') {
         throw new TypeError(VALUE_TYPE_MESSAGE);
@@ -3577,10 +3582,11 @@ class CheckedMeasureStream {
    * @returns {boolean} true on success.
    */
   serializeFloat(ref) {
-    if (typeof ref.value !== 'number') {
+    const value = ref.value;
+    if (typeof value !== 'number') {
       throw new TypeError(VALUE_TYPE_MESSAGE);
     }
-    if (!floatBitsAreFinite(float32BitsFromNumber(ref.value))) {
+    if (!floatBitsAreFinite(float32BitsFromNumber(value))) {
       throw new RangeError(VALUE_NON_FINITE_MESSAGE);
     }
     return this.#measure(32);
@@ -3592,10 +3598,11 @@ class CheckedMeasureStream {
    * @returns {boolean} true on success.
    */
   serializeDouble(ref) {
-    if (typeof ref.value !== 'number') {
+    const value = ref.value;
+    if (typeof value !== 'number') {
       throw new TypeError(VALUE_TYPE_MESSAGE);
     }
-    if (!Number.isFinite(ref.value)) {
+    if (!Number.isFinite(value)) {
       throw new RangeError(VALUE_NON_FINITE_MESSAGE);
     }
     return this.#measure(64);
