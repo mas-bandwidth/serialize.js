@@ -477,8 +477,17 @@ test('the string path takes no per-call encoder buffer and no payload view', asy
   // direct byte counter instead. Both are made to count here, so reaching
   // either one at all is the regression.
   const { BitReader } = await import('../src/index.js');
-  const text = 'a\u00E9\u20AC\u{1F600}' + 'x'.repeat(40);
-  const bufferSize = new TextEncoder().encode(text).length + 1;
+  // Short and long payloads: the long ones take the copy paths that a single
+  // small sample would never reach, and every case runs twice so the shared
+  // scratch is proven to reset cleanly between calls.
+  const cases = [
+    'a\u00E9\u20AC\u{1F600}' + 'x'.repeat(40),
+    'ascii '.repeat(64),
+    '\u00E9\u20AC\u{1F600}'.repeat(80),
+  ].map((text) => ({
+    text,
+    bufferSize: new TextEncoder().encode(text).length + 1,
+  }));
 
   const encode = TextEncoder.prototype.encode;
   const readBytes = BitReader.prototype.readBytes;
@@ -493,17 +502,25 @@ test('the string path takes no per-call encoder buffer and no payload view', asy
     return readBytes.apply(this, args);
   };
   try {
-    const writer = new WriteStream(new Uint8Array(256));
-    assert.equal(writer.serializeString({ value: text }, bufferSize), true);
-    writer.flush();
+    for (let round = 0; round < 2; round++) {
+      for (const { text, bufferSize } of cases) {
+        const writer = new WriteStream(new Uint8Array(4096));
+        assert.equal(writer.serializeString({ value: text }, bufferSize), true);
+        writer.flush();
 
-    const measure = new MeasureStream();
-    assert.equal(measure.serializeString({ value: text }, bufferSize), true);
+        const measure = new MeasureStream();
+        assert.equal(measure.serializeString({ value: text }, bufferSize), true);
+        assert.ok(
+          measure.bitsProcessed() >= writer.bitsProcessed(),
+          'the measure stays a bound on the write',
+        );
 
-    const reader = new ReadStream(writer.data());
-    const ref = {};
-    assert.equal(reader.serializeString(ref, bufferSize), true);
-    assert.equal(ref.value, text);
+        const reader = new ReadStream(writer.data());
+        const ref = {};
+        assert.equal(reader.serializeString(ref, bufferSize), true);
+        assert.equal(ref.value, text);
+      }
+    }
   } finally {
     TextEncoder.prototype.encode = encode;
     BitReader.prototype.readBytes = readBytes;
