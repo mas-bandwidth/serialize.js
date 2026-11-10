@@ -22,6 +22,7 @@ import {
   copyString,
   refusalName,
 } from '../src/index.js';
+import { PRODUCTION } from '../src/mode.js';
 
 const VOOR = SerializeError.ValueOutOfRange;
 
@@ -32,13 +33,16 @@ const BAD_READ_DECLARATIONS = [
   ['bits 0', (s, r) => s.serializeBits(r, 0)],
   ['bits 33', (s, r) => s.serializeBits(r, 33)],
   ['bits 1.5', (s, r) => s.serializeBits(r, 1.5)],
+  ['bits 0n', (s, r) => s.serializeBits(r, 0n)],
   ['bits64 0', (s, r) => s.serializeBits64(r, 0)],
   ['bits64 65', (s, r) => s.serializeBits64(r, 65)],
+  ['bits64 64n', (s, r) => s.serializeBits64(r, 64n)],
   ['int min > max', (s, r) => s.serializeInt(r, 5, 4)],
   ['int max above int32 (U5)', (s, r) => s.serializeInt(r, 0, 2 ** 31)],
   ['int min below int32 (U5)', (s, r) => s.serializeInt(r, -(2 ** 31) - 1, 0)],
   ['int max 0xFFFFFFFF (U5)', (s, r) => s.serializeInt(r, 0, 0xffffffff)],
   ['int non-integer bound', (s, r) => s.serializeInt(r, 0, 1.5)],
+  ['int bigint bounds', (s, r) => s.serializeInt(r, 0n, 10n)],
   ['int64 min > max', (s, r) => s.serializeInt64(r, 5n, 4n)],
   ['int64 Number bounds', (s, r) => s.serializeInt64(r, 0, 4)],
   ['int64 max above int64', (s, r) => s.serializeInt64(r, 0n, 2n ** 63n)],
@@ -47,6 +51,7 @@ const BAD_READ_DECLARATIONS = [
   ['int_relative previous -1', (s, r) => s.serializeIntRelative(-1, r)],
   ['int_relative previous 2^31', (s, r) => s.serializeIntRelative(2 ** 31, r)],
   ['fixed integerBits 0', (s, r) => s.serializeFixed(r, 0, 8, 0, 0)],
+  ['fixed integerBits 16n', (s, r) => s.serializeFixed(r, 16n, 16, 0, 1)],
   ['fixed width 12', (s, r) => s.serializeFixed(r, 4, 8, 0, 1)],
   ['fixed min > max', (s, r) => s.serializeFixed(r, 8, 8, 2, 1)],
   ['fixed bound past the Q format', (s, r) => s.serializeFixed(r, 4, 4, 0, 16)],
@@ -84,6 +89,44 @@ test('U7, U16: a bad declaration on read refuses value_out_of_range, consumes no
     assert.equal(stream.error, VOOR, name);
     assert.equal(stream.bitsProcessed(), 0, name);
     assert.equal(ref.value, 'untouched', name);
+  }
+});
+
+test('U7: serializeInt(ref, 0n, 10n) on a reader refuses value_out_of_range and does not throw', () => {
+  const stream = new ReadStream(new Uint8Array(32).fill(0xff));
+  const ref = { value: 'untouched' };
+  let result;
+  assert.doesNotThrow(() => {
+    result = stream.serializeInt(ref, 0n, 10n);
+  });
+  assert.equal(result, false);
+  assert.equal(stream.error, VOOR);
+  assert.equal(stream.bitsProcessed(), 0);
+  assert.equal(ref.value, 'untouched');
+});
+
+// The same BigInt declarations are write misuse on WriteStream and
+// MeasureStream: they throw on both legs, and the checked leg throws
+// RangeError (U9).
+const BIGINT_WRITE_DECLARATIONS = [
+  ['bits 0n', (s) => s.serializeBits({ value: 0 }, 0n)],
+  ['bits64 64n', (s) => s.serializeBits64({ value: 0n }, 64n)],
+  ['int 0n..10n', (s) => s.serializeInt({ value: 0 }, 0n, 10n)],
+  ['fixed integerBits 16n', (s) => s.serializeFixed({ value: 0 }, 16n, 16, 0, 1)],
+];
+
+test('U9: a BigInt declaration on write or measure throws, RangeError on the checked leg', () => {
+  const streams = [
+    ['write', () => new WriteStream(new Uint8Array(32))],
+    ['measure', () => new MeasureStream()],
+  ];
+  for (const [kind, make] of streams) {
+    for (const [name, call] of BIGINT_WRITE_DECLARATIONS) {
+      const label = `${kind} ${name}`;
+      const stream = make();
+      assert.throws(() => call(stream), PRODUCTION ? undefined : RangeError, label);
+      assert.equal(stream.error, SerializeError.None, label);
+    }
   }
 });
 
