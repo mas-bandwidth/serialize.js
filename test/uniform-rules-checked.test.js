@@ -204,4 +204,13 @@ test('WriteStream checks: serialize after flush', () => {
     assert.equal(stream.bytesProcessed(), 1);
     assert.deepEqual(Array.from(stream.data()), [0xab]);
   }
+  {
+    // 32 bits flushed is half of the 8-byte word the flush stores (U11)
+    const stream = new WriteStream(new Uint8Array(16));
+    assert.equal(stream.serializeUint32({ value: 0x12345678 }), true);
+    stream.flush();
+    assert.throws(() => stream.serializeUint8({ value: 0xcd }), /write after flushBits/);
+    assert.equal(stream.bytesProcessed(), 4);
+    assert.deepEqual(Array.from(stream.data()), [0x78, 0x56, 0x34, 0x12]);
+  }
 });

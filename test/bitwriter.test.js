@@ -291,3 +291,32 @@ test('writer checks: write after flushBits', () => {
     assert.deepEqual(Array.from(writer.data()), [0xab]);
   }
 });
+
+test('writer checks: write after flushBits of a half-filled 8-byte word', () => {
+  // the flush stores an 8-byte word, so 32 bits flushed is a partial word,
+  // as 8 bits is: every write path refuses after it (IMPLEMENTING.md U11)
+  const writes = [
+    (writer) => writer.writeBits(0xcd, 8),
+    (writer) => writer.tryWriteBits(0xcd, 8),
+    (writer) => writer.writeBytes(new Uint8Array([0xcd])),
+  ];
+  for (const write of writes) {
+    const writer = new BitWriter(new Uint8Array(16));
+    writer.writeBits(0x12345678, 32);
+    writer.flushBits();
+    assert.throws(() => write(writer), /write after flushBits/);
+    assert.equal(writer.bitsWritten(), 32);
+    assert.deepEqual(Array.from(writer.data()), [0x78, 0x56, 0x34, 0x12]);
+  }
+  // accept neighbor: a flush on a whole 8-byte word stored no partial word
+  for (const write of writes) {
+    const writer = new BitWriter(new Uint8Array(16));
+    writer.writeBits(0x12345678, 32);
+    writer.writeBits(0x9abcdef0, 32);
+    writer.flushBits();
+    write(writer);
+    writer.flushBits();
+    assert.equal(writer.bitsWritten(), 72);
+    assert.deepEqual(Array.from(writer.data()), [0x78, 0x56, 0x34, 0x12, 0xf0, 0xde, 0xbc, 0x9a, 0xcd]);
+  }
+});
