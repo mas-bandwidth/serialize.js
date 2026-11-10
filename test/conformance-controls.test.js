@@ -306,6 +306,23 @@ const CONTROLS = [
   },
 ];
 
+// The controls are hand-maintained; the .expected files are not. A control
+// file added to conformance-controls/ without a CONTROLS entry would be
+// silently skipped, so the directory and the list must agree one to one.
+test('control: every conformance-controls/*.expected file is declared in CONTROLS', () => {
+  const onDisk = readdirSync(CONTROLS_DIR)
+    .filter((name) => name.endsWith('.expected'))
+    .map((name) => name.slice(0, -'.expected'.length))
+    .sort();
+  const declared = CONTROLS.map((control) => control.name).sort();
+  assert.deepEqual(
+    declared,
+    onDisk,
+    'CONTROLS must name every conformance-controls/*.expected file exactly once: ' +
+      'add the missing entry or remove the stale one',
+  );
+});
+
 /** The number of times needle occurs in text. */
 function occurrences(text, needle) {
   let count = 0;
