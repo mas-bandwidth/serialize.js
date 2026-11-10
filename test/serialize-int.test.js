@@ -192,3 +192,14 @@ test('a non-number value on write or measure is caller misuse and throws', () =>
   const measure = new MeasureStream();
   assert.throws(() => measure.serializeInt({ value: null }, 0, 7), TypeError);
 });
+
+test('degenerate zero integer reads use positive zero', () => {
+  for (const [min, max] of [[-0, -0], [-0, +0], [+0, -0]]) {
+    const reader = new ReadStream(new Uint8Array(0));
+    const ref = { value: 123 };
+    assert.equal(reader.serializeInt(ref, min, max), true);
+    assert.equal(Object.is(ref.value, +0), true);
+    assert.equal(reader.bitsProcessed(), 0);
+    assert.equal(reader.ok, true);
+  }
+});
