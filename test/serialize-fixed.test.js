@@ -265,3 +265,16 @@ test('degenerate min == max costs zero bits on EVERY storage width', () => {
     assert.equal(measure.bitsProcessed(), 0, `${label} measures nothing`);
   }
 });
+
+test('degenerate zero fixed reads use positive zero', () => {
+  for (const [integerBits, fractionBits] of [[8, 0], [8, 8], [16, 16]]) {
+    for (const [min, max] of [[-0, -0], [-0, +0], [+0, -0]]) {
+      const reader = new ReadStream(new Uint8Array(0));
+      const ref = { value: 123 };
+      assert.equal(reader.serializeFixed(ref, integerBits, fractionBits, min, max), true);
+      assert.equal(Object.is(ref.value, +0), true);
+      assert.equal(reader.bitsProcessed(), 0);
+      assert.equal(reader.ok, true);
+    }
+  }
+});
