@@ -91,6 +91,19 @@ test('U7, U16: a bad declaration on read refuses value_out_of_range, consumes no
   }
 });
 
+test('U7: serializeInt(ref, 0n, 10n) on a reader refuses value_out_of_range and does not throw', () => {
+  const stream = new ReadStream(new Uint8Array(32).fill(0xff));
+  const ref = { value: 'untouched' };
+  let result;
+  assert.doesNotThrow(() => {
+    result = stream.serializeInt(ref, 0n, 10n);
+  });
+  assert.equal(result, false);
+  assert.equal(stream.error, VOOR);
+  assert.equal(stream.bitsProcessed(), 0);
+  assert.equal(ref.value, 'untouched');
+});
+
 test('U7: the failure state is checked first, so a failed stream keeps its first reason', () => {
   for (const [name, call] of BAD_READ_DECLARATIONS) {
     const stream = new ReadStream(new Uint8Array(1));

@@ -330,7 +330,10 @@ function bitsAreValid(bits) {
  * and measure streams; the read stream refuses it as ValueOutOfRange (U7).
  */
 function validateIntRange(min, max) {
-  if ((min | 0) !== min || (max | 0) !== max) {
+  if (
+    typeof min !== 'number' || (min | 0) !== min ||
+    typeof max !== 'number' || (max | 0) !== max
+  ) {
     throw new RangeError(INT32_RANGE_MESSAGE);
   }
   if (min > max) {
