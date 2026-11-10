@@ -361,7 +361,7 @@ class CheckedBitWriter {
       this.#wordIndex += numWords;
     }
 
-    // tail: the remaining bytes, fewer than 8, through the scratch
+    // tail: the remaining bytes, fewer than 4, through the scratch
     const tailStart = headBytes + numWords * 4;
     for (let i = tailStart; i < bytes; i++) {
       this.writeBits(data[start + i], 8);
@@ -668,7 +668,7 @@ class ProductionBitWriter {
       this.#wordIndex += numWords;
     }
 
-    // tail: the remaining bytes, fewer than 8, through the scratch
+    // tail: the remaining bytes, fewer than 4, through the scratch
     const tailStart = headBytes + numWords * 4;
     for (let i = tailStart; i < bytes; i++) {
       this.writeBits(data[start + i], 8);
