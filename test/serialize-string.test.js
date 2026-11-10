@@ -528,3 +528,72 @@ test('the string path takes no per-call encoder buffer and no payload view', asy
   assert.equal(encodeCalls, 0, 'serializeString encodes through the shared scratch');
   assert.equal(readBytesCalls, 0, 'serializeString reads through the shared scratch');
 });
+
+test('the shared string scratch carries interleaved streams without cross-talk', () => {
+  const cases = [
+    { text: '', bufferSize: 8 },
+    { text: 'plain ascii', bufferSize: 32 },
+    { text: 'h\u00E9\u20AC\u{1F600}', bufferSize: 32 },
+    { text: 'x'.repeat(700), bufferSize: 1024 },
+    { text: 'same length', bufferSize: 32 },
+  ];
+  const writers = cases.map(({ text, bufferSize }) => ({
+    text,
+    bufferSize,
+    writer: new WriteStream(new Uint8Array(2048)),
+  }));
+  for (let round = 0; round < 2; round++) {
+    for (const state of writers) {
+      assert.equal(
+        state.writer.serializeString({ value: state.text }, state.bufferSize),
+        true,
+        `write ${JSON.stringify(state.text)} round ${round}`,
+      );
+    }
+  }
+  for (const state of writers) {
+    state.writer.flush();
+  }
+
+  const readers = writers.map((state) => ({
+    ...state,
+    reader: new ReadStream(state.writer.data()),
+  }));
+  for (let round = 0; round < 2; round++) {
+    for (const state of readers) {
+      const ref = {};
+      assert.equal(
+        state.reader.serializeString(ref, state.bufferSize),
+        true,
+        `read ${JSON.stringify(state.text)} round ${round}`,
+      );
+      assert.equal(ref.value, state.text);
+    }
+  }
+});
+
+test('the string reader reuses its decode view for a repeated payload length', () => {
+  const text = 'h\u00E9\u20AC\u{1F600}';
+  const bufferSize = 32;
+  const wire = writeString(text, bufferSize);
+  const decode = TextDecoder.prototype.decode;
+  const views = [];
+  TextDecoder.prototype.decode = function patchedDecode(input, ...rest) {
+    views.push(input);
+    return decode.call(this, input, ...rest);
+  };
+  try {
+    for (let i = 0; i < 3; i++) {
+      const reader = new ReadStream(wire);
+      const ref = {};
+      assert.equal(reader.serializeString(ref, bufferSize), true);
+      assert.equal(ref.value, text);
+    }
+  } finally {
+    TextDecoder.prototype.decode = decode;
+  }
+  assert.equal(views.length, 3);
+  assert.equal(views[0].byteLength, new TextEncoder().encode(text).length);
+  assert.equal(views[1], views[0], 'the second read reuses the decode view');
+  assert.equal(views[2], views[0], 'the third read reuses the decode view');
+});
