@@ -20,4 +20,15 @@
 // flag inside shared bodies) keeps the production instruction stream free of
 // dead validation and every call site monomorphic: a process only ever
 // instantiates one variant of each class.
-export const PRODUCTION = process.env.NODE_ENV === 'production';
+//
+// Keep the literal `process.env.NODE_ENV` expression intact so bundlers that
+// replace `process.env.NODE_ENV` via static define/replace (without providing
+// a `process` global) still select production mode, while unbundled runtimes
+// without `process` catch the missing global and default to checked mode.
+let nodeEnv;
+try {
+  nodeEnv = process.env.NODE_ENV;
+} catch {
+  nodeEnv = undefined;
+}
+export const PRODUCTION = nodeEnv === 'production';
