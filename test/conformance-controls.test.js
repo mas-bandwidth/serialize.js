@@ -314,9 +314,14 @@ test('control: every conformance-controls/*.expected file is declared in CONTROL
     .filter((name) => name.endsWith('.expected'))
     .map((name) => name.slice(0, -'.expected'.length))
     .sort();
-  const declared = CONTROLS.map((control) => control.name).sort();
+  const declared = CONTROLS.map((control) => control.name);
+  assert.equal(
+    new Set(declared).size,
+    declared.length,
+    'CONTROLS must not declare the same control twice',
+  );
   assert.deepEqual(
-    declared,
+    declared.sort(),
     onDisk,
     'CONTROLS must name every conformance-controls/*.expected file exactly once: ' +
       'add the missing entry or remove the stale one',
