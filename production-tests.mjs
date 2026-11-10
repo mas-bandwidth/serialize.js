@@ -54,9 +54,10 @@ const files = [
   'test/production/production-write-path.test.js',
 ];
 
+// External tool and filesystem controls run once in npm run test:functional.
 const result = spawnSync(process.execPath, ['--test', ...files], {
   stdio: 'inherit',
-  env: { ...process.env, NODE_ENV: 'production' },
+  env: { ...process.env, NODE_ENV: 'production', SERIALIZE_TEST_FUNCTIONAL: '0' },
 });
 
 process.exit(result.status ?? 1);
