@@ -8,6 +8,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 
 import {
   WriteStream,
@@ -16,6 +17,128 @@ import {
   SerializeError,
   bitsRequired,
 } from '../src/index.js';
+
+// The write, measure and read sweep below runs in-process for the checked
+// variants and in fresh module-load children for both NODE_ENV modes, so the
+// shared string scratch is proven to carry every length, grow for long text
+// and hand back exactly what went in. It is self-contained so the child
+// script can stringify it.
+function stringSweep(api) {
+  const failures = [];
+  const cases = [];
+  const encoder = new TextEncoder();
+  const byteLength = (text) => encoder.encode(text).length;
+  const push = (label, value, bufferSize) => {
+    cases.push({ label, value, bufferSize });
+  };
+
+  const fixed = [
+    '', 'a', 'golden', 'hello, serialize!',
+    '\u0080', '\u00E9', '\u20AC', '\u{1F600}',
+    'h\u00E9\u20AC\u{1F600}', '\u65E5\u672C\u8A9E\u306E\u30D3\u30C3\u30C8',
+    '\u{1F680}\u{1F389}\u{1F525}\u2728\u{1F30A}',
+    '\uFEFFe\u0301 a\u0308 o\u0302', '\u041F\u0440\u0438\u0432\u0435\u0442',
+    'caf\u00E9 r\u00E9sum\u00E9 na\u00EFve',
+  ];
+  for (const value of fixed) {
+    push('fixed', value, Math.max(1, byteLength(value) + 1));
+  }
+
+  const units = [
+    ['ascii', 'a'],
+    ['two-byte', '\u00E9'],
+    ['three-byte', '\u20AC'],
+    ['four-byte', '\u{1F600}'],
+  ];
+  for (const bufferSize of [1, 2, 3, 4, 5, 8, 9, 16, 17, 32, 33, 64, 65, 128, 129, 256]) {
+    const target = bufferSize - 1;
+    for (const [label, unit] of units) {
+      const unitBytes = byteLength(unit);
+      const repeats = Math.floor(target / unitBytes);
+      const text = unit.repeat(repeats) + 'a'.repeat(target - repeats * unitBytes);
+      push(`boundary ${bufferSize} ${label}`, text, bufferSize);
+    }
+  }
+
+  const long = [
+    ['long ascii', 'a', 5000],
+    ['long two-byte', '\u00E9', 2000],
+    ['long three-byte', '\u20AC', 1500],
+    ['long four-byte', '\u{1F600}', 1000],
+  ];
+  for (const [label, unit, repeats] of long) {
+    const text = unit.repeat(repeats);
+    push(label, text, byteLength(text) + 1);
+  }
+
+  const rounds = 3;
+  let expectedMeasureBits = 0;
+  for (const c of cases) {
+    expectedMeasureBits += api.bitsRequired(0, c.bufferSize - 1) + 7 + byteLength(c.value) * 8;
+  }
+  expectedMeasureBits *= rounds;
+
+  const writer = new api.WriteStream(new Uint8Array(1 << 22));
+  for (let round = 0; round < rounds; round++) {
+    for (const c of cases) {
+      const result = writer.serializeString({ value: c.value }, c.bufferSize);
+      if (result !== true) {
+        failures.push(`${round} ${c.label}: write returned ${result}`);
+      }
+    }
+  }
+  writer.flush();
+
+  const measure = new api.MeasureStream();
+  for (let round = 0; round < rounds; round++) {
+    for (const c of cases) {
+      const result = measure.serializeString({ value: c.value }, c.bufferSize);
+      if (result !== true) {
+        failures.push(`${round} ${c.label}: measure returned ${result}`);
+      }
+    }
+  }
+  if (measure.bitsProcessed() !== expectedMeasureBits) {
+    failures.push(`measure ${measure.bitsProcessed()} != expected ${expectedMeasureBits}`);
+  }
+  if (measure.bitsProcessed() < writer.bitsProcessed()) {
+    failures.push(`measure ${measure.bitsProcessed()} < write ${writer.bitsProcessed()}`);
+  }
+
+  const reader = new api.ReadStream(writer.data());
+  for (let round = 0; round < rounds; round++) {
+    for (const c of cases) {
+      const ref = { value: null };
+      const result = reader.serializeString(ref, c.bufferSize);
+      if (result !== true) {
+        failures.push(`${round} ${c.label}: read returned ${result} (${reader.error})`);
+      } else if (ref.value !== c.value) {
+        failures.push(`${round} ${c.label}: read ${JSON.stringify(ref.value)}`);
+      }
+    }
+  }
+
+  return {
+    cases: cases.length,
+    rounds,
+    failures,
+    writerBits: writer.bitsProcessed(),
+    measureBits: measure.bitsProcessed(),
+    readerBits: reader.bitsProcessed(),
+  };
+}
+
+function stringSweepUnder(nodeEnv) {
+  const index = new URL('../src/index.js', import.meta.url).href;
+  const script = `import * as api from ${JSON.stringify(index)};\n` +
+    `process.stdout.write(JSON.stringify((${stringSweep.toString()})(api)));\n`;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    encoding: 'utf8',
+    env: { ...process.env, NODE_ENV: nodeEnv },
+  });
+  assert.equal(result.status, 0, `NODE_ENV=${nodeEnv} child exited with ${result.status}: ${result.stderr}`);
+  return JSON.parse(result.stdout);
+}
 
 function writeString(value, bufferSize, bufferBytes = 256) {
   const writer = new WriteStream(new Uint8Array(bufferBytes));
@@ -275,4 +398,116 @@ test('the measure bound covers the actual write at every starting offset', () =>
     const span = writer.bitsProcessed() - before;
     assert.ok(span <= bound, `offset ${offset}: span ${span} within bound ${bound}`);
   }
+});
+
+test('repeated write, measure and read calls carry ASCII, multi-byte and boundary-length strings', () => {
+  const report = stringSweep({
+    WriteStream,
+    ReadStream,
+    MeasureStream,
+    bitsRequired,
+  });
+  assert.ok(report.cases >= 70, `expected a broad sweep, got ${report.cases} cases`);
+  assert.deepEqual(report.failures, []);
+  assert.equal(report.readerBits, report.writerBits, 'the reader consumes exactly what the writer emitted');
+  assert.ok(report.measureBits >= report.writerBits, 'the measure stays a bound on the write');
+});
+
+for (const nodeEnv of ['development', 'production']) {
+  test(`the repeated string sweep round trips under NODE_ENV=${nodeEnv}`, () => {
+    const report = stringSweepUnder(nodeEnv);
+    assert.ok(report.cases >= 70, `expected a broad sweep, got ${report.cases} cases`);
+    assert.deepEqual(report.failures, []);
+    assert.equal(report.readerBits, report.writerBits, 'the reader consumes exactly what the writer emitted');
+    assert.ok(report.measureBits >= report.writerBits, 'the measure stays a bound on the write');
+  });
+}
+
+test('the payload boundary is exact for every UTF-8 width: bufferSize - 1 bytes accepted, one more refused', () => {
+  for (const [unit, unitBytes] of [['a', 1], ['\u00E9', 2], ['\u20AC', 3], ['\u{1F600}', 4]]) {
+    for (const repeats of [1, 2, 7, 64, 511]) {
+      const text = unit.repeat(repeats);
+      const bytes = unitBytes * repeats;
+      const bufferSize = bytes + 1;
+
+      const writer = new WriteStream(new Uint8Array(4096));
+      assert.equal(
+        writer.serializeString({ value: text }, bufferSize),
+        true,
+        `${unitBytes}-byte char x${repeats}: exact fit accepted`,
+      );
+      writer.flush();
+      assert.equal(
+        readString(writer.data(), bufferSize),
+        text,
+        `${unitBytes}-byte char x${repeats}: exact fit round trips`,
+      );
+
+      const measure = new MeasureStream();
+      assert.equal(measure.serializeString({ value: text }, bufferSize), true);
+      assert.equal(
+        measure.bitsProcessed(),
+        bitsRequired(0, bufferSize - 1) + 7 + bytes * 8,
+        `${unitBytes}-byte char x${repeats}: measure prices prefix, align and payload`,
+      );
+
+      const refused = new WriteStream(new Uint8Array(4096));
+      assert.throws(
+        () => refused.serializeString({ value: text }, bytes),
+        RangeError,
+        `${unitBytes}-byte char x${repeats}: one byte too long refused`,
+      );
+      assert.equal(refused.bitsProcessed(), 0, 'a refused string writes nothing');
+
+      const refusedMeasure = new MeasureStream();
+      assert.throws(
+        () => refusedMeasure.serializeString({ value: text }, bytes),
+        RangeError,
+        `${unitBytes}-byte char x${repeats}: one byte too long cannot be measured`,
+      );
+      assert.equal(refusedMeasure.bitsProcessed(), 0, 'a refused string measures nothing');
+    }
+  }
+});
+
+test('the string path takes no per-call encoder buffer and no payload view', async () => {
+  // TextEncoder.encode allocates a fresh Uint8Array for every call and
+  // BitReader.readBytes allocates a fresh subarray for every payload: the
+  // write, measure and read paths must go through the shared scratch and the
+  // direct byte counter instead. Both are made to count here, so reaching
+  // either one at all is the regression.
+  const { BitReader } = await import('../src/index.js');
+  const text = 'a\u00E9\u20AC\u{1F600}' + 'x'.repeat(40);
+  const bufferSize = new TextEncoder().encode(text).length + 1;
+
+  const encode = TextEncoder.prototype.encode;
+  const readBytes = BitReader.prototype.readBytes;
+  let encodeCalls = 0;
+  let readBytesCalls = 0;
+  TextEncoder.prototype.encode = function patchedEncode(...args) {
+    encodeCalls++;
+    return encode.apply(this, args);
+  };
+  BitReader.prototype.readBytes = function patchedReadBytes(...args) {
+    readBytesCalls++;
+    return readBytes.apply(this, args);
+  };
+  try {
+    const writer = new WriteStream(new Uint8Array(256));
+    assert.equal(writer.serializeString({ value: text }, bufferSize), true);
+    writer.flush();
+
+    const measure = new MeasureStream();
+    assert.equal(measure.serializeString({ value: text }, bufferSize), true);
+
+    const reader = new ReadStream(writer.data());
+    const ref = {};
+    assert.equal(reader.serializeString(ref, bufferSize), true);
+    assert.equal(ref.value, text);
+  } finally {
+    TextEncoder.prototype.encode = encode;
+    BitReader.prototype.readBytes = readBytes;
+  }
+  assert.equal(encodeCalls, 0, 'serializeString encodes through the shared scratch');
+  assert.equal(readBytesCalls, 0, 'serializeString reads through the shared scratch');
 });
