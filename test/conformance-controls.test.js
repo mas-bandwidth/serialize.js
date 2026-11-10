@@ -255,8 +255,8 @@ const CONTROLS = [
     rule: 'a string read refuses a zero byte among its payload',
     patches: [{
       file: 'streams.js',
-      needle: '      if (payload[i] === 0) {',
-      patch: `      if (payload[i] === 0 && i < 0) {${MARK}`,
+      needle: '      if (STRING_SCRATCH[i] === 0) {',
+      patch: `      if (STRING_SCRATCH[i] === 0 && i < 0) {${MARK}`,
     }],
   },
   {
@@ -275,9 +275,9 @@ const CONTROLS = [
     rule: 'a string read refuses an encoded surrogate code point',
     patches: [{
       file: 'streams.js',
-      needle: '      decoded = UTF8_DECODER.decode(payload);',
-      patch: '      decoded = (payload.some((byte, i) => byte === 0xed && payload[i + 1] >= 0xa0 && payload[i + 1] <= 0xbf) ' +
-        '? new TextDecoder() : UTF8_DECODER).decode(payload); // NEGATIVE CONTROL: this clause is deleted on purpose',
+      needle: '      decoded = UTF8_DECODER.decode(stringDecodeView(length));',
+      patch: '      decoded = (stringDecodeView(length).some((byte, i, payload) => byte === 0xed && payload[i + 1] >= 0xa0 && payload[i + 1] <= 0xbf) ' +
+        '? new TextDecoder() : UTF8_DECODER).decode(stringDecodeView(length)); // NEGATIVE CONTROL: this clause is deleted on purpose',
     }],
   },
   {
