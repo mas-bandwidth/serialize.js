@@ -597,3 +597,76 @@ test('the string reader reuses its decode view for a repeated payload length', (
   assert.equal(views[1], views[0], 'the second read reuses the decode view');
   assert.equal(views[2], views[0], 'the third read reuses the decode view');
 });
+
+test('the string length holder and encoder scratch are shared, then the scratch grows once', () => {
+  // Every length prefix goes through one module-scoped holder, and every
+  // write encodes into one module-scoped scratch that only grows for a
+  // payload the current array cannot hold. Patching the entry points makes
+  // a per-call holder or a fresh payload array the regression.
+  const encoder = new TextEncoder();
+  const long = 'x'.repeat(100000);
+  const cases = ['', 'a', 'h\u00E9\u20AC\u{1F600}', long, 'b'].map(
+    (text) => ({ text, bufferSize: encoder.encode(text).length + 1 }),
+  );
+
+  const measureInt = MeasureStream.prototype.serializeInt;
+  const readInt = ReadStream.prototype.serializeInt;
+  const encodeInto = TextEncoder.prototype.encodeInto;
+  const measureRefs = [];
+  const readRefs = [];
+  const encodeDests = [];
+  MeasureStream.prototype.serializeInt = function patchedMeasureInt(ref, min, max) {
+    measureRefs.push(ref);
+    return measureInt.call(this, ref, min, max);
+  };
+  ReadStream.prototype.serializeInt = function patchedReadInt(ref, min, max) {
+    readRefs.push(ref);
+    return readInt.call(this, ref, min, max);
+  };
+  TextEncoder.prototype.encodeInto = function patchedEncodeInto(value, dest) {
+    encodeDests.push(dest);
+    return encodeInto.call(this, value, dest);
+  };
+  try {
+    const writer = new WriteStream(new Uint8Array(1 << 20));
+    const measure = new MeasureStream();
+    for (const { text, bufferSize } of cases) {
+      assert.equal(writer.serializeString({ value: text }, bufferSize), true);
+      assert.equal(measure.serializeString({ value: text }, bufferSize), true);
+    }
+    writer.flush();
+
+    const reader = new ReadStream(writer.data());
+    for (const { text, bufferSize } of cases) {
+      const ref = {};
+      assert.equal(reader.serializeString(ref, bufferSize), true);
+      assert.equal(ref.value, text);
+    }
+  } finally {
+    MeasureStream.prototype.serializeInt = measureInt;
+    ReadStream.prototype.serializeInt = readInt;
+    TextEncoder.prototype.encodeInto = encodeInto;
+  }
+
+  // The checked measure routes its length through serializeInt with the
+  // shared holder; the production measure adds the bits directly and takes
+  // no holder at all. Both keep one holder object for the calls they make.
+  if (measureRefs.length > 0) {
+    assert.equal(measureRefs.length, cases.length, 'one length call per measure');
+    for (let i = 1; i < cases.length; i++) {
+      assert.equal(measureRefs[i], measureRefs[0], `measure holder ${i} is shared`);
+    }
+  }
+  assert.equal(readRefs.length, cases.length, 'one length call per read');
+  for (let i = 1; i < cases.length; i++) {
+    assert.equal(readRefs[i], readRefs[0], `read holder ${i} is shared`);
+  }
+  assert.ok(readRefs[0], 'a holder reached serializeInt');
+
+  assert.equal(encodeDests.length, cases.length, 'one encode per write');
+  assert.equal(encodeDests[1], encodeDests[0], 'short payloads keep the same scratch');
+  assert.equal(encodeDests[2], encodeDests[0], 'multi-byte payload keeps the same scratch');
+  assert.notEqual(encodeDests[3], encodeDests[0], 'the long payload grows the scratch');
+  assert.ok(encodeDests[3].length >= long.length, 'the grown scratch holds the long payload');
+  assert.equal(encodeDests[4], encodeDests[3], 'later payloads reuse the grown scratch');
+});
