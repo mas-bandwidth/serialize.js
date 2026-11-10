@@ -22,6 +22,7 @@ import {
   copyString,
   refusalName,
 } from '../src/index.js';
+import { PRODUCTION } from '../src/mode.js';
 
 const VOOR = SerializeError.ValueOutOfRange;
 
@@ -102,6 +103,31 @@ test('U7: serializeInt(ref, 0n, 10n) on a reader refuses value_out_of_range and 
   assert.equal(stream.error, VOOR);
   assert.equal(stream.bitsProcessed(), 0);
   assert.equal(ref.value, 'untouched');
+});
+
+// The same BigInt declarations are write misuse on WriteStream and
+// MeasureStream: they throw on both legs, and the checked leg throws
+// RangeError (U9).
+const BIGINT_WRITE_DECLARATIONS = [
+  ['bits 0n', (s) => s.serializeBits({ value: 0 }, 0n)],
+  ['bits64 64n', (s) => s.serializeBits64({ value: 0n }, 64n)],
+  ['int 0n..10n', (s) => s.serializeInt({ value: 0 }, 0n, 10n)],
+  ['fixed integerBits 16n', (s) => s.serializeFixed({ value: 0 }, 16n, 16, 0, 1)],
+];
+
+test('U9: a BigInt declaration on write or measure throws, RangeError on the checked leg', () => {
+  const streams = [
+    ['write', () => new WriteStream(new Uint8Array(32))],
+    ['measure', () => new MeasureStream()],
+  ];
+  for (const [kind, make] of streams) {
+    for (const [name, call] of BIGINT_WRITE_DECLARATIONS) {
+      const label = `${kind} ${name}`;
+      const stream = make();
+      assert.throws(() => call(stream), PRODUCTION ? undefined : RangeError, label);
+      assert.equal(stream.error, SerializeError.None, label);
+    }
+  }
 });
 
 test('U7: the failure state is checked first, so a failed stream keeps its first reason', () => {
