@@ -128,6 +128,76 @@ const FLOAT_SCRATCH = new DataView(new ArrayBuffer(8));
 const UTF8_ENCODER = new TextEncoder();
 const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
+// The string codecs' shared scratch: one growable byte array, reused by every
+// stream in this module, so a serializeString call allocates neither a fresh
+// payload array nor a { value } holder for the length prefix. JavaScript is
+// single threaded per realm, the scratch is filled and consumed in the same
+// synchronous call, and no user code runs between those steps, so sharing is
+// safe; each worker thread gets its own module instance.
+let STRING_SCRATCH = new Uint8Array(256);
+let STRING_DECODE_VIEW = new Uint8Array(0);
+const STRING_LENGTH_REF = { value: 0 };
+
+/**
+ * Encodes value's UTF-8 into the shared scratch with TextEncoder.encodeInto,
+ * growing the scratch only when the call needs more room, and returns the
+ * byte count. A UTF-16 code unit encodes to at most 3 UTF-8 bytes (an astral
+ * pair is 4 bytes across 2 units, an unpaired surrogate is U+FFFD's 3), so
+ * 3 * value.length is a safe upper bound.
+ */
+function encodeString(value) {
+  if (typeof value !== 'string') {
+    value = value === undefined ? '' : `${value}`;
+  }
+  const needed = value.length * 3;
+  if (STRING_SCRATCH.length < needed) {
+    STRING_SCRATCH = new Uint8Array(needed);
+  }
+  return UTF8_ENCODER.encodeInto(value, STRING_SCRATCH).written;
+}
+
+/**
+ * The UTF-8 byte count of value without encoding it: the bytes a writer
+ * would emit, for a measure that only needs the length. Unpaired surrogates
+ * count as the U+FFFD replacement the WHATWG encoder produces.
+ */
+function utf8ByteLength(value) {
+  if (typeof value !== 'string') {
+    value = value === undefined ? '' : `${value}`;
+  }
+  let bytes = 0;
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code < 0x80) {
+      bytes += 1;
+    } else if (code < 0x800) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < value.length) {
+      const next = value.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        i++;
+      } else {
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+}
+
+/** The first length bytes of the shared scratch, as a view reused across calls. */
+function stringDecodeView(length) {
+  if (
+    STRING_DECODE_VIEW.buffer !== STRING_SCRATCH.buffer ||
+    STRING_DECODE_VIEW.length !== length
+  ) {
+    STRING_DECODE_VIEW = new Uint8Array(STRING_SCRATCH.buffer, 0, length);
+  }
+  return STRING_DECODE_VIEW;
+}
+
 /**
  * The first refusal latched on a stream: the closed list of refusal reasons
  * (STANDARD.md, "Refusal reasons"), spelled exactly as the standard spells
@@ -1480,11 +1550,11 @@ class CheckedWriteStream {
     if (!value.isWellFormed()) {
       throw new RangeError(STRING_UTF16_MESSAGE);
     }
-    const utf8 = UTF8_ENCODER.encode(value);
-    if (utf8.length >= bufferSize) {
+    const byteLength = encodeString(value);
+    if (byteLength >= bufferSize) {
       throw new RangeError(STRING_LENGTH_MESSAGE);
     }
-    return this.#writeStringPayload(utf8, bitsRequired(0, bufferSize - 1)) ||
+    return this.#writeStringPayload(byteLength, bitsRequired(0, bufferSize - 1)) ||
       this.#noRoom();
   }
 
@@ -1492,19 +1562,20 @@ class CheckedWriteStream {
    * The string's wire after its checks: the length in lengthBits, the
    * align, the payload. U10: the room for all three is checked before the
    * first bit, so a string that does not fit writes nothing. Returns false
-   * only for want of room.
+   * only for want of room. The payload is the shared scratch's first
+   * byteLength bytes.
    */
-  #writeStringPayload(utf8, lengthBits) {
+  #writeStringPayload(byteLength, lengthBits) {
     const writer = this.#writer;
     const align = (8 - ((writer.bitsWritten() + lengthBits) % 8)) % 8;
-    if (lengthBits + align + utf8.length * 8 > writer.bitsAvailable()) {
+    if (lengthBits + align + byteLength * 8 > writer.bitsAvailable()) {
       return false;
     }
     if (lengthBits > 0) {
-      writer.writeBits(utf8.length, lengthBits);
+      writer.writeBits(byteLength, lengthBits);
     }
     writer.writeAlign();
-    writer.writeBytes(utf8, 0, utf8.length);
+    writer.writeBytes(STRING_SCRATCH, 0, byteLength);
     return true;
   }
 
@@ -2180,19 +2251,19 @@ class ProductionWriteStream {
    * @returns {boolean} true on success.
    */
   serializeString(ref, bufferSize) {
-    const utf8 = UTF8_ENCODER.encode(ref.value);
+    const byteLength = encodeString(ref.value);
     // U10: the room for the length, the align and the payload, before any
     const writer = this.#writer;
     const lengthBits = uncheckedBitsRequired(0, (bufferSize - 1) >>> 0);
     const align = (8 - ((writer.bitsWritten() + lengthBits) % 8)) % 8;
-    if (lengthBits + align + utf8.length * 8 > writer.bitsAvailable()) {
+    if (lengthBits + align + byteLength * 8 > writer.bitsAvailable()) {
       return this.#noRoom();
     }
     if (lengthBits > 0) {
-      writer.writeBits(utf8.length, lengthBits);
+      writer.writeBits(byteLength, lengthBits);
     }
     writer.writeAlign();
-    writer.writeBytes(utf8, 0, utf8.length);
+    writer.writeBytes(STRING_SCRATCH, 0, byteLength);
     return true;
   }
 
@@ -3115,32 +3186,34 @@ export class ReadStream {
     if (!bufferSizeIsValid(bufferSize)) {
       return this.#fail(SerializeError.ValueOutOfRange);
     }
-    const lengthRef = { value: 0 };
-    if (!this.serializeInt(lengthRef, 0, bufferSize - 1)) {
+    if (!this.serializeInt(STRING_LENGTH_REF, 0, bufferSize - 1)) {
       return false;
     }
     if (!this.#reader.readAlign()) {
       return this.#fail(SerializeError.NonzeroPadding);
     }
-    const length = lengthRef.value;
+    const length = STRING_LENGTH_REF.value;
     // compare in bytes rather than bits, consistent with the family's
     // 64-bit bookkeeping
     if (length > this.#reader.bitsRemaining() / 8) {
       return this.#fail(SerializeError.PastEnd);
     }
-    const payload = this.#reader.readBytes(length);
+    if (STRING_SCRATCH.length < length) {
+      STRING_SCRATCH = new Uint8Array(length);
+    }
+    this.#reader.readBytesInto(STRING_SCRATCH, 0, length);
     // the NUL scan runs over the WHOLE payload before the encoding is
     // checked (STANDARD.md, "string"): NUL is well-formed UTF-8, so the
     // decoder below cannot catch it, the terminator is never transmitted,
     // and a payload that breaks both rules is refused as embedded_nul
     for (let i = 0; i < length; i++) {
-      if (payload[i] === 0) {
+      if (STRING_SCRATCH[i] === 0) {
         return this.#fail(SerializeError.EmbeddedNul);
       }
     }
     let decoded;
     try {
-      decoded = UTF8_DECODER.decode(payload);
+      decoded = UTF8_DECODER.decode(stringDecodeView(length));
     } catch {
       return this.#fail(SerializeError.InvalidUtf8);
     }
@@ -3703,11 +3776,12 @@ class CheckedMeasureStream {
     if (!value.isWellFormed()) {
       throw new RangeError(STRING_UTF16_MESSAGE);
     }
-    const byteLength = UTF8_ENCODER.encode(value).length;
+    const byteLength = utf8ByteLength(value);
     if (byteLength >= bufferSize) {
       throw new RangeError(STRING_LENGTH_MESSAGE);
     }
-    if (!this.serializeInt({ value: byteLength }, 0, bufferSize - 1)) {
+    STRING_LENGTH_REF.value = byteLength;
+    if (!this.serializeInt(STRING_LENGTH_REF, 0, bufferSize - 1)) {
       return false;
     }
     this.serializeAlign();
@@ -4080,7 +4154,7 @@ class ProductionMeasureStream {
    * @returns {boolean} true, always.
    */
   serializeString(ref, bufferSize) {
-    const byteLength = UTF8_ENCODER.encode(ref.value).length;
+    const byteLength = utf8ByteLength(ref.value);
     this.#bitsWritten += uncheckedBitsRequired(0, (bufferSize - 1) >>> 0) + 7 + byteLength * 8;
     return true;
   }
