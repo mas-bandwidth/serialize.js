@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { CONTROLS_DIR, CORPUS_DIR, conformanceDir } from './conformance-runner.js';
+import { conformanceDir } from './conformance-runner.js';
 
 const VENDORED_CORPUS = fileURLToPath(new URL('../conformance/', import.meta.url));
 const VENDORED_CONTROLS = fileURLToPath(new URL('../conformance-controls/', import.meta.url));
@@ -33,7 +33,7 @@ test('the runner reads the directories the environment names', async () => {
   process.env.SERIALIZE_CONFORMANCE_CONTROLS_DIR = resolve('upstream', 'conformance-controls');
   try {
     // a fresh module instance, so its constants are read with the override set
-    const runner = await import(`./conformance-runner.js?override=${Date.now()}`);
+    const runner = await import('./conformance-runner.js?override');
     assert.equal(runner.CORPUS_DIR, resolve('upstream', 'conformance') + sep);
     assert.equal(runner.CONTROLS_DIR, resolve('upstream', 'conformance-controls') + sep);
   } finally {
@@ -50,11 +50,18 @@ test('the runner reads the directories the environment names', async () => {
   }
 });
 
-test('without an override the runner reads the vendored directories', () => {
-  if (process.env.SERIALIZE_CONFORMANCE_DIR === undefined || process.env.SERIALIZE_CONFORMANCE_DIR === '') {
-    assert.equal(CORPUS_DIR, VENDORED_CORPUS);
-  }
-  if (process.env.SERIALIZE_CONFORMANCE_CONTROLS_DIR === undefined || process.env.SERIALIZE_CONFORMANCE_CONTROLS_DIR === '') {
-    assert.equal(CONTROLS_DIR, VENDORED_CONTROLS);
+test('without an override the runner reads the vendored directories', async () => {
+  const names = ['SERIALIZE_CONFORMANCE_DIR', 'SERIALIZE_CONFORMANCE_CONTROLS_DIR'];
+  const saved = names.map((name) => process.env[name]);
+  try {
+    for (const name of names) delete process.env[name];
+    const runner = await import('./conformance-runner.js?without-override');
+    assert.equal(runner.CORPUS_DIR, VENDORED_CORPUS);
+    assert.equal(runner.CONTROLS_DIR, VENDORED_CONTROLS);
+  } finally {
+    for (const [index, name] of names.entries()) {
+      if (saved[index] === undefined) delete process.env[name];
+      else process.env[name] = saved[index];
+    }
   }
 });
