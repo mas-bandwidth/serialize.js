@@ -158,7 +158,7 @@ jobs:
     name: interop with the C++ reference
     runs-on: ubuntu-24.04
     env:
-      SERIALIZE_TAG: v2.1.3
+      SERIALIZE_TAG: v2.1.4
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
