@@ -320,7 +320,7 @@ const POWERS_OF_TWO = Array.from({ length: 33 }, (_, i) => 2 ** i);
 
 /** The bits rule as a predicate: the read side refuses where write throws. */
 function bitsAreValid(bits) {
-  return (bits | 0) === bits && bits >= 1 && bits <= 32;
+  return typeof bits === 'number' && (bits | 0) === bits && bits >= 1 && bits <= 32;
 }
 
 /**
@@ -343,7 +343,8 @@ function validateIntRange(min, max) {
  * caller's values before anything narrows them, with min <= max.
  */
 function intRangeIsValid(min, max) {
-  return (min | 0) === min && (max | 0) === max && min <= max;
+  return typeof min === 'number' && (min | 0) === min &&
+    typeof max === 'number' && (max | 0) === max && min <= max;
 }
 
 /**
@@ -419,7 +420,7 @@ function validateBits64(bits) {
 
 /** The bits64 rule as a predicate. */
 function bits64AreValid(bits) {
-  return (bits | 0) === bits && bits >= 1 && bits <= 64;
+  return typeof bits === 'number' && (bits | 0) === bits && bits >= 1 && bits <= 64;
 }
 
 /**
@@ -692,8 +693,8 @@ function fixedPointParams(integerBits, fractionBits, min, max) {
  */
 function deriveFixedPointParams(integerBits, fractionBits, min, max) {
   if (
-    (integerBits | 0) !== integerBits || integerBits < 1 ||
-    (fractionBits | 0) !== fractionBits || fractionBits < 0
+    typeof integerBits !== 'number' || (integerBits | 0) !== integerBits || integerBits < 1 ||
+    typeof fractionBits !== 'number' || (fractionBits | 0) !== fractionBits || fractionBits < 0
   ) {
     declarationMessage = FIXED_FORMAT_MESSAGE;
     return null;
