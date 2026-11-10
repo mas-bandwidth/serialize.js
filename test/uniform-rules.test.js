@@ -74,6 +74,8 @@ const BAD_READ_DECLARATIONS = [
   ['bytes span offset -1 (js#31)', (s) => s.serializeBytes(new Uint8Array(4), -1, 2)],
   ['bytes span past the array (js#31)', (s) => s.serializeBytes(new Uint8Array(4), 2, 3)],
   ['bytes span length 1.5 (js#31)', (s) => s.serializeBytes(new Uint8Array(4), 0, 1.5)],
+  ['bytes no destination, count 2', (s) => s.serializeBytes(null, 0, 2)],
+  ['bytes undefined destination, count 1', (s) => s.serializeBytes(undefined, undefined, 1)],
   ['object not a function', (s) => s.serializeObject(null)],
 ];
 
@@ -171,6 +173,36 @@ test('U7: a read stream over something that is not a Uint8Array refuses, never t
     assert.equal(stream.ok, true);
     assert.doesNotThrow(() => stream.reset(data));
     assert.equal(stream.error, VOOR);
+  }
+});
+
+test('U7: bytes of zero count with no destination aligns and copies nothing on every stream', () => {
+  for (const data of [null, undefined]) {
+    for (const offset of [undefined, 0]) {
+      const label = `${data} ${offset}`;
+      const writer = new WriteStream(new Uint8Array(8));
+      assert.equal(writer.serializeBits({ value: 1 }, 3), true);
+      assert.equal(writer.serializeBytes(data, offset, 0), true, label);
+      assert.equal(writer.bitsProcessed(), 8, label);
+      writer.flush();
+      assert.deepEqual(Array.from(writer.data()), [0x01], label);
+
+      const measure = new MeasureStream();
+      assert.equal(measure.serializeBytes(data, offset, 0), true, label);
+      assert.equal(measure.bitsProcessed(), 7, label);
+
+      const reader = new ReadStream(Uint8Array.of(0x01));
+      assert.equal(reader.serializeBits({ value: 0 }, 3), true);
+      assert.equal(reader.serializeBytes(data, offset, 0), true, label);
+      assert.equal(reader.bitsProcessed(), 8, label);
+      assert.equal(reader.error, SerializeError.None, label);
+
+      // the align it performs is verified, as every bytes align is
+      const padded = new ReadStream(Uint8Array.of(0x81));
+      assert.equal(padded.serializeBits({ value: 0 }, 3), true);
+      assert.equal(padded.serializeBytes(data, offset, 0), false, label);
+      assert.equal(padded.error, SerializeError.NonzeroPadding, label);
+    }
   }
 });
 

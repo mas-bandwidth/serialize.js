@@ -187,6 +187,17 @@ function utf8ByteLength(value) {
   return bytes;
 }
 
+// IMPLEMENTING.md U7: bytes of zero count with no destination is not misuse
+// on any stream. It aligns and copies nothing, exactly as an empty array does.
+const EMPTY_BYTES = new Uint8Array(0);
+
+/** data, or the empty array when data is absent and the count is zero. */
+function bytesOrEmpty(data, offset, length) {
+  return (data === null || data === undefined) && length === 0 && (offset === undefined || offset === 0)
+    ? EMPTY_BYTES
+    : data;
+}
+
 /** The first length bytes of the shared scratch, as a view reused across calls. */
 function stringDecodeView(length) {
   if (
@@ -1503,6 +1514,7 @@ class CheckedWriteStream {
    * @returns {boolean} true on success.
    */
   serializeBytes(data, offset, length) {
+    data = bytesOrEmpty(data, offset, length);
     if (!(data instanceof Uint8Array)) {
       throw new TypeError(BYTES_TYPE_MESSAGE);
     }
@@ -2228,6 +2240,7 @@ class ProductionWriteStream {
    * @returns {boolean} true on success.
    */
   serializeBytes(data, offset, length) {
+    data = bytesOrEmpty(data, offset, length);
     const start = offset === undefined ? 0 : offset;
     const bytes = length === undefined ? data.length - start : length;
     // U10: the room for the align AND the payload, before either is written
@@ -3132,6 +3145,7 @@ export class ReadStream {
     }
     // U7: a destination that is not a Uint8Array, or a span outside it,
     // is caller misuse on read, refused before any bits move (js#31 threw)
+    data = bytesOrEmpty(data, offset, length);
     if (!(data instanceof Uint8Array)) {
       return this.#fail(SerializeError.ValueOutOfRange);
     }
@@ -3742,6 +3756,7 @@ class CheckedMeasureStream {
    * @returns {boolean} true on success.
    */
   serializeBytes(data, offset, length) {
+    data = bytesOrEmpty(data, offset, length);
     if (!(data instanceof Uint8Array)) {
       throw new TypeError(BYTES_TYPE_MESSAGE);
     }
