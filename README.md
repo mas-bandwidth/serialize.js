@@ -18,6 +18,12 @@ implementations of the serialize family, wire compatible with the
 values produce the same bytes in every one, so a stream written by one reads
 in any other.
 
+If you would rather not write serialize functions by hand,
+[Schema](https://github.com/mas-bandwidth/schema) generates them for
+JavaScript and many other languages from one definition of your data. The
+packet code it generates for JavaScript reads and writes through this
+library's streams.
+
 If this library helps you, **[please support it](https://www.patreon.com/MasBandwidth/membership)**
 
 ## Getting it
