@@ -471,3 +471,53 @@ test('audit overlap: the bitpacker copies an overlapping span exactly too', () =
   reader.readBytesInto(data, 6, 20);
   assert.deepEqual(Array.from(data.subarray(6, 26)), want);
 });
+
+// A Node Buffer source overlapping the destination must be copied out before
+// any bytes are written: Buffer.prototype.slice returns a view, not a copy.
+import { Buffer } from 'node:buffer';
+
+for (const n of [1, 16, 64, 80, 128]) {
+  test(`audit overlap: a Node Buffer source with the writer's own buffer copies exactly (${n} bytes)`, () => {
+    const buffer = Buffer.alloc(256);
+    for (let i = 0; i < 256; i++) {
+      buffer[i] = i;
+    }
+    const expected = Array.from(buffer.subarray(0, n));
+    const writer = new WriteStream(buffer);
+    writer.serializeBits({ value: 0x03020100 }, 32);
+    writer.serializeBits({ value: 0x07060504 }, 32);
+    assert.equal(writer.serializeBytes(buffer.subarray(0, n)), true);
+    writer.flush();
+    assert.deepEqual(Array.from(writer.data().subarray(8, 8 + n)), expected);
+  });
+
+  test(`audit overlap: a Node Buffer source over a Uint8Array destination copies exactly (${n} bytes)`, () => {
+    const ab = new ArrayBuffer(256);
+    const dest = new Uint8Array(ab);
+    for (let i = 0; i < 256; i++) {
+      dest[i] = i;
+    }
+    const source = Buffer.from(ab, 0, n);
+    const expected = Array.from(dest.subarray(0, n));
+    const writer = new WriteStream(dest);
+    writer.serializeBits({ value: 0x03020100 }, 32);
+    writer.serializeBits({ value: 0x07060504 }, 32);
+    assert.equal(writer.serializeBytes(source), true);
+    writer.flush();
+    assert.deepEqual(Array.from(dest.subarray(8, 8 + n)), expected);
+  });
+
+  test(`audit overlap: BitWriter copies a Node Buffer source over its own buffer exactly (${n} bytes)`, () => {
+    const buffer = Buffer.alloc(256);
+    for (let i = 0; i < 256; i++) {
+      buffer[i] = i;
+    }
+    const expected = Array.from(buffer.subarray(0, n));
+    const writer = new BitWriter(buffer);
+    writer.writeBits(0x03020100, 32);
+    writer.writeBits(0x07060504, 32);
+    writer.writeBytes(buffer, 0, n);
+    writer.flushBits();
+    assert.deepEqual(Array.from(buffer.subarray(8, 8 + n)), expected);
+  });
+}

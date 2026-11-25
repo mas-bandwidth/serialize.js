@@ -312,7 +312,7 @@ class CheckedBitWriter {
     if (data.buffer === this.#data.buffer) {
       // the source shares memory with the destination: copy it out first,
       // so the copy is exact whatever the overlap (audit L, js)
-      data = data.slice(start, start + bytes);
+      data = Uint8Array.prototype.slice.call(data, start, start + bytes);
       start = 0;
     }
 
@@ -619,7 +619,7 @@ class ProductionBitWriter {
     if (data.buffer === this.#data.buffer) {
       // the source shares memory with the destination: copy it out first,
       // so the copy is exact whatever the overlap (audit L, js)
-      data = data.slice(start, start + bytes);
+      data = Uint8Array.prototype.slice.call(data, start, start + bytes);
       start = 0;
     }
 
