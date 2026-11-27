@@ -399,6 +399,15 @@ function checkFitsBig(value, bits) {
 // 2^0 .. 2^32, exact Numbers, for the width rule
 const POWERS_OF_TWO = Array.from({ length: 33 }, (_, i) => 2 ** i);
 
+/**
+ * A native integer Number, judged without coercion. Number arithmetic throws
+ * on a BigInt, a Symbol or an object, and the read side must refuse those as
+ * a value instead (U7). Number.isInteger rejects every non-Number.
+ */
+function isNativeInteger(value) {
+  return typeof value === 'number' && Number.isInteger(value);
+}
+
 /** The bits rule as a predicate: the read side refuses where write throws. */
 function bitsAreValid(bits) {
   return typeof bits === 'number' && (bits | 0) === bits && bits >= 1 && bits <= 32;
@@ -3150,6 +3159,11 @@ export class ReadStream {
       return this.#fail(SerializeError.ValueOutOfRange);
     }
     const start = offset === undefined ? 0 : offset;
+    // the subtraction below is Number arithmetic: a BigInt, a Symbol or an
+    // object throws there, and a bad span is a refusal (U7)
+    if (!isNativeInteger(start)) {
+      return this.#fail(SerializeError.ValueOutOfRange);
+    }
     const bytes = length === undefined ? data.length - start : length;
     if (!spanIsValid(data, start, bytes)) {
       return this.#fail(SerializeError.ValueOutOfRange);
