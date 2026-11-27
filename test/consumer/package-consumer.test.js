@@ -12,6 +12,8 @@
 // truncated buffers are rejected with SerializeError.PastEnd.
 
 import { test } from 'node:test';
+
+const functionalTest = process.env.SERIALIZE_TEST_FUNCTIONAL === '1' ? test : test.skip;
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -296,7 +298,7 @@ console.log(JSON.stringify({
 }));
 `;
 
-test('clean consumer installs packed tarball and verifies public entry point, 106-byte golden wire, and truncated PastEnd refusal in checked and production modes', () => {
+functionalTest('functional: clean consumer installs packed tarball and verifies public entry point, 106-byte golden wire, and truncated PastEnd refusal in checked and production modes', () => {
   // Guard that the consumer script source has zero relative repository imports.
   assert.equal(
     CONSUMER_SCRIPT_SOURCE.includes('../src') || CONSUMER_SCRIPT_SOURCE.includes('/src/index.js'),
@@ -319,7 +321,7 @@ test('clean consumer installs packed tarball and verifies public entry point, 10
     const tarballPath = path.join(packDir, packedFiles[0]);
     const tarballBytes = readFileSync(tarballPath);
     const tarballSha256 = createHash('sha256').update(tarballBytes).digest('hex');
-    assert.equal(tarballSha256.length, 64, 'valid SHA-256 hex digest of packed tarball');
+    assert.match(tarballSha256, /^[0-9a-f]{64}$/, 'valid SHA-256 hex digest of packed tarball');
 
     // Ensure no stray .tgz was left in the repository root.
     const rootTarballs = readdirSync(REPO_ROOT).filter((f) => f.endsWith('.tgz'));

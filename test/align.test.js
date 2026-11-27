@@ -118,12 +118,12 @@ test('doctored padding refused at every padding width', () => {
 });
 
 test('align mid-stream at a word boundary crossing', () => {
-  // align just before and after the 64-bit scratch boundary to prove the
-  // padding interacts correctly with the qword flush
+  // align just before 32-bit word boundaries to prove the padding interacts
+  // correctly with the 32-bit word store
   const writer = new BitWriter(new Uint8Array(16));
   writer.writeBits(0x7fffffff, 31); // bits 0..30
   writer.writeAlign(); // 1 zero bit -> bit index 32
-  writer.writeBits(0xffffffff, 32); // bits 32..63: fills the qword exactly
+  writer.writeBits(0xffffffff, 32); // bits 32..63: fills the second word exactly
   writer.writeBits(0x7f, 7); // bits 64..70
   writer.writeAlign(); // 1 zero bit -> bit index 72
   writer.writeBits(0xc3, 8);

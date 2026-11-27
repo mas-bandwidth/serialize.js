@@ -1,11 +1,12 @@
 // The production write path: what NODE_ENV=production keeps, and what it
-// removes (see src/mode.js and STANDARD.md, "Writes assume trusted data").
+// removes (see src/mode.js and STANDARD.md, "Writers are trusted; readers
+// are not").
 //
 // This file IS the production-mode leg's spine and only runs there: under
 // the default dev sweep every test here skips, because each one asserts the
-// ABSENCE of a dev assert -- an invalid-parameter call that throws or
-// latches in dev passes through in production, the caller-trust contract,
-// exactly as a C/C++ release build trusts its caller. The dev half of every
+// ABSENCE of a dev assert -- an invalid-parameter call that throws in dev
+// (write misuse never latches) passes through in production, the
+// caller-trust contract, exactly as a C/C++ release build trusts its caller. The dev half of every
 // proof already lives in the misuse and refusal suites (streams.test.js,
 // serialize-*-refusals.test.js), which the dev leg runs.
 //
@@ -104,8 +105,8 @@ spine('an invalid bits count that throws in dev passes through in production', g
   assert.equal(measure.bitsProcessed(), 0);
 });
 
-spine('an out-of-range ranged write that latches in dev passes through in production', gate, () => {
-  // dev: serializeInt latches ValueOutOfRange and writes nothing
+spine('an out-of-range ranged write that throws in dev passes through in production', gate, () => {
+  // dev: serializeInt throws RangeError, latches nothing and writes nothing
   // (serialize-int-refusals.test.js proves it). production: the value is
   // the caller's contract -- the masked offset goes out, deterministically
   // (JavaScript wire arithmetic: 300 & 0xff = 44), and the reader decodes
@@ -134,9 +135,9 @@ spine('a wrong-typed value that throws in dev passes through in production', gat
 });
 
 spine('the string well-formedness scans are gone: the writer trusts, the reader refuses', gate, () => {
-  // dev: a U+0000 latches EmbeddedNul and a lone surrogate InvalidUtf8 on
-  // write -- the checked form of the family's checked-build assertion, the
-  // O(n) scans no release path carries (serialize-string.test.js proves
+  // dev: a U+0000 or a lone surrogate throws RangeError on write and
+  // latches nothing -- the checked form of the family's checked-build
+  // assertion, the O(n) scans no release path carries (serialize-string.test.js proves
   // them). production: the writer trusts the caller, a NUL reaches the
   // wire -- where a CONFORMING READER refuses it, because the read-side
   // content refusals bind in every mode -- and TextEncoder launders a lone
@@ -155,7 +156,8 @@ spine('the string well-formedness scans are gone: the writer trusts, the reader 
 });
 
 spine('the finite-float check is gone on write: the writer trusts, the reader refuses', gate, () => {
-  // dev: NaN latches NonFiniteFloat on write (serialize-float.test.js).
+  // dev: NaN or an infinity throws RangeError on write and latches nothing
+  // (serialize-float.test.js).
   // production: the pattern reaches the wire, and every reader refuses it
   const stream = new WriteStream(new Uint8Array(16));
   assert.equal(stream.serializeFloat(ref(Infinity)), true);
@@ -171,7 +173,7 @@ spine('the finite-float check is gone on write: the writer trusts, the reader re
 });
 
 spine('a production measure cannot fail', gate, () => {
-  // dev: an out-of-range value latches ValueOutOfRange on the measure too
+  // dev: an out-of-range value throws RangeError on the measure too
   // (a message that cannot be written cannot be measured). production: the
   // measure is pure bit arithmetic, the C++ release shape -- it prices the
   // declaration and cannot fail.

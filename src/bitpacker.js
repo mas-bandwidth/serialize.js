@@ -39,6 +39,7 @@ const WRITE_UNALIGNED_MESSAGE = 'writeBytes requires a byte-aligned bit index';
 const READ_UNALIGNED_MESSAGE = 'readBytes requires a byte-aligned bit index';
 const VALUE_WIDTH_MESSAGE = 'value must be an unsigned integer that fits its bit count';
 const SPAN_MESSAGE = 'offset and length must be non-negative integers with offset + length at most data.length';
+const WRITE_AFTER_FLUSH_MESSAGE = 'write after flushBits of a partial word';
 
 /**
  * Validates the caller contract of a byte span: offset and length must be
@@ -172,6 +173,9 @@ class CheckedBitWriter {
     if ((value >>> 0) !== value || value > (bits === 32 ? 0xffffffff : ((1 << bits) >>> 0) - 1)) {
       throw new RangeError(VALUE_WIDTH_MESSAGE);
     }
+    if (this.#wordIndex * 32 + this.#scratchBits !== this.#bitsWritten) {
+      throw new Error(WRITE_AFTER_FLUSH_MESSAGE);
+    }
     if (this.#bitsWritten + bits > this.#numBits) {
       throw new RangeError(WRITE_OVERFLOW_MESSAGE);
     }
@@ -228,6 +232,9 @@ class CheckedBitWriter {
     // misuse, caught here on the caller's value; masking is not checking
     if ((value >>> 0) !== value || value > (bits === 32 ? 0xffffffff : ((1 << bits) >>> 0) - 1)) {
       throw new RangeError(VALUE_WIDTH_MESSAGE);
+    }
+    if (this.#wordIndex * 32 + this.#scratchBits !== this.#bitsWritten) {
+      throw new Error(WRITE_AFTER_FLUSH_MESSAGE);
     }
     if (this.#bitsWritten + bits > this.#numBits) {
       return false;
@@ -303,6 +310,9 @@ class CheckedBitWriter {
     let start = offset === undefined ? 0 : offset;
     const bytes = length === undefined ? data.length - start : length;
     validateSpan(data, start, bytes);
+    if (this.#wordIndex * 32 + this.#scratchBits !== this.#bitsWritten) {
+      throw new Error(WRITE_AFTER_FLUSH_MESSAGE);
+    }
     if (this.#bitsWritten % 8 !== 0) {
       throw new RangeError(WRITE_UNALIGNED_MESSAGE);
     }
@@ -311,8 +321,8 @@ class CheckedBitWriter {
     }
     if (data.buffer === this.#data.buffer) {
       // the source shares memory with the destination: copy it out first,
-      // so the copy is exact whatever the overlap (audit L, js)
-      data = data.slice(start, start + bytes);
+      // so the copy is exact whatever the overlap
+      data = Uint8Array.prototype.slice.call(data, start, start + bytes);
       start = 0;
     }
 
@@ -351,7 +361,7 @@ class CheckedBitWriter {
       this.#wordIndex += numWords;
     }
 
-    // tail: the remaining bytes, fewer than 8, through the scratch
+    // tail: the remaining bytes, fewer than 4, through the scratch
     const tailStart = headBytes + numWords * 4;
     for (let i = tailStart; i < bytes; i++) {
       this.writeBits(data[start + i], 8);
@@ -382,11 +392,14 @@ class CheckedBitWriter {
     // second half of the enclosing 8-byte span has never been written, and
     // zeroing it here is what keeps "bytes past the end of the written data
     // are only ever written as zeros" true for every bit count. The store is
-    // in bounds because the buffer's length is a multiple of 8, and it does
-    // not advance the cursor, so calling flushBits again is a no-op rather
+    // in bounds because the buffer's length is a multiple of 8. It advances
+    // the cursor past the zeroed half, so the write checks see a flushed
+    // partial 8-byte word (wordIndex * 32 + scratchBits exceeds bitsWritten,
+    // IMPLEMENTING.md U11) and calling flushBits again is a no-op rather
     // than a walk off the end.
     if ((this.#wordIndex & 1) !== 0) {
       this.#view.setUint32(this.#wordIndex * 4, 0, true);
+      this.#wordIndex++;
     }
   }
 
@@ -618,8 +631,8 @@ class ProductionBitWriter {
     const bytes = length === undefined ? data.length - start : length;
     if (data.buffer === this.#data.buffer) {
       // the source shares memory with the destination: copy it out first,
-      // so the copy is exact whatever the overlap (audit L, js)
-      data = data.slice(start, start + bytes);
+      // so the copy is exact whatever the overlap
+      data = Uint8Array.prototype.slice.call(data, start, start + bytes);
       start = 0;
     }
 
@@ -658,7 +671,7 @@ class ProductionBitWriter {
       this.#wordIndex += numWords;
     }
 
-    // tail: the remaining bytes, fewer than 8, through the scratch
+    // tail: the remaining bytes, fewer than 4, through the scratch
     const tailStart = headBytes + numWords * 4;
     for (let i = tailStart; i < bytes; i++) {
       this.writeBits(data[start + i], 8);
@@ -770,7 +783,7 @@ export const BitWriter = PRODUCTION ? ProductionBitWriter : CheckedBitWriter;
  * window load, and nothing past the data is ever loaded. A capacity-reading
  * variant, which would offer the 8-byte slack contract the way the Go port
  * reads cap(), is possible and not yet measured against this one (ROADMAP,
- * issue #22: the timing runs belong on amd-3).
+ * issue #22: the timing runs belong on a dedicated, otherwise idle machine).
  *
  * The wire is a trust boundary. The refusal surface -- wouldReadPastEnd(),
  * tryReadBits(), readAlign() -- never throws on hostile data: past-end reads
@@ -1033,8 +1046,8 @@ export class BitReader {
         dest[start + i] = data[byteIndex + i];
       }
     } else {
-      // set copies as if through a temporary when the two share memory
-      // (audit L, js): the byte loop smeared an overlapping source
+      // set copies as if through a temporary when the two share memory:
+      // a byte loop would smear an overlapping source
       dest.set(data.subarray(byteIndex, byteIndex + bytes), start);
     }
     this.#bitsRead += bytes * 8;

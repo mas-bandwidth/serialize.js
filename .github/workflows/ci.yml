@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, 'sprint/*' ]
+  # every pull request, whatever its base: sprint landings target sprint/<stream> branches, not main
   pull_request:
-    branches: [ main ]
   workflow_dispatch:
 
 concurrency:
@@ -26,14 +26,16 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - name: "Test (dev: checked write path)"
-        run: node --test
+        run: npm test
       # The write path forks at module load on NODE_ENV (src/mode.js): the
       # dev leg above runs the CHECKED variants, this leg re-proves the wire,
       # the read trust boundary and the caller-trust contract under the
       # PRODUCTION variants. The runner pins NODE_ENV=production in the child
       # itself, so the leg cannot silently run in dev mode on any OS.
       - name: Test (production write path)
-        run: node production-tests.mjs
+        run: npm run test:production
+      - name: Test (functional subprocesses and package consumer)
+        run: npm run test:functional
 
   # Lint is a failing check, warnings included. ESLint is not a dependency of
   # the package: the one pinned release runs through npx (package.json's
@@ -156,7 +158,7 @@ jobs:
     name: interop with the C++ reference
     runs-on: ubuntu-24.04
     env:
-      SERIALIZE_TAG: v2.1.1
+      SERIALIZE_TAG: v2.1.4
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

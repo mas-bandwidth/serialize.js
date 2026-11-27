@@ -28,6 +28,8 @@
 // bits, MeasureStream counts, and overflow state operation by operation.
 
 import { test } from 'node:test';
+
+const functionalTest = process.env.SERIALIZE_TEST_FUNCTIONAL === '1' ? test : test.skip;
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -1676,7 +1678,7 @@ if (process.argv[2] === '--dump-parity') {
   assert.equal(bitsRequired128(0n, 0n), 0);
 });
 
-test('fresh module-load parity: checked (NODE_ENV=development) and production (NODE_ENV=production) are wire- and count-identical across the entire table', () => {
+functionalTest('functional: fresh module-load parity: checked (NODE_ENV=development) and production (NODE_ENV=production) are wire- and count-identical across the entire table', () => {
   const checkedSnapshot = runSnapshotChild('development');
   const productionSnapshot = runSnapshotChild('production');
 

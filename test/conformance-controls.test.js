@@ -30,6 +30,8 @@
 // alone stops refusing.
 
 import { test } from 'node:test';
+
+const functionalTest = process.env.SERIALIZE_TEST_FUNCTIONAL === '1' ? test : test.skip;
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -104,7 +106,7 @@ const CONTROLS = [
         '    }',
         '    if (!params.wide) {',
         '      if (params.bits === 0) {',
-        '        ref.value = params.rawMin;',
+        '        ref.value = params.rawMin + 0;',
       ].join('\n'),
       patch: [
         '    const params = deriveFixedPointParams(integerBits, fractionBits, min, max);',
@@ -116,7 +118,7 @@ const CONTROLS = [
         '    }',
         '    if (!params.wide) {',
         '      if (params.bits === 0) {',
-        '        ref.value = params.rawMin;',
+        '        ref.value = params.rawMin + 0;',
       ].join('\n'),
     }],
   },
@@ -253,8 +255,8 @@ const CONTROLS = [
     rule: 'a string read refuses a zero byte among its payload',
     patches: [{
       file: 'streams.js',
-      needle: '      if (payload[i] === 0) {',
-      patch: `      if (payload[i] === 0 && i < 0) {${MARK}`,
+      needle: '      if (STRING_SCRATCH[i] === 0) {',
+      patch: `      if (STRING_SCRATCH[i] === 0 && i < 0) {${MARK}`,
     }],
   },
   {
@@ -273,9 +275,9 @@ const CONTROLS = [
     rule: 'a string read refuses an encoded surrogate code point',
     patches: [{
       file: 'streams.js',
-      needle: '      decoded = UTF8_DECODER.decode(payload);',
-      patch: '      decoded = (payload.some((byte, i) => byte === 0xed && payload[i + 1] >= 0xa0 && payload[i + 1] <= 0xbf) ' +
-        '? new TextDecoder() : UTF8_DECODER).decode(payload); // NEGATIVE CONTROL: this clause is deleted on purpose',
+      needle: '      decoded = UTF8_DECODER.decode(stringDecodeView(length));',
+      patch: '      decoded = (stringDecodeView(length).some((byte, i, payload) => byte === 0xed && payload[i + 1] >= 0xa0 && payload[i + 1] <= 0xbf) ' +
+        '? new TextDecoder() : UTF8_DECODER).decode(stringDecodeView(length)); // NEGATIVE CONTROL: this clause is deleted on purpose',
     }],
   },
   {
@@ -303,6 +305,28 @@ const CONTROLS = [
     }],
   },
 ];
+
+// The controls are hand-maintained; the .expected files are not. A control
+// file added to conformance-controls/ without a CONTROLS entry would be
+// silently skipped, so the directory and the list must agree one to one.
+test('control: every conformance-controls/*.expected file is declared in CONTROLS', () => {
+  const onDisk = readdirSync(CONTROLS_DIR)
+    .filter((name) => name.endsWith('.expected'))
+    .map((name) => name.slice(0, -'.expected'.length))
+    .sort();
+  const declared = CONTROLS.map((control) => control.name);
+  assert.equal(
+    new Set(declared).size,
+    declared.length,
+    'CONTROLS must not declare the same control twice',
+  );
+  assert.deepEqual(
+    declared.sort(),
+    onDisk,
+    'CONTROLS must name every conformance-controls/*.expected file exactly once: ' +
+      'add the missing entry or remove the stale one',
+  );
+});
 
 /** The number of times needle occurs in text. */
 function occurrences(text, needle) {
@@ -355,11 +379,11 @@ function failingVectors(streams) {
   return failing;
 }
 
-test('control: the unmodified library fails no vector', () => {
+functionalTest('functional: control: the unmodified library fails no vector', () => {
   assert.deepEqual(failingVectors({ ReadStream, WriteStream, MeasureStream }), []);
 });
 
-test('control: unknown-operation -- a vector whose operation has no runner is red, never skipped', () => {
+functionalTest('functional: control: unknown-operation -- a vector whose operation has no runner is red, never skipped', () => {
   const text = readFileSync(`${CONTROLS_DIR}unknown-operation.txt`, 'utf8');
   const records = parseVectors(text, 'unknown-operation.txt');
   assert.equal(records.length, 1);
@@ -367,7 +391,7 @@ test('control: unknown-operation -- a vector whose operation has no runner is re
   assert.throws(() => runVector(records[0]), /no runner/);
 });
 
-test('control: a refused vector stating no reason, or one outside the closed list, is malformed', () => {
+functionalTest('functional: control: a refused vector stating no reason, or one outside the closed list, is malformed', () => {
   const vector = (expect) => `operation bits\nname control-reason\nparam bits = 8\nbytes\nexpect ${expect}\n`;
   assert.throws(() => parseVectors(vector('refused'), 'control.txt'), /closed list/);
   assert.throws(() => parseVectors(vector('refused overflow'), 'control.txt'), /closed list/);
@@ -375,7 +399,7 @@ test('control: a refused vector stating no reason, or one outside the closed lis
 });
 
 for (const control of CONTROLS) {
-  test(`control: ${control.name} -- ${control.rule}`, async () => {
+  functionalTest(`functional: control: ${control.name} -- ${control.rule}`, async () => {
     const expected = loadExpectedFailures(control.name);
     assert.ok(expected.length > 0, `conformance-controls/${control.name}.expected names the vectors its rule owns`);
     const failing = failingVectors(await sabotagedStreams(control));
