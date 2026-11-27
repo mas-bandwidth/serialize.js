@@ -193,7 +193,7 @@ test('measure prices a compressed float at the declaration bit count', () => {
 });
 
 // The normative integer clamp (STANDARD.md, "The integer clamp is
-// normative", 2026-08-23; schema#109, ruled by Glenn live). Once
+// normative", 2026-08-23; schema#109). Once
 // max_integer_value >= 2^23 the float32 ulp at the top of the range reaches
 // 1, so floor(scaled + 0.5) can land ONE ABOVE max_integer_value when the
 // value written is max. Two witnesses, both mandated by STANDARD.md, and

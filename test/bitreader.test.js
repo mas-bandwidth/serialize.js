@@ -6,8 +6,70 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { Buffer } from 'node:buffer';
 
 import { BitWriter, BitReader } from '../src/index.js';
+
+function readPattern(reader, expected) {
+  const widths = [1, 31, 7, 9, 32];
+  let bit = 0;
+  let field = 0;
+  while (bit < expected.length * 8) {
+    const width = Math.min(widths[field++ % widths.length], expected.length * 8 - bit);
+    let value = 0;
+    for (let i = 0; i < width; i++) {
+      value |= ((expected[(bit + i) >>> 3] >>> ((bit + i) & 7)) & 1) << i;
+    }
+    assert.equal(reader.readBits(width), value >>> 0, `bit ${bit}, width ${width}`);
+    bit += width;
+  }
+  assert.equal(reader.bitsRemaining(), 0);
+  assert.equal(reader.tryReadBits(1), undefined);
+}
+
+test('offset views read exact bits for every length 1..128 without changing canaries', () => {
+  for (let bytes = 1; bytes <= 128; bytes++) {
+    const backing = new Uint8Array(24 + bytes + 24);
+    backing.fill(0xaa, 0, 24);
+    backing.fill(0x55, 24 + bytes);
+    const view = new Uint8Array(backing.buffer, 24, bytes);
+    const expected = Uint8Array.from({ length: bytes }, (_, i) => (i * 53 + bytes) & 0xff);
+    view.set(expected);
+    const original = backing.slice();
+    readPattern(new BitReader(view), expected);
+    assert.deepEqual(backing, original, `length ${bytes}`);
+  }
+});
+
+test('Buffer subarrays read multi-word fields at their byte offset', () => {
+  for (const backing of [Buffer.alloc(96), Buffer.allocUnsafe(96)]) {
+    backing.fill(0xaa, 0, 13);
+    backing.fill(0x55, 85);
+    const view = backing.subarray(13, 85);
+    const expected = Uint8Array.from({ length: 72 }, (_, i) => (i * 97 + 3) & 0xff);
+    view.set(expected);
+    const original = Buffer.from(backing);
+    readPattern(new BitReader(view), expected);
+    assert.deepEqual(backing, original);
+  }
+});
+
+test('reset of the same large array refreshes prefix and tail contents', () => {
+  const backing = new Uint8Array(24 + 96 + 24);
+  backing.fill(0xaa, 0, 24);
+  backing.fill(0x55, 120);
+  const data = new Uint8Array(backing.buffer, 24, 96);
+  data.set(Uint8Array.from({ length: 96 }, (_, i) => (i * 29 + 11) & 0xff));
+  const reader = new BitReader(data);
+  readPattern(reader, data.slice());
+  for (const index of [0, 31, 63, 88, 95]) data[index] ^= 0xff;
+  reader.reset(data);
+  assert.equal(reader.bitsRead(), 0);
+  assert.equal(reader.bitsRemaining(), 96 * 8);
+  readPattern(reader, data.slice());
+  assert.deepEqual(backing.subarray(0, 24), new Uint8Array(24).fill(0xaa));
+  assert.deepEqual(backing.subarray(120), new Uint8Array(24).fill(0x55));
+});
 
 test('known sequence A reads back: 55 FF', () => {
   // Derivation (see bitwriter.test.js): bit 0 = 1, bits 1..7 = 42,

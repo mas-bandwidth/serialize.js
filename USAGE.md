@@ -89,10 +89,10 @@ on a `WriteStream` or `MeasureStream` the checked runtime throws, and the
 production variant returns `false`.
 
 `WriteStream` needs a buffer whose length is a multiple of 8 (the writer
-works in 64-bit words). `ReadStream` accepts any data length and never
-reads outside it. `MeasureStream` touches no memory at all — it prices a
-message so you can size buffers; its bound is conservative (see
-[Measuring](#measuring)).
+stores 32-bit words, and its final flush spans the enclosing 8-byte word).
+`ReadStream` accepts any data length and never reads outside it.
+`MeasureStream` touches no memory at all — it prices a message so you can
+size buffers; its bound is conservative (see [Measuring](#measuring)).
 
 All three streams expose `bitsProcessed()`, `bytesProcessed()`,
 `isWriting` / `isReading`, and `reset(...)` for allocation-free reuse.
@@ -139,13 +139,13 @@ The errors are the standard's closed list of refusal reasons, and
 
 | `SerializeError.` | value | the rule |
 |---|---|---|
-| `PastEnd` | `'past_end'` | a read past the end of the data (or a write past the end of the buffer) |
-| `ValueOutOfRange` | `'value_out_of_range'` | a value outside its declared range or domain, on either side of the wire |
+| `PastEnd` | `'past_end'` | a read past the end of the data |
+| `ValueOutOfRange` | `'value_out_of_range'` | a value outside its declared range or domain when read |
 | `NonzeroPadding` | `'nonzero_padding'` | a set bit in an align's padding, or in the final byte's padding at the end |
 | `TrailingData` | `'trailing_data'` | a whole byte or more after the end of the object |
 | `NonFiniteFloat` | `'non_finite_float'` | a NaN or an infinity, or a compressed float decode that is not finite |
-| `InvalidUtf8` | `'invalid_utf8'` | a string payload that is not well-formed UTF-8 (or a lone surrogate handed to the checked writer) |
-| `EmbeddedNul` | `'embedded_nul'` | a zero byte among a string's bytes (or a U+0000 handed to the checked writer) |
+| `InvalidUtf8` | `'invalid_utf8'` | a string payload that is not well-formed UTF-8 |
+| `EmbeddedNul` | `'embedded_nul'` | a zero byte among a string's bytes |
 | `NonCanonical` | `'non_canonical'` | the int_relative absolute tier carrying a difference a bounded tier carries |
 | `Rejected` | `'rejected'` | the bytes were well formed, and the caller refused the value they carry |
 

@@ -162,6 +162,9 @@ test('data must be a Uint8Array on every stream: misuse throws on write and meas
     assert.equal(reader.serializeBytes(bad), false);
     assert.equal(reader.error, SerializeError.ValueOutOfRange);
   }
+  // no destination with a positive count is misuse; with count 0 it is not (U7)
+  assert.throws(() => writer.serializeBytes(null, 0, 2), TypeError);
+  assert.throws(() => measure.serializeBytes(null, 0, 2), TypeError);
 });
 
 test('measure charges the worst case align plus the bytes', () => {

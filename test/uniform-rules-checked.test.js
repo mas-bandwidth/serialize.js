@@ -25,9 +25,9 @@ test('U1: a write buffer is a multiple of 8 bytes, never 4', () => {
   }
 });
 
-// Audit M (js), U8: a value wider than its field was masked and sent; the
-// reader handed back a different value with no error anywhere
-// (audit-repro/bits-overwide.mjs).
+// U8: a value wider than its field must not be masked and sent, or the
+// reader hands back a different value with no error anywhere. Each call
+// below is such a value.
 const OVERWIDE = [
   ['serializeBits(256, 8)', (s) => s.serializeBits({ value: 256 }, 8)],
   ['serializeBits(-1, 4)', (s) => s.serializeBits({ value: -1 }, 4)],
@@ -185,4 +185,32 @@ test('U9, U15: copyString with destSize below 1, or a source holding a lone surr
   assert.throws(() => copyString(42, 8), TypeError);
   // reversed witness: a surrogate pair is one well-formed character
   assert.equal(copyString('a😀', 8), 'a\u{1F600}');
+});
+
+test('WriteStream checks: serialize after flush', () => {
+  {
+    const stream = new WriteStream(new Uint8Array(8));
+    assert.equal(stream.serializeUint8({ value: 0xab }), true);
+    stream.flush();
+    assert.throws(() => stream.serializeUint8({ value: 0xcd }), Error);
+    assert.equal(stream.bytesProcessed(), 1);
+    assert.deepEqual(Array.from(stream.data()), [0xab]);
+  }
+  {
+    const stream = new WriteStream(new Uint8Array(8));
+    assert.equal(stream.serializeUint8({ value: 0xab }), true);
+    stream.flush();
+    assert.throws(() => stream.serializeBytes(new Uint8Array([0xcd])), Error);
+    assert.equal(stream.bytesProcessed(), 1);
+    assert.deepEqual(Array.from(stream.data()), [0xab]);
+  }
+  {
+    // 32 bits flushed is half of the 8-byte word the flush stores (U11)
+    const stream = new WriteStream(new Uint8Array(16));
+    assert.equal(stream.serializeUint32({ value: 0x12345678 }), true);
+    stream.flush();
+    assert.throws(() => stream.serializeUint8({ value: 0xcd }), /write after flushBits/);
+    assert.equal(stream.bytesProcessed(), 4);
+    assert.deepEqual(Array.from(stream.data()), [0x78, 0x56, 0x34, 0x12]);
+  }
 });
