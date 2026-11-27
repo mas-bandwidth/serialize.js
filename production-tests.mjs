@@ -14,7 +14,7 @@
 // - the shared conformance corpus (test/conformance.test.js): every vector
 //   in conformance/ decodes to its value and its bit count, or is refused,
 //   under this leg exactly as under the dev leg;
-// - the production spine (test/production/): overflow still latches sticky,
+// - the production spine (test/production/): a write that does not fit throws,
 //   and every dev assert is proven ABSENT -- calls that throw or latch in
 //   dev pass through, the caller-trust contract.
 //
@@ -31,7 +31,11 @@ const files = [
   'test/bitreader.test.js',
   'test/bits-required-wide.test.js',
   'test/bits-required.test.js',
+  'test/bytes-span.test.js',
+  'test/conformance-controls.test.js',
+  'test/conformance-dir.test.js',
   'test/conformance.test.js',
+  'test/consumer/package-consumer.test.js',
   'test/golden-wire.test.js',
   'test/measure.test.js',
   'test/property-sweep.test.js',
@@ -40,17 +44,20 @@ const files = [
   'test/serialize-int-relative.test.js',
   'test/serialize-string-refusals.test.js',
   'test/serialize-uint128.test.js',
-  'test/serialize-wstring-refusals.test.js',
+  'test/serialize-reject.test.js',
   'test/smoke.test.js',
   'test/stream-errors.test.js',
   'test/uint-helpers.test.js',
+  'test/uniform-rules.test.js',
   'test/writer-tail-span.test.js',
+  'test/production/production-operation-parity.test.js',
   'test/production/production-write-path.test.js',
 ];
 
+// External tool and filesystem controls run once in npm run test:functional.
 const result = spawnSync(process.execPath, ['--test', ...files], {
   stdio: 'inherit',
-  env: { ...process.env, NODE_ENV: 'production' },
+  env: { ...process.env, NODE_ENV: 'production', SERIALIZE_TEST_FUNCTIONAL: '0' },
 });
 
 process.exit(result.status ?? 1);

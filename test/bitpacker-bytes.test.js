@@ -144,3 +144,14 @@ test('readBytes past the end throws in the trusted-caller form', () => {
   assert.equal(reader.bitsRead(), 0);
   assert.deepEqual(Array.from(reader.readBytes(3)), [0x01, 0x02, 0x03]);
 });
+
+test('writeBytes span contract throws: the span must lie inside data', () => {
+  const writer = new BitWriter(new Uint8Array(8));
+  const data = new Uint8Array(4);
+  for (const [offset, length] of [[-1, 1], [0, -1], [1.5, 1], [3, 2], [5, 0], [0, 5]]) {
+    assert.throws(() => writer.writeBytes(data, offset, length), RangeError, `offset ${offset}, length ${length}`);
+  }
+  assert.equal(writer.bitsWritten(), 0);
+  writer.writeBytes(data, 1, 3); // inside: fine
+  assert.equal(writer.bitsWritten(), 24);
+});

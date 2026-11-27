@@ -35,7 +35,7 @@ function writeBits(k) {
     seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
     const bits = Math.min(left, 1 + (seed % 32));
     const mask = bits === 32 ? 0xffffffff : ((1 << bits) >>> 0) - 1;
-    writer.writeBits(seed & mask, bits);
+    writer.writeBits((seed & mask) >>> 0, bits);
     left -= bits;
   }
   writer.flushBits();
@@ -110,7 +110,7 @@ test('tail span: flushBits is idempotent — a second call writes nothing new', 
       let left = k;
       while (left > 0) {
         const bits = Math.min(left, 32);
-        writer.writeBits(0xa5a5a5a5 & (bits === 32 ? 0xffffffff : ((1 << bits) >>> 0) - 1), bits);
+        writer.writeBits((0xa5a5a5a5 & (bits === 32 ? 0xffffffff : ((1 << bits) >>> 0) - 1)) >>> 0, bits);
         left -= bits;
       }
     }

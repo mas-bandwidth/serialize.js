@@ -15,10 +15,11 @@
 // (see mode.js): CheckedBitWriter -- the development default -- validates
 // every caller contract and throws on caller error, and ProductionBitWriter
 // carries the family's release shape: the caller is responsible for
-// well-formed writes (STANDARD.md, "Writes assume trusted data"), so the
+// well-formed writes (STANDARD.md, "Writers are trusted; readers are not"), so the
 // per-operation caller validation is gone and only tryWriteBits's buffer-end
-// check remains -- the one write-path check the writer-trusted model keeps,
-// because its false is the stream layer's sticky Overflow. The read side is
+// check remains -- the one write-path check this port keeps in production,
+// because it keeps the writer inside its buffer; the stream layer throws on
+// its false (IMPLEMENTING.md U9: room misuse traps, and nothing latches). The read side is
 // different in EVERY mode: the wire is a trust boundary, and hostile input
 // never throws. See BitReader.
 //
@@ -36,6 +37,37 @@ const DATA_TYPE_MESSAGE = 'data must be a Uint8Array';
 const BYTES_COUNT_MESSAGE = 'bytes must be a non-negative integer';
 const WRITE_UNALIGNED_MESSAGE = 'writeBytes requires a byte-aligned bit index';
 const READ_UNALIGNED_MESSAGE = 'readBytes requires a byte-aligned bit index';
+const VALUE_WIDTH_MESSAGE = 'value must be an unsigned integer that fits its bit count';
+const SPAN_MESSAGE = 'offset and length must be non-negative integers with offset + length at most data.length';
+const WRITE_AFTER_FLUSH_MESSAGE = 'write after flushBits of a partial word';
+
+/**
+ * Validates the caller contract of a byte span: offset and length must be
+ * non-negative integers with offset + length at most data.length. Violating
+ * it is caller misuse and throws. Shared with the stream layer, whose bytes
+ * operations take the same span.
+ * @param {Uint8Array} data the array the span selects from.
+ * @param {number} offset the index of the first byte.
+ * @param {number} length the number of bytes.
+ */
+export function validateSpan(data, offset, length) {
+  if (!spanIsValid(data, offset, length)) {
+    throw new RangeError(SPAN_MESSAGE);
+  }
+}
+
+/**
+ * The span rule as a predicate: the read stream refuses where the write
+ * side throws (IMPLEMENTING.md U7).
+ * @param {Uint8Array} data the array the span selects from.
+ * @param {number} offset the index of the first byte.
+ * @param {number} length the number of bytes.
+ * @returns {boolean} true when the span lies inside data.
+ */
+export function spanIsValid(data, offset, length) {
+  return Number.isInteger(offset) && Number.isInteger(length) && offset >= 0 && length >= 0 &&
+    offset + length <= data.length;
+}
 
 // Data at or below this size is copied into the reader's persistent scratch
 // at reset and windowed through the persistent scratch view, so reset
@@ -118,10 +150,10 @@ class CheckedBitWriter {
   /**
    * Writes the low order bits of value to the buffer, without padding to the
    * nearest byte. A boolean writes just 1 bit, a value in [0,31] writes in 5
-   * bits, and so on. bits must be in [1,32]. value is converted to uint32;
-   * bits of value above the count are ignored, as in the Go and C# ports
-   * (their uint32 parameter type performs the same conversion at the call
-   * site). Throws if the write would go past the end of the buffer.
+   * bits, and so on. bits must be in [1,32], and value an unsigned
+   * integer that fits them: a value wider than its count is write misuse
+   * and throws (U8, masking is not checking). Throws if the write would go
+   * past the end of the buffer.
    *
    * The core below the checks is duplicated in tryWriteBits and in both
    * ProductionBitWriter entries -- fused into each public entry because V8
@@ -136,12 +168,17 @@ class CheckedBitWriter {
     if (typeof value !== 'number') {
       throw new TypeError(VALUE_TYPE_MESSAGE);
     }
+    // IMPLEMENTING.md U8: a value that does not fit its bit count is write
+    // misuse, caught here on the caller's value; masking is not checking
+    if ((value >>> 0) !== value || value > (bits === 32 ? 0xffffffff : ((1 << bits) >>> 0) - 1)) {
+      throw new RangeError(VALUE_WIDTH_MESSAGE);
+    }
+    if (this.#wordIndex * 32 + this.#scratchBits !== this.#bitsWritten) {
+      throw new Error(WRITE_AFTER_FLUSH_MESSAGE);
+    }
     if (this.#bitsWritten + bits > this.#numBits) {
       throw new RangeError(WRITE_OVERFLOW_MESSAGE);
     }
-
-    // mask to the bit count: bits of value above the count are ignored
-    value = bits === 32 ? value >>> 0 : (value & (((1 << bits) >>> 0) - 1)) >>> 0;
 
     // merge into the single 32-bit staging word at the current bit position.
     // The invariant is that the word's bits at and above scratchBits are
@@ -176,8 +213,8 @@ class CheckedBitWriter {
    * Writes bits, refusing a past-end write as a value: returns true on
    * success, or false -- writing nothing -- if the write would go past the
    * end of the buffer. The write-side mirror of tryReadBits, and the single
-   * bounds check on the stream layer's hot path: the stream refuses the
-   * false as its Overflow without a second check anywhere. bits must be in
+   * bounds check on the stream layer's hot path: the stream throws on the
+   * false (U9, room misuse) without a second check anywhere. bits must be in
    * [1,32] and value a number -- caller contracts, and violating them
    * throws.
    *
@@ -191,12 +228,17 @@ class CheckedBitWriter {
     if (typeof value !== 'number') {
       throw new TypeError(VALUE_TYPE_MESSAGE);
     }
+    // IMPLEMENTING.md U8: a value that does not fit its bit count is write
+    // misuse, caught here on the caller's value; masking is not checking
+    if ((value >>> 0) !== value || value > (bits === 32 ? 0xffffffff : ((1 << bits) >>> 0) - 1)) {
+      throw new RangeError(VALUE_WIDTH_MESSAGE);
+    }
+    if (this.#wordIndex * 32 + this.#scratchBits !== this.#bitsWritten) {
+      throw new Error(WRITE_AFTER_FLUSH_MESSAGE);
+    }
     if (this.#bitsWritten + bits > this.#numBits) {
       return false;
     }
-
-    // mask to the bit count: bits of value above the count are ignored
-    value = bits === 32 ? value >>> 0 : (value & (((1 << bits) >>> 0) - 1)) >>> 0;
 
     // merge into the single 32-bit staging word at the current bit position.
     // The invariant is that the word's bits at and above scratchBits are
@@ -251,18 +293,37 @@ class CheckedBitWriter {
    * whole words bulk copy directly into the buffer, and the final partial
    * word of bytes goes through the scratch again. The wire is identical to
    * writing every byte with writeBits(value, 8).
+   *
+   * offset and length select a span of data without a subarray view, so a
+   * caller holding a fixed-capacity array writes its used prefix with no
+   * allocation: offset defaults to 0 and length to data.length - offset.
+   * Both must be non-negative integers with offset + length at most
+   * data.length -- a caller contract, and violating it throws.
    * @param {Uint8Array} data the bytes to write, in order.
+   * @param {number} [offset] the index of the first byte to write.
+   * @param {number} [length] the number of bytes to write.
    */
-  writeBytes(data) {
+  writeBytes(data, offset, length) {
     if (!(data instanceof Uint8Array)) {
       throw new TypeError(DATA_TYPE_MESSAGE);
+    }
+    let start = offset === undefined ? 0 : offset;
+    const bytes = length === undefined ? data.length - start : length;
+    validateSpan(data, start, bytes);
+    if (this.#wordIndex * 32 + this.#scratchBits !== this.#bitsWritten) {
+      throw new Error(WRITE_AFTER_FLUSH_MESSAGE);
     }
     if (this.#bitsWritten % 8 !== 0) {
       throw new RangeError(WRITE_UNALIGNED_MESSAGE);
     }
-    const bytes = data.length;
     if (this.#bitsWritten + bytes * 8 > this.#numBits) {
       throw new RangeError(WRITE_OVERFLOW_MESSAGE);
+    }
+    if (data.buffer === this.#data.buffer) {
+      // the source shares memory with the destination: copy it out first,
+      // so the copy is exact whatever the overlap
+      data = Uint8Array.prototype.slice.call(data, start, start + bytes);
+      start = 0;
     }
 
     // head: single bytes through the scratch until the cursor reaches a word
@@ -272,7 +333,7 @@ class CheckedBitWriter {
       headBytes = bytes;
     }
     for (let i = 0; i < headBytes; i++) {
-      this.writeBits(data[i], 8);
+      this.writeBits(data[start + i], 8);
     }
     if (headBytes === bytes) {
       return;
@@ -291,19 +352,19 @@ class CheckedBitWriter {
         const dst = this.#data;
         const dstBase = this.#wordIndex * 4;
         for (let i = 0; i < wordBytes; i++) {
-          dst[dstBase + i] = data[headBytes + i];
+          dst[dstBase + i] = data[start + headBytes + i];
         }
       } else {
-        this.#data.set(data.subarray(headBytes, headBytes + wordBytes), this.#wordIndex * 4);
+        this.#data.set(data.subarray(start + headBytes, start + headBytes + wordBytes), this.#wordIndex * 4);
       }
       this.#bitsWritten += numWords * 32;
       this.#wordIndex += numWords;
     }
 
-    // tail: the remaining bytes, fewer than 8, through the scratch
+    // tail: the remaining bytes, fewer than 4, through the scratch
     const tailStart = headBytes + numWords * 4;
     for (let i = tailStart; i < bytes; i++) {
-      this.writeBits(data[i], 8);
+      this.writeBits(data[start + i], 8);
     }
   }
 
@@ -331,11 +392,14 @@ class CheckedBitWriter {
     // second half of the enclosing 8-byte span has never been written, and
     // zeroing it here is what keeps "bytes past the end of the written data
     // are only ever written as zeros" true for every bit count. The store is
-    // in bounds because the buffer's length is a multiple of 8, and it does
-    // not advance the cursor, so calling flushBits again is a no-op rather
+    // in bounds because the buffer's length is a multiple of 8. It advances
+    // the cursor past the zeroed half, so the write checks see a flushed
+    // partial 8-byte word (wordIndex * 32 + scratchBits exceeds bitsWritten,
+    // IMPLEMENTING.md U11) and calling flushBits again is a no-op rather
     // than a walk off the end.
     if ((this.#wordIndex & 1) !== 0) {
       this.#view.setUint32(this.#wordIndex * 4, 0, true);
+      this.#wordIndex++;
     }
   }
 
@@ -383,20 +447,21 @@ class CheckedBitWriter {
 /**
  * The PRODUCTION variant of the bit writer: the same wire as
  * CheckedBitWriter with the caller validation removed -- the family's
- * release shape (STANDARD.md, "Writes assume trusted data": the caller is
+ * release shape (STANDARD.md, "Writers are trusted; readers are not": the caller is
  * responsible for well-formed writes, and release builds carry zero caller
  * validation on the write path). mode.js selects this class as BitWriter
  * when NODE_ENV is 'production' at module load.
  *
  * What remains is exactly what the writer-trusted model keeps hard:
  *
- * - tryWriteBits keeps its buffer-end check. Its false is the stream
- *   layer's sticky Overflow refusal: a message that does not fit the buffer
- *   is a runtime condition, not a caller bug, so the overflow contract
- *   latches identically in both modes.
- * - The value mask stays in both entries: bits of the value above the count
- *   are IGNORED by documented semantics (the Go/C# uint32 conversion), so
- *   the mask is wire arithmetic, not validation.
+ * - tryWriteBits keeps its buffer-end check, which keeps the writer inside
+ *   its buffer. The stream layer throws on its false in both modes
+ *   identically (IMPLEMENTING.md U9: an operation that does not fit the
+ *   room left is write misuse; nothing latches).
+ * - The value mask stays in both entries so a misused value cannot spill
+ *   into its neighbours' bits. A value wider than its count is write misuse
+ *   (U8), which the checked variant throws; what production writes for one
+ *   is unspecified output (U9), never a documented behaviour.
  *
  * Everything else -- bits an integer in [1,32], a Number value, capacity
  * for the trusted writeBits, a byte-aligned cursor and in-bounds span for
@@ -455,7 +520,8 @@ class ProductionBitWriter {
    * checks removed: KEEP THE FOUR COPIES IDENTICAL (see writeBits there).
    */
   writeBits(value, bits) {
-    // mask to the bit count: bits of value above the count are ignored
+    // mask to the bit count: a wider value is misuse (U8), and its output
+    // is unspecified (U9); the mask keeps it out of its neighbours' bits
     value = bits === 32 ? value >>> 0 : (value & (((1 << bits) >>> 0) - 1)) >>> 0;
 
     // merge into the single 32-bit staging word at the current bit position.
@@ -491,8 +557,8 @@ class ProductionBitWriter {
    * Writes bits, refusing a past-end write as a value: returns true on
    * success, or false -- writing nothing -- if the write would go past the
    * end of the buffer. THE RETAINED HARD CHECK of the production write
-   * path: the stream layer's sticky Overflow latches off this false, in
-   * both modes identically. bits in [1,32] and a Number value remain the
+   * path: the stream layer throws on this false (U9), in both modes
+   * identically. bits in [1,32] and a Number value remain the
    * caller's contract, unvalidated here.
    *
    * The body below the bounds check is the fused core: KEEP THE FOUR
@@ -503,7 +569,8 @@ class ProductionBitWriter {
       return false;
     }
 
-    // mask to the bit count: bits of value above the count are ignored
+    // mask to the bit count: a wider value is misuse (U8), and its output
+    // is unspecified (U9); the mask keeps it out of its neighbours' bits
     value = bits === 32 ? value >>> 0 : (value & (((1 << bits) >>> 0) - 1)) >>> 0;
 
     // merge into the single 32-bit staging word at the current bit position.
@@ -553,11 +620,21 @@ class ProductionBitWriter {
    * that fits the buffer are the caller's contract (the stream layer aligns
    * and bounds checks before calling). The copy structure is identical:
    * head bytes through the scratch to the word boundary, whole words bulk
-   * copied, tail bytes through the scratch.
+   * copied, tail bytes through the scratch. offset defaults to 0 and length
+   * to data.length - offset; a span inside data is the caller's contract.
    * @param {Uint8Array} data the bytes to write, in order.
+   * @param {number} [offset] the index of the first byte to write.
+   * @param {number} [length] the number of bytes to write.
    */
-  writeBytes(data) {
-    const bytes = data.length;
+  writeBytes(data, offset, length) {
+    let start = offset === undefined ? 0 : offset;
+    const bytes = length === undefined ? data.length - start : length;
+    if (data.buffer === this.#data.buffer) {
+      // the source shares memory with the destination: copy it out first,
+      // so the copy is exact whatever the overlap
+      data = Uint8Array.prototype.slice.call(data, start, start + bytes);
+      start = 0;
+    }
 
     // head: single bytes through the scratch until the cursor reaches a word
     // boundary, or the data runs out first
@@ -566,7 +643,7 @@ class ProductionBitWriter {
       headBytes = bytes;
     }
     for (let i = 0; i < headBytes; i++) {
-      this.writeBits(data[i], 8);
+      this.writeBits(data[start + i], 8);
     }
     if (headBytes === bytes) {
       return;
@@ -585,19 +662,19 @@ class ProductionBitWriter {
         const dst = this.#data;
         const dstBase = this.#wordIndex * 4;
         for (let i = 0; i < wordBytes; i++) {
-          dst[dstBase + i] = data[headBytes + i];
+          dst[dstBase + i] = data[start + headBytes + i];
         }
       } else {
-        this.#data.set(data.subarray(headBytes, headBytes + wordBytes), this.#wordIndex * 4);
+        this.#data.set(data.subarray(start + headBytes, start + headBytes + wordBytes), this.#wordIndex * 4);
       }
       this.#bitsWritten += numWords * 32;
       this.#wordIndex += numWords;
     }
 
-    // tail: the remaining bytes, fewer than 8, through the scratch
+    // tail: the remaining bytes, fewer than 4, through the scratch
     const tailStart = headBytes + numWords * 4;
     for (let i = tailStart; i < bytes; i++) {
-      this.writeBits(data[i], 8);
+      this.writeBits(data[start + i], 8);
     }
   }
 
@@ -695,17 +772,18 @@ export const BitWriter = PRODUCTION ? ProductionBitWriter : CheckedBitWriter;
  * front from the bytes that are there, and every read in the last 8 bytes
  * shifts that instead. THE CALLER'S ALLOCATION CONTRACT IS THEREFORE EMPTY:
  * no slack past the data is required, unlike the C++ reader, which loads
- * unconditionally and demands 8 bytes beyond the data. STANDARD.md:912-915
- * calls the zero-slack machinery conforming on the wire and, as an
- * implementation choice, refused by the speed rule in favour of the 8-byte
- * slack contract the C and C++ readers demand. This port takes the
- * zero-slack option today: it reads only the view it is given (byteOffset
- * to byteLength), never the ArrayBuffer's spare capacity; the cost is paid
- * once at reset, where the final 8 bytes are pre-assembled into
- * tailLo/tailHi, plus a compare per window load, and nothing past the data
- * is ever loaded. A capacity-reading variant, which would offer the 8-byte
- * slack contract the way the Go port reads cap(), is possible and
- * unmeasured; see https://github.com/mas-bandwidth/serialize.js/issues/22.
+ * unconditionally and demands 8 bytes beyond the data. IMPLEMENTING.md
+ * ("The buffer contract") calls the zero-slack machinery conforming on the
+ * wire and, as an implementation choice, the slower correct option, refused
+ * by the speed rule in favour of the 8-byte slack contract the C and C++
+ * readers demand. This port takes the zero-slack option today: it reads
+ * only the view it is given (byteOffset to byteLength), never the
+ * ArrayBuffer's spare capacity; the cost is paid once at reset, where the
+ * final 8 bytes are pre-assembled into tailLo/tailHi, plus a compare per
+ * window load, and nothing past the data is ever loaded. A capacity-reading
+ * variant, which would offer the 8-byte slack contract the way the Go port
+ * reads cap(), is possible and not yet measured against this one (ROADMAP,
+ * issue #22: the timing runs belong on a dedicated, otherwise idle machine).
  *
  * The wire is a trust boundary. The refusal surface -- wouldReadPastEnd(),
  * tryReadBits(), readAlign() -- never throws on hostile data: past-end reads
@@ -937,28 +1015,40 @@ export class BitReader {
    * pass the end of the data -- caller contracts, and violating them
    * throws (the trusted-caller form; the stream layer bounds checks first
    * and refuses as a value, with dest untouched on refusal).
+   *
+   * offset and length select the span of dest to fill without a subarray
+   * view: offset defaults to 0 and length to dest.length - offset. Both
+   * must be non-negative integers with offset + length at most dest.length
+   * -- a caller contract, and violating it throws. Bytes of dest outside
+   * the span are never written.
    * @param {Uint8Array} dest destination; its length is the byte count.
+   * @param {number} [offset] the index of the first byte of dest to fill.
+   * @param {number} [length] the number of bytes to read.
    */
-  readBytesInto(dest) {
+  readBytesInto(dest, offset, length) {
     if (!(dest instanceof Uint8Array)) {
       throw new TypeError(DATA_TYPE_MESSAGE);
     }
+    const start = offset === undefined ? 0 : offset;
+    const bytes = length === undefined ? dest.length - start : length;
+    validateSpan(dest, start, bytes);
     if (this.#bitsRead % 8 !== 0) {
       throw new RangeError(READ_UNALIGNED_MESSAGE);
     }
-    const bytes = dest.length;
     if (this.#bitsRead + bytes * 8 > this.#numBits) {
       throw new RangeError(READ_OVERFLOW_MESSAGE);
     }
     // the bit index is byte aligned, so this is a straight copy of the data
     const byteIndex = this.#bitsRead / 8;
     const data = this.#data;
-    if (bytes <= SMALL_COPY_BYTES) {
+    if (bytes <= SMALL_COPY_BYTES && dest.buffer !== data.buffer) {
       for (let i = 0; i < bytes; i++) {
-        dest[i] = data[byteIndex + i];
+        dest[start + i] = data[byteIndex + i];
       }
     } else {
-      dest.set(data.subarray(byteIndex, byteIndex + bytes));
+      // set copies as if through a temporary when the two share memory:
+      // a byte loop would smear an overlapping source
+      dest.set(data.subarray(byteIndex, byteIndex + bytes), start);
     }
     this.#bitsRead += bytes * 8;
   }

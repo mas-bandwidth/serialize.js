@@ -85,20 +85,9 @@ test('the golden pin: 16 bytes in little-endian order, low half first', () => {
   assert.equal(ref.value, goldenValue);
 });
 
-test('higher bits are ignored and negative BigInts wrap two\'s complement', () => {
-  const writer = new WriteStream(new Uint8Array(32));
-  writer.serializeUint128({ value: (1n << 128n) | 5n }); // bit 128 dropped
-  writer.serializeUint128({ value: -1n }); // wraps to 2^128 - 1
-  writer.flush();
-
-  const reader = new ReadStream(writer.data());
-  const a = {};
-  const b = {};
-  assert.equal(reader.serializeUint128(a), true);
-  assert.equal(reader.serializeUint128(b), true);
-  assert.equal(a.value, 5n);
-  assert.equal(b.value, 2n ** 128n - 1n);
-});
+// A value wider than 128 bits, or negative, is write misuse (IMPLEMENTING.md
+// U8): the checked runtime throws it, and the production output after misuse
+// is unspecified. test/uniform-rules-checked.test.js holds the checked throws.
 
 test('a uint128 carries no alignment: a bool shifts the whole field', () => {
   const value = (0x0123_4567_89ab_cdefn << 64n) | 0xfedc_ba98_7654_3210n;
@@ -117,7 +106,7 @@ test('a uint128 carries no alignment: a bool shifts the whole field', () => {
   assert.equal(wide.value, value);
 });
 
-test('truncated data refused as Overflow with NOTHING consumed', () => {
+test('truncated data refused as PastEnd with NOTHING consumed', () => {
   // 127 bits of headroom cannot carry a 128-bit read: consume one bit of a
   // 16-byte buffer first
   const data = new Uint8Array(16);
@@ -125,7 +114,7 @@ test('truncated data refused as Overflow with NOTHING consumed', () => {
   refused.serializeBits({ value: 0 }, 1);
   const ref = { value: 999n };
   assert.equal(refused.serializeUint128(ref), false);
-  assert.equal(refused.error, SerializeError.Overflow);
+  assert.equal(refused.error, SerializeError.PastEnd);
   assert.equal(ref.value, 999n); // ref untouched
   assert.equal(refused.bitsProcessed(), 1); // nothing consumed
 
@@ -136,11 +125,11 @@ test('truncated data refused as Overflow with NOTHING consumed', () => {
   assert.equal(ref.value, 0n);
 });
 
-test('a write past the end latches Overflow with NOTHING written', () => {
+test('a write past the end throws (U9) and writes nothing', () => {
   const overflows = new WriteStream(new Uint8Array(16));
   overflows.serializeBits({ value: 0 }, 1);
-  assert.equal(overflows.serializeUint128({ value: 0n }), false);
-  assert.equal(overflows.error, SerializeError.Overflow);
+  assert.throws(() => overflows.serializeUint128({ value: 0n }), RangeError);
+  assert.equal(overflows.error, SerializeError.None);
   assert.equal(overflows.bitsProcessed(), 1); // nothing written
 
   const fits = new WriteStream(new Uint8Array(16));
@@ -149,16 +138,16 @@ test('a write past the end latches Overflow with NOTHING written', () => {
   assert.equal(fits.bitsProcessed(), 128);
 });
 
-test('a latched stream refuses the uint128 without touching refs', () => {
+test('a full write stream throws on the uint128 and latches nothing; a latched reader refuses', () => {
   const writer = new WriteStream(new Uint8Array(16));
   writer.serializeUint128({ value: 0n });
-  writer.serializeBool({ value: true }); // latches Overflow
-  assert.equal(writer.serializeUint128({ value: 1n }), false);
-  assert.equal(writer.error, SerializeError.Overflow);
+  assert.throws(() => writer.serializeBool({ value: true }), RangeError);
+  assert.throws(() => writer.serializeUint128({ value: 1n }), RangeError);
+  assert.equal(writer.error, SerializeError.None);
 
   const reader = new ReadStream(new Uint8Array(0));
   const ref = { value: 999n };
-  reader.serializeBool(ref); // latches Overflow
+  reader.serializeBool(ref); // latches PastEnd
   assert.equal(reader.serializeUint128(ref), false);
   assert.equal(ref.value, 999n);
 });

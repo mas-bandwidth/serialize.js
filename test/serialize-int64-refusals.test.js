@@ -95,13 +95,13 @@ test('the full range has no headroom: every corner pattern decodes', () => {
   }
 });
 
-test('truncated data refused as Overflow with NOTHING consumed', () => {
+test('truncated data refused as PastEnd with NOTHING consumed', () => {
   // a full-range read needs 64 bits; 32 bits of data refuse -- before the
   // low dword is read, so nothing is consumed
   const refused = new ReadStream(new Uint8Array(4));
   const ref = { value: 999n };
   assert.equal(refused.serializeInt64(ref, INT64_MIN, INT64_MAX), false);
-  assert.equal(refused.error, SerializeError.Overflow);
+  assert.equal(refused.error, SerializeError.PastEnd);
   assert.equal(ref.value, 999n);
   assert.equal(refused.bitsProcessed(), 0);
 
@@ -113,15 +113,12 @@ test('truncated data refused as Overflow with NOTHING consumed', () => {
   assert.equal(accepted.bitsProcessed(), 32);
 });
 
-test('a write past the end latches Overflow with NOTHING written', () => {
+test('a write past the end throws (U9) and writes nothing', () => {
   // 33 bits available, a 34-bit range write refuses up front
   const overflows = new WriteStream(new Uint8Array(8));
   overflows.serializeBits({ value: 0 }, 31);
-  assert.equal(
-    overflows.serializeInt64({ value: 0n }, -5000000000n, 5000000000n),
-    false,
-  );
-  assert.equal(overflows.error, SerializeError.Overflow);
+  assert.throws(() => overflows.serializeInt64({ value: 0n }, -5000000000n, 5000000000n), RangeError);
+  assert.equal(overflows.error, SerializeError.None);
   assert.equal(overflows.bitsProcessed(), 31); // nothing written
 
   // the exact fit succeeds: 30 + 34 = 64
@@ -146,14 +143,14 @@ test('write-side range checks latch, never throw, and write nothing', () => {
   for (const [value, min, max] of cases) {
     const label = `${value} in [${min},${max}]`;
     const writer = new WriteStream(new Uint8Array(16));
-    assert.equal(writer.serializeInt64({ value }, min, max), false, `write ${label}`);
-    assert.equal(writer.error, SerializeError.ValueOutOfRange, `latch for ${label}`);
+    assert.throws(() => writer.serializeInt64({ value }, min, max), RangeError, `write ${label}`);
+    assert.equal(writer.ok, true);
     assert.equal(writer.bitsProcessed(), 0, `nothing written for ${label}`);
 
     // the measure acts like a write: same refusal
     const measure = new MeasureStream();
-    assert.equal(measure.serializeInt64({ value }, min, max), false, `measure ${label}`);
-    assert.equal(measure.error, SerializeError.ValueOutOfRange);
+    assert.throws(() => measure.serializeInt64({ value }, min, max), RangeError, `measure ${label}`);
+    assert.equal(measure.ok, true);
     assert.equal(measure.bitsProcessed(), 0);
   }
 

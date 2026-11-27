@@ -4,8 +4,58 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { Buffer } from 'node:buffer';
 
-import { BitWriter } from '../src/index.js';
+import { BitWriter, BitReader } from '../src/index.js';
+
+test('offset views preserve canaries for every wire length 1..128', () => {
+  for (let bytes = 1; bytes <= 128; bytes++) {
+    // Writer capacity is a multiple of eight; the wire may have any length.
+    const capacity = Math.ceil(bytes / 8) * 8;
+    const backing = new Uint8Array(24 + capacity + 24);
+    backing.fill(0xaa, 0, 24);
+    backing.fill(0x55, 24 + capacity);
+    const view = new Uint8Array(backing.buffer, 24, capacity);
+    if (bytes % 8 !== 0) {
+      assert.throws(() => new BitWriter(new Uint8Array(backing.buffer, 24, bytes)), RangeError);
+    }
+    const expected = Uint8Array.from({ length: bytes }, (_, i) => (i * 73 + bytes) & 0xff);
+    const writer = new BitWriter(view);
+    for (const value of expected) {
+      writer.writeBits(value & 7, 3);
+      writer.writeBits(value >>> 3, 5);
+    }
+    writer.flushBits();
+    assert.equal(writer.bitsWritten(), bytes * 8);
+    assert.deepEqual(writer.data(), expected, `wire length ${bytes}`);
+    const reader = new BitReader(writer.data());
+    for (const value of expected) {
+      assert.equal(reader.readBits(3), value & 7);
+      assert.equal(reader.readBits(5), value >>> 3);
+    }
+    assert.equal(reader.bitsRemaining(), 0);
+    assert.deepEqual(backing.subarray(0, 24), new Uint8Array(24).fill(0xaa));
+    assert.deepEqual(backing.subarray(24 + capacity), new Uint8Array(24).fill(0x55));
+  }
+});
+
+test('Buffer subarrays write and round-trip within their own bounds', () => {
+  for (const backing of [Buffer.alloc(96), Buffer.allocUnsafe(96)]) {
+    backing.fill(0xaa, 0, 13);
+    backing.fill(0x55, 85);
+    const view = backing.subarray(13, 85);
+    const writer = new BitWriter(view);
+    const expected = Uint8Array.from({ length: 72 }, (_, i) => (i * 37 + 19) & 0xff);
+    for (const value of expected) writer.writeBits(value, 8);
+    writer.flushBits();
+    assert.deepEqual(Array.from(writer.data()), Array.from(expected));
+    const reader = new BitReader(view);
+    for (const value of expected) assert.equal(reader.readBits(8), value);
+    assert.equal(reader.bitsRemaining(), 0);
+    assert.deepEqual(Array.from(backing.subarray(0, 13)), Array(13).fill(0xaa));
+    assert.deepEqual(Array.from(backing.subarray(85)), Array(11).fill(0x55));
+  }
+});
 
 test('known sequence A: 1+7+8 bits inside one byte pair', () => {
   // writeBits(1,1); writeBits(42,7); writeBits(0xFF,8)
@@ -35,9 +85,9 @@ test('known sequence B: two full words then one bit into the next word', () => {
   //
   // Derivation. The first 32-bit group occupies bits 0..31, stored little
   // endian: bytes 0..3 = EF BE AD DE. The second occupies bits 32..63:
-  // bytes 4..7 = 78 56 34 12. That fills the 64-bit scratch exactly (the
-  // qword flushes with zero spill). The final 1 bit lands at bit 64:
-  // byte 8 = 01. 65 bits -> 9 bytes on the wire.
+  // bytes 4..7 = 78 56 34 12. Each write fills the 32-bit staging word
+  // exactly, so each word stores with zero spill. The final 1 bit lands at
+  // bit 64: byte 8 = 01. 65 bits -> 9 bytes on the wire.
   const buffer = new Uint8Array(16);
   const writer = new BitWriter(buffer);
   writer.writeBits(0xdeadbeef, 32);
@@ -52,7 +102,7 @@ test('known sequence B: two full words then one bit into the next word', () => {
   );
 });
 
-test('known sequence C: a value straddling the 64-bit scratch boundary', () => {
+test('known sequence C: a value straddling a 32-bit word boundary at bit 64', () => {
   // writeBits(0,32); writeBits(0,30); writeBits(0b101,3)
   //
   // Derivation. 62 zero bits, then value 5 = 101b at bits 62..64 LSB-first:
@@ -60,9 +110,9 @@ test('known sequence C: a value straddling the 64-bit scratch boundary', () => {
   // Byte 7 holds bits 56..63: only bit 62 is set -> 0x40.
   // Byte 8 holds bit 64 in its bit 0 -> 0x01.
   // 65 bits -> 9 bytes: 00 00 00 00 00 00 00 40 01
-  // This exercises the spill: the write crosses 64 bits mid-value, so the
-  // low two bits of the value complete the first qword and the third bit
-  // carries into the next scratch.
+  // This exercises the spill: the write crosses bit 64 mid-value, so the
+  // low two bits of the value complete the second 32-bit word and the third
+  // bit carries into the next staging word.
   const buffer = new Uint8Array(16);
   const writer = new BitWriter(buffer);
   writer.writeBits(0, 32);
@@ -111,7 +161,7 @@ test('unaligned flush shapes: trailing bits are zero by construction', () => {
     let remaining = totalBits;
     while (remaining > 0) {
       const chunk = Math.min(remaining, 32);
-      writer.writeBits(0xffffffff, chunk);
+      writer.writeBits(chunk === 32 ? 0xffffffff : 2 ** chunk - 1, chunk);
       remaining -= chunk;
     }
     writer.flushBits();
@@ -140,7 +190,7 @@ test('flush is a no-op at an exact word boundary and when empty', () => {
   assert.equal(writer.bytesWritten(), 0);
   assert.equal(writer.data().length, 0);
   writer.writeBits(0x11223344, 32);
-  writer.writeBits(0x55667788, 32); // fills the qword: flushed by the write
+  writer.writeBits(0x55667788, 32); // fills the second word: stored by the write
   writer.flushBits(); // scratch is empty: must not store another word
   assert.equal(writer.bytesWritten(), 8);
   assert.deepEqual(
@@ -149,11 +199,15 @@ test('flush is a no-op at an exact word boundary and when empty', () => {
   );
 });
 
-test('bits of value above the count are ignored', () => {
-  // family convention: the Go and C# ports mask the value to the bit count
+test('a value wider than its bits is write misuse and throws (IMPLEMENTING.md U8)', () => {
+  // masking is not checking: the checked writer catches the caller's value
+  // before anything narrows it, as the C++ BitWriter asserts
   const buffer = new Uint8Array(8);
   const writer = new BitWriter(buffer);
-  writer.writeBits(0xffffff2a, 8); // low 8 bits are 0x2A
+  assert.throws(() => writer.writeBits(0xffffff2a, 8), RangeError);
+  assert.throws(() => writer.writeBits(-1, 8), RangeError);
+  assert.equal(writer.bitsWritten(), 0);
+  writer.writeBits(0x2a, 8); // the reversed witness: the same field, in width
   writer.flushBits();
   assert.deepEqual(Array.from(writer.data()), [0x2a]);
 });
@@ -209,4 +263,60 @@ test('writer checks: overflow refused, boundary accepted', () => {
   // refusal: one more bit is past the end
   assert.throws(() => writer.writeBits(0, 1), RangeError);
   assert.equal(writer.bitsWritten(), 64); // the failed write landed nothing
+});
+
+test('writer checks: write after flushBits', () => {
+  {
+    const writer = new BitWriter(new Uint8Array(8));
+    writer.writeBits(0xab, 8);
+    writer.flushBits();
+    assert.throws(() => writer.writeBits(0xcd, 8), Error);
+    assert.equal(writer.bitsWritten(), 8);
+    assert.deepEqual(Array.from(writer.data()), [0xab]);
+  }
+  {
+    const writer = new BitWriter(new Uint8Array(8));
+    writer.writeBits(0xab, 8);
+    writer.flushBits();
+    assert.throws(() => writer.tryWriteBits(0xcd, 8), Error);
+    assert.equal(writer.bitsWritten(), 8);
+    assert.deepEqual(Array.from(writer.data()), [0xab]);
+  }
+  {
+    const writer = new BitWriter(new Uint8Array(8));
+    writer.writeBits(0xab, 8);
+    writer.flushBits();
+    assert.throws(() => writer.writeBytes(new Uint8Array([0xcd])), Error);
+    assert.equal(writer.bitsWritten(), 8);
+    assert.deepEqual(Array.from(writer.data()), [0xab]);
+  }
+});
+
+test('writer checks: write after flushBits of a half-filled 8-byte word', () => {
+  // the flush stores an 8-byte word, so 32 bits flushed is a partial word,
+  // as 8 bits is: every write path refuses after it (IMPLEMENTING.md U11)
+  const writes = [
+    (writer) => writer.writeBits(0xcd, 8),
+    (writer) => writer.tryWriteBits(0xcd, 8),
+    (writer) => writer.writeBytes(new Uint8Array([0xcd])),
+  ];
+  for (const write of writes) {
+    const writer = new BitWriter(new Uint8Array(16));
+    writer.writeBits(0x12345678, 32);
+    writer.flushBits();
+    assert.throws(() => write(writer), /write after flushBits/);
+    assert.equal(writer.bitsWritten(), 32);
+    assert.deepEqual(Array.from(writer.data()), [0x78, 0x56, 0x34, 0x12]);
+  }
+  // accept neighbor: a flush on a whole 8-byte word stored no partial word
+  for (const write of writes) {
+    const writer = new BitWriter(new Uint8Array(16));
+    writer.writeBits(0x12345678, 32);
+    writer.writeBits(0x9abcdef0, 32);
+    writer.flushBits();
+    write(writer);
+    writer.flushBits();
+    assert.equal(writer.bitsWritten(), 72);
+    assert.deepEqual(Array.from(writer.data()), [0x78, 0x56, 0x34, 0x12, 0xf0, 0xde, 0xbc, 0x9a, 0xcd]);
+  }
 });

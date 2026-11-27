@@ -1,37 +1,40 @@
 // The golden wire format battery: the family's cross-language conformance
-// message, ported verbatim from serialize.h (GoldenWireData /
-// GoldenWireSerialize / golden_wire_bytes, test_golden_wire_format). The
-// exact bytes produced by the serializer are pinned down here and must
-// never change: if a pin in this file fails, the wire format has changed
-// and previously written data no longer decodes -- a breaking change, and
-// NEVER something to fix by adjusting this file. The message exercises
-// every operation class in one stream: raw bits at four widths, ranged
-// ints, bool, bit-transparent float and double, the compressed float,
-// the unsigned helpers through uint64, both interesting relative-integer
-// tiers, aligns, raw bytes, the UTF-8 string, the wide string, and six
-// fixed point declarations covering the narrow, two-group, unsigned,
-// three-group and four-group shapes. The values are the reference's own,
-// chosen so every platform quantizes identically (5.0 in [0,10]
-// normalizes to exactly 0.5, so contraction differences cannot shift the
-// quantized integer -- which is why this file pins the decoded compressed
-// float EXACTLY, not within tolerance).
+// message, format 2.0 -- STANDARD.md, "The whole message", the 29
+// operations and their 106 bytes, which the reference's golden_wire_bytes,
+// the corpus's message-golden-whole and the document's byte block all
+// carry. The exact bytes produced by the serializer are pinned down here and
+// must never change: if a pin in this file fails, the wire format has
+// changed and previously written data no longer decodes -- a breaking
+// change, and NEVER something to fix by adjusting this file. The message
+// exercises every operation class in one stream: raw bits at four widths,
+// ranged ints, bool, float and double, the compressed float, the unsigned
+// helpers through uint64, both interesting relative-integer tiers, aligns,
+// raw bytes, two UTF-8 strings (ASCII, then CJK text), six fixed point
+// declarations covering the narrow, two-group, unsigned, three-group and
+// four-group shapes, and the end. The values are the reference's own,
+// chosen so every platform quantizes identically (5.0 in [0,10] normalizes
+// to exactly 0.5, so contraction differences cannot shift the quantized
+// integer -- which is why this file pins the decoded compressed float
+// EXACTLY, not within tolerance).
 //
-// The battery also carries the format's two edge doctrines and its own
+// The battery also carries the format's edge doctrines and its own
 // self-test:
-//   - trailing bits (STANDARD.md, adopted 2026-08-15): writers emit zero
-//     in the unused bits of the final byte; readers must not reject a
-//     stream for their contents, and must decode a doctored tail
-//     identically (serialize.h test_trailing_bits).
-//   - past-end memory (STANDARD.md, ruled 2026-08-15): bytes past the
-//     stream end are never interpreted. The JS reader prices its windows
-//     INSIDE the buffer, so the proof here is the contract's observable
-//     half: poison past the end of the data view changes nothing, on the
-//     accept path or the refusal path (serialize.h test_past_end_poison).
-//   - the sabotage sweep: every consumed bit of the golden stream is load
-//     bearing. Flipping any single one of the 891 consumed bits must make
-//     the decode refuse or produce different values -- proving this
-//     battery CAN fail -- while flipping any of the 5 trailing bits must
-//     change nothing. Hostile data never throws anywhere in the sweep.
+//   - the end (STANDARD.md, "end"): the message's last field ends at bit
+//     843, its final byte carries five bits of zero padding, and the
+//     reader's end consumes them, refusing a set one as nonzero_padding and
+//     a byte more as trailing_data. A FIELD read still looks at its own
+//     bits and no others.
+//   - past-end memory: bytes past the stream end are never interpreted. The
+//     JS reader prices its windows INSIDE the buffer, so the proof here is
+//     the contract's observable half: poison past the end of the data view
+//     changes nothing, on the accept path or the refusal path (serialize.h
+//     test_past_end_poison).
+//   - the sabotage sweep: every bit of the golden stream is load bearing.
+//     Flipping any single one of the 848 bits must make the decode refuse
+//     or produce different values -- the 843 field bits change a value or
+//     derail the decode, and the 5 padding bits are refused by the end --
+//     proving this battery CAN fail. Hostile data never throws anywhere in
+//     the sweep.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -43,24 +46,23 @@ const INT32_MAX = 2147483647;
 const INT64_MIN = -(2n ** 63n);
 const INT64_MAX = 2n ** 63n - 1n;
 
-// serialize.h's golden_wire_bytes, extracted mechanically from the
-// reference source: 112 bytes, pinned forever.
+// STANDARD.md's whole message: 106 bytes, pinned forever.
 const GOLDEN_WIRE_BYTES = Uint8Array.from([
   0x5d, 0xda, 0xf7, 0xe6, 0xd5, 0x77, 0xdf, 0x56, 0xef, 0x9f, 0x75, 0x19,
   0x52, 0xbc, 0xda, 0x0f, 0x49, 0x40, 0xf4, 0x55, 0x55, 0x55, 0x55, 0x55,
   0x55, 0x55, 0xff, 0xfc, 0xd1, 0x48, 0xe0, 0x59, 0xd1, 0x48, 0xc0, 0x7b,
   0xf3, 0x6a, 0xe2, 0x59, 0xd1, 0x48, 0x84, 0xb7, 0x06, 0xde, 0xad, 0xbe,
-  0xef, 0xca, 0xfe, 0x01, 0x06, 0x67, 0x6f, 0x6c, 0x64, 0x65, 0x6e, 0xe3,
-  0x21, 0x00, 0x00, 0xc0, 0x21, 0x00, 0x00, 0x00, 0x22, 0x00, 0x00, 0x00,
-  0xc0, 0x60, 0x00, 0x80, 0xa2, 0x7c, 0xfc, 0xec, 0x26, 0xcb, 0xff, 0xff,
-  0x4b, 0x1d, 0x1f, 0xef, 0xd2, 0x1a, 0x1f, 0x01, 0xe9, 0xff, 0xff, 0x09,
-  0x19, 0x2a, 0x3b, 0x4c, 0x5d, 0x6e, 0x7f, 0x78, 0x6f, 0x5e, 0x4d, 0x3c,
-  0x2b, 0x1a, 0x09, 0x04,
+  0xef, 0xca, 0xfe, 0x01, 0x06, 0x67, 0x6f, 0x6c, 0x64, 0x65, 0x6e, 0x06,
+  0xe7, 0xa2, 0x81, 0xe7, 0x9f, 0xb3, 0xc0, 0x60, 0x00, 0x80, 0xa2, 0x7c,
+  0xfc, 0xec, 0x26, 0xcb, 0xff, 0xff, 0x4b, 0x1d, 0x1f, 0xef, 0xd2, 0x1a,
+  0x1f, 0x01, 0xe9, 0xff, 0xff, 0x09, 0x19, 0x2a, 0x3b, 0x4c, 0x5d, 0x6e,
+  0x7f, 0x78, 0x6f, 0x5e, 0x4d, 0x3c, 0x2b, 0x1a, 0x09, 0x04,
 ]);
 
-// The golden stream ends 3 bits into its final byte: 891 consumed bits,
-// 5 trailing bits the writer must zero and the reader must ignore.
-const GOLDEN_BITS = 891;
+// The last field ends at bit 843: the writer reports 843 bits, and the
+// reader's end consumes the final byte's five bits of padding, 848 in all.
+const GOLDEN_BITS = 843;
+const GOLDEN_END_BITS = 848;
 
 // GoldenWireInit, field for field. The scalar fields are the values; the
 // fixed point fields are the RAW scaled integers of the JS surface --
@@ -85,7 +87,7 @@ function goldenValues() {
     relativeFar: 2100, // difference of 2000 from the base: the mid-ladder bucket
     bytes: Uint8Array.from([0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0x01]),
     string: 'golden',
-    wstring: 'мир', // cyrillic, BMP only, explicit code points
+    cjk: '\u7881\u77F3', // 碁石, go stones: E7 A2 81 E7 9F B3
     fixedQ8_8: -(3 * 256 + 64), // -3.25 in Q8.8
     fixedQ16_16: 1234 * 65536 + 32768, // 1234.5 in Q16.16
     fixedQ48_16: -(54321n * 65536n + 12345n), // -54321.1883... in Q48.16
@@ -99,7 +101,7 @@ const SCALAR_FIELDS = [
   'bits4', 'bits11', 'bits24', 'bits32', 'intSmall', 'intFull', 'flag',
   'floatValue', 'compressedFloatValue', 'doubleValue', 'uint8Value',
   'uint16Value', 'uint32Value', 'uint64Value', 'relativeNear', 'relativeFar',
-  'string', 'wstring', 'fixedQ8_8', 'fixedQ16_16', 'fixedQ48_16',
+  'string', 'cjk', 'fixedQ8_8', 'fixedQ16_16', 'fixedQ48_16',
   'fixedQ16_16Unsigned', 'fixedQ112_16Wide', 'fixedQ64_64Wide',
 ];
 
@@ -146,7 +148,7 @@ function serializeGoldenWire(stream, refs) {
     stream.serializeAlign() &&
     stream.serializeBytes(refs.bytes) &&
     stream.serializeString(refs.string, 16) &&
-    stream.serializeWideString(refs.wstring, 8) &&
+    stream.serializeString(refs.cjk, 8) &&
     // the fixed point section starts byte aligned, so every byte pinned
     // above it stays put
     stream.serializeAlign() &&
@@ -159,14 +161,16 @@ function serializeGoldenWire(stream, refs) {
     // +-2^57 units: 75 bits, the three group structure
     stream.serializeFixed(refs.fixedQ112_16Wide, 112, 16, -144115188075855872n, 144115188075855872n) &&
     // full unit range: 128 bits, the four group structure
-    stream.serializeFixed(refs.fixedQ64_64Wide, 64, 64, INT64_MIN, INT64_MAX)
+    stream.serializeFixed(refs.fixedQ64_64Wide, 64, 64, INT64_MIN, INT64_MAX) &&
+    // the packet's end: required of a packet reader, nothing on write
+    stream.serializeEnd()
   );
 }
 
 // True when every decoded field equals the expected values exactly --
 // including the compressed float, which the golden values pin exactly by
-// construction. Object.is distinguishes -0 and accepts NaN, matching the
-// bit-transparent float doctrine.
+// construction. Object.is distinguishes -0, matching the bit-exact float
+// doctrine.
 function matchesGolden(refs, values) {
   for (const field of SCALAR_FIELDS) {
     if (!Object.is(refs[field].value, values[field])) {
@@ -194,7 +198,7 @@ test('read side: the golden bytes decode to the expected values, on every platfo
   const reader = new ReadStream(GOLDEN_WIRE_BYTES);
   const refs = makeReadRefs();
   assert.equal(serializeGoldenWire(reader, refs), true);
-  assert.equal(reader.bitsProcessed(), GOLDEN_BITS);
+  assert.equal(reader.bitsProcessed(), GOLDEN_END_BITS, 'the end consumes the padding');
 
   const expected = goldenValues();
   for (const field of SCALAR_FIELDS) {
@@ -207,7 +211,7 @@ test('read side: the golden bytes decode to the expected values, on every platfo
   assert.deepEqual(Array.from(refs.bytes), Array.from(expected.bytes));
 });
 
-test('trailing bits: the writer zeroes them and the reader is indifferent to them', () => {
+test('trailing bits: the writer zeroes them, a field read ignores them, the end refuses them', () => {
   // writer obligation, small stream: a message ending 3 bits into its
   // final byte, written into a buffer pre-filled with 0xFF so the zeros
   // must come from the writer, not from the caller
@@ -215,17 +219,24 @@ test('trailing bits: the writer zeroes them and the reader is indifferent to the
   const writer = new WriteStream(buffer);
   assert.equal(writer.serializeBits({ value: 0xdeadbeef }, 32), true);
   assert.equal(writer.serializeBits({ value: 5 }, 3), true);
+  assert.equal(writer.serializeEnd(), true);
+  assert.equal(writer.bitsProcessed(), 35, 'the end writes nothing');
   writer.flush();
 
   const bytesWritten = writer.bytesProcessed();
   const bitsInFinalByte = writer.bitsProcessed() % 8;
   assert.equal(bitsInFinalByte, 3); // the stream really does end unaligned
   const trailingMask = (0xff << bitsInFinalByte) & 0xff;
-  const data = writer.data();
+  const data = Uint8Array.from(writer.data());
   assert.equal(data[bytesWritten - 1] & trailingMask, 0); // writers must write zero
 
-  // reader indifference, small stream: set every trailing bit and read
-  // back. the doctored stream must be accepted and decode the same values.
+  // the clean stream reads to its end, consuming the padding
+  const clean = new ReadStream(data);
+  assert.equal(clean.serializeBits({}, 32) && clean.serializeBits({}, 3) && clean.serializeEnd(), true);
+  assert.equal(clean.bitsProcessed(), 40);
+
+  // set every trailing bit: each FIELD read looks at its own bits only and
+  // decodes the same values, and the end refuses the padding
   data[bytesWritten - 1] |= trailingMask;
   const reader = new ReadStream(data);
   const head = {};
@@ -234,12 +245,11 @@ test('trailing bits: the writer zeroes them and the reader is indifferent to the
   const tail = {};
   assert.equal(reader.serializeBits(tail, 3), true);
   assert.equal(tail.value, 5);
+  assert.equal(reader.serializeEnd(), false);
+  assert.equal(reader.error, 'nonzero_padding');
 });
 
-test('trailing bits: a doctored golden stream decodes identically', () => {
-  // reader indifference, full message: the golden stream ends unaligned
-  // (891 consumed bits, 5 trailing), so this test can discriminate. the
-  // pinned emission itself met the writer obligation.
+test('trailing bits: a doctored golden stream decodes every field, and its end refuses', () => {
   const bitsInFinalByte = GOLDEN_BITS % 8;
   assert.equal(bitsInFinalByte !== 0, true);
   const trailingMask = (0xff << bitsInFinalByte) & 0xff;
@@ -250,9 +260,17 @@ test('trailing bits: a doctored golden stream decodes identically', () => {
 
   const reader = new ReadStream(doctored);
   const refs = makeReadRefs();
-  assert.equal(serializeGoldenWire(reader, refs), true); // readers must not reject
-  assert.equal(matchesGolden(refs, goldenValues()), true); // and must decode identically
-  assert.equal(reader.bitsProcessed(), GOLDEN_BITS);
+  assert.equal(serializeGoldenWire(reader, refs), false, 'the end refuses set padding');
+  assert.equal(reader.error, 'nonzero_padding');
+  assert.equal(matchesGolden(refs, goldenValues()), true, 'every field before it decoded identically');
+  assert.equal(reader.bitsProcessed(), GOLDEN_END_BITS);
+
+  // and a whole byte more, even a zero one, is trailing data
+  const longer = new Uint8Array(GOLDEN_WIRE_BYTES.length + 1);
+  longer.set(GOLDEN_WIRE_BYTES);
+  const extra = new ReadStream(longer);
+  assert.equal(serializeGoldenWire(extra, makeReadRefs()), false);
+  assert.equal(extra.error, 'trailing_data');
 });
 
 test('past-end poison: bytes past the stream end are never interpreted', () => {
@@ -334,15 +352,15 @@ test('measure bounds the write at every one of the 8 starting offsets', () => {
   }
 });
 
-test('the sabotage sweep: flipping any consumed bit defeats the battery, and no flip ever throws', () => {
+test('the sabotage sweep: flipping any bit defeats the battery, and no flip ever throws', () => {
   // the battery must be able to fail: a conformance harness that accepts
-  // doctored streams proves nothing. every one of the 891 consumed bits
-  // of the golden stream is load bearing -- a value bit changes a decoded
-  // value, an align padding bit latches Align, a flag or length bit
-  // derails the decode -- so flipping any single one must make the read
-  // refuse or produce different values. the 5 trailing bits are the
-  // exact complement: flipping any of them must change nothing at all.
-  // and across all 896 doctored streams, hostile data never throws.
+  // doctored streams proves nothing. every one of the 843 field bits of the
+  // golden stream is load bearing -- a value bit changes a decoded value,
+  // an align padding bit latches NonzeroPadding, a flag or length bit
+  // derails the decode -- and so is each of the 5 padding bits after the
+  // last field, which the end refuses. Flipping any single one must make
+  // the read refuse or produce different values, and across all 848
+  // doctored streams, hostile data never throws.
   const values = goldenValues();
   for (let bit = 0; bit < GOLDEN_WIRE_BYTES.length * 8; bit++) {
     const doctored = Uint8Array.from(GOLDEN_WIRE_BYTES);
@@ -352,19 +370,9 @@ test('the sabotage sweep: flipping any consumed bit defeats the battery, and no 
     const refs = makeReadRefs();
     const ok = serializeGoldenWire(reader, refs);
     const matches = ok && matchesGolden(refs, values);
-
-    if (bit < GOLDEN_BITS) {
-      assert.equal(
-        matches,
-        false,
-        `consumed bit ${bit} flipped: the doctored stream still decoded the golden values`,
-      );
-    } else {
-      assert.equal(
-        matches && reader.bitsProcessed() === GOLDEN_BITS,
-        true,
-        `trailing bit ${bit} flipped: the doctored stream was not accepted identically`,
-      );
+    assert.equal(matches, false, `bit ${bit} flipped: the doctored stream still decoded the golden values`);
+    if (bit >= GOLDEN_BITS) {
+      assert.equal(reader.error, 'nonzero_padding', `padding bit ${bit} flipped: refused by the end`);
     }
   }
 });

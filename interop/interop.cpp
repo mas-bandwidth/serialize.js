@@ -10,20 +10,16 @@
         interop read  <file>    decode the other half's bytes, check every value, re-encode
                                 and require the result to be byte identical to the input
         interop refuse <file>   every proper prefix of the other half's bytes is a truncated
-                                stream, and every one of them must be REFUSED
+                                stream, and every one of them must be REFUSED, and so must
+                                the stream with a byte more
 
     THE MESSAGE is the boundary set: every operation STANDARD.md defines, at the values where
     implementations disagree. Zero bit ranges on all three ranged widths and on fixed point;
     the domain edges of int, int64, int128 and int_relative; the maximum widths of bits,
     uint128 and the four group fixed point path; both sides of the alignment rule, including
-    the align inside a zero length bytes; empty and full strings; and the wide string cases
-    the surrogate rule governs, up to the largest code unit. Each section is preceded by an
-    align, so a divergence localizes to a section instead of shifting every byte after it.
-
-    WHAT IT DELIBERATELY DOES NOT CARRY: a NaN payload. STANDARD.md's bit transparency claim
-    covers it, but a NaN's payload bits do not survive every language's float type on the way
-    to the wire, so a difference here would say nothing about the wire format. Each port pins
-    its own NaN patterns in its own suite, where the claim can be tested honestly.
+    the align inside a zero length bytes; the finite float edges, negative zero and the
+    subnormals; empty and full strings and real text in several scripts; and the end, which
+    requires the stream to stop exactly where the message does.
 
     Build with asserts ON (no -DNDEBUG): they are the C++ half of "API misuse panics", and the
     degenerate ranges must pass with the library's own checks enabled rather than around them.
@@ -38,7 +34,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <wchar.h>
 
 // ---------------------------------------------------------------------------------------
 // section 1: raw bit groups, every width boundary
@@ -148,8 +143,8 @@ static const uint32_t float_bits[] =
 {
     0x00000000u,                            // +0
     0x80000000u,                            // -0
-    0x7F800000u,                            // +infinity
-    0xFF800000u,                            // -infinity
+    0xFF7FFFFFu,                            // the most negative finite float32
+    0x807FFFFFu,                            // the largest negative subnormal
     0x7F7FFFFFu,                            // the largest finite float32
     0x00800000u,                            // the smallest normal
     0x00000001u,                            // the smallest subnormal
@@ -162,8 +157,8 @@ static const uint64_t double_bits[] =
 {
     0x0000000000000000ULL,                  // +0
     0x8000000000000000ULL,                  // -0
-    0x7FF0000000000000ULL,                  // +infinity
-    0xFFF0000000000000ULL,                  // -infinity
+    0xFFEFFFFFFFFFFFFFULL,                  // the most negative finite float64
+    0x800FFFFFFFFFFFFFULL,                  // the largest negative subnormal
     0x7FEFFFFFFFFFFFFFULL,                  // the largest finite float64
     0x0010000000000000ULL,                  // the smallest normal
     0x0000000000000001ULL,                  // the smallest subnormal
@@ -214,41 +209,7 @@ static const int bytes_max = 8;
 // section 13: string. buffer_size 16 throughout, so the length field is four bits.
 
 static const int string_buffer_size = 16;
-static const int string_count = 3;
-
-// ---------------------------------------------------------------------------------------
-// section 14: wstring. buffer_size 8 throughout: at most seven UTF-16 code units.
-
-static const int wstring_buffer_size = 8;
-static const int wstring_count = 6;
-
-// the wide strings as explicit code points, so no source file encoding can reach the wire.
-// On a four byte wchar_t the astral entry is one wchar_t and two code units, and the library
-// splits it into its surrogate pair at the boundary; on a two byte wchar_t it is already the
-// pair. Both produce the same bytes, which is the rule this entry exists to hold.
-static void init_wide_strings( wchar_t strings[wstring_count][wstring_buffer_size] )
-{
-    memset( (void*) strings, 0, sizeof( wchar_t ) * wstring_count * wstring_buffer_size );
-
-    // 0: empty
-    // 1: cyrillic "мир", basic plane
-    strings[1][0] = (wchar_t) 0x043C;
-    strings[1][1] = (wchar_t) 0x0438;
-    strings[1][2] = (wchar_t) 0x0440;
-    // 2: the first code unit above the surrogate block
-    strings[2][0] = (wchar_t) 0xE000;
-    // 3: the largest code unit there is
-    strings[3][0] = (wchar_t) 0xFFFF;
-    // 4: an astral code point between two basic plane ones: four code units, one pair
-    strings[4][0] = (wchar_t) 0x0041;
-    strings[4][1] = (wchar_t) 0x1F600;
-    strings[4][2] = (wchar_t) 0x0042;
-    // 5: seven code units, the most buffer_size 8 carries
-    for ( int i = 0; i < 7; i++ )
-    {
-        strings[5][i] = (wchar_t) ( 0x0061 + i );
-    }
-}
+static const int string_count = 6;
 
 // ---------------------------------------------------------------------------------------
 // the message
@@ -280,7 +241,6 @@ struct InteropData
     uint32_t filler;
     uint8_t bytes_values[bytes_count][bytes_max];
     char strings[string_count][string_buffer_size];
-    wchar_t wide_strings[wstring_count][wstring_buffer_size];
 };
 
 static float float_from_bits( uint32_t bits )
@@ -372,8 +332,10 @@ static void InteropInit( InteropData & data )
     serialize_copy_string( data.strings[0], "", string_buffer_size );
     serialize_copy_string( data.strings[1], "0123456789abcde", string_buffer_size );    // fifteen bytes: full
     serialize_copy_string( data.strings[2], "\xD0\xBC\xD0\xB8\xD1\x80", string_buffer_size );  // "мир", six UTF-8 bytes
-
-    init_wide_strings( data.wide_strings );
+    serialize_copy_string( data.strings[3], "\xE7\xA2\x81\xE7\x9F\xB3", string_buffer_size );  // CJK, go stones
+    serialize_copy_string( data.strings[4], "A\xF0\x9F\x98\x80" "B", string_buffer_size );       // an astral emoji
+    // a combining mark, a byte order mark and a noncharacter: none normalized, stripped or replaced
+    serialize_copy_string( data.strings[5], "e\xCC\x81\xEF\xBB\xBF\xEF\xBF\xBF", string_buffer_size );
 }
 
 template <typename Stream> bool InteropSerialize( Stream & stream, InteropData & data )
@@ -466,11 +428,8 @@ template <typename Stream> bool InteropSerialize( Stream & stream, InteropData &
         serialize_string( stream, data.strings[i], string_buffer_size );
     }
 
-    // ----- wstring
-    for ( int i = 0; i < wstring_count; i++ )
-    {
-        serialize_wstring( stream, data.wide_strings[i], wstring_buffer_size );
-    }
+    // ----- the end: the packet's top-level object ends here, and so does the stream
+    serialize_end( stream );
 
     return true;
 }
@@ -558,10 +517,6 @@ static bool InteropCheck( const InteropData & data )
     for ( int i = 0; i < string_count; i++ )
     {
         if ( strcmp( data.strings[i], expected.strings[i] ) != 0 ) { printf( "mismatch: string[%d]\n", i ); return false; }
-    }
-    for ( int i = 0; i < wstring_count; i++ )
-    {
-        if ( wcscmp( data.wide_strings[i], expected.wide_strings[i] ) != 0 ) { printf( "mismatch: wstring[%d]\n", i ); return false; }
     }
     return true;
 }
@@ -682,8 +637,9 @@ static int Read( const char * path )
     return 0;
 }
 
-// The hostile half: every proper prefix of a valid stream is a truncated stream, and a
-// conforming reader refuses every one of them. Nothing here may crash, hang or accept.
+// The hostile half: every proper prefix of a valid stream is a truncated stream, and the
+// stream with one zero byte more is trailing data after the end. A conforming reader refuses
+// every one of them. Nothing here may crash, hang or accept.
 static int Refuse( const char * path )
 {
     const int64_t bytes = load( path, read_buffer );
@@ -704,7 +660,16 @@ static int Refuse( const char * path )
         }
     }
 
-    printf( "interop cpp: refused all %d truncated prefixes of %s\n", (int) bytes, path );
+    memset( reencode_buffer, 0, (size_t) buffer_size + 8 );
+    memcpy( reencode_buffer, read_buffer, (size_t) bytes );
+    InteropData longer;
+    if ( decode( reencode_buffer, bytes + 1, longer ) )
+    {
+        fprintf( stderr, "interop cpp refuse: the stream with a byte more of %s was ACCEPTED\n", path );
+        return 1;
+    }
+
+    printf( "interop cpp: refused all %d truncated prefixes of %s, and the stream with a byte more\n", (int) bytes, path );
     return 0;
 }
 

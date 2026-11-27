@@ -1,14 +1,15 @@
 // Load-time mode selection: the JavaScript #ifdef.
 //
-// The family's check model (STANDARD.md, "Writes assume trusted data") makes
+// The family's check model (STANDARD.md, "Writers are trusted; readers are not") makes
 // the caller responsible for well-formed writes: writer contracts are
 // assertions in a CHECKED BUILD -- the standard's term for a build with
 // assertions enabled -- and release builds carry zero caller validation on
 // the write path. JavaScript has no compiler to strip code, so the same fork
 // happens at MODULE LOAD instead: NODE_ENV is read exactly once, here, and
 // each write-path class is exported in one of
-// two variants -- CHECKED (caller validation on: misuse throws, invalid
-// values latch -- the development default) or PRODUCTION (caller-trust:
+// two variants -- CHECKED (caller validation on: every write misuse throws,
+// nothing latches (IMPLEMENTING.md U9) -- the development default) or
+// PRODUCTION (caller-trust, output after misuse unspecified:
 // per-operation caller validation removed; only the checks the family keeps
 // hard in release remain -- see the production classes for exactly what
 // stays).
@@ -19,4 +20,15 @@
 // flag inside shared bodies) keeps the production instruction stream free of
 // dead validation and every call site monomorphic: a process only ever
 // instantiates one variant of each class.
-export const PRODUCTION = process.env.NODE_ENV === 'production';
+//
+// Keep the literal `process.env.NODE_ENV` expression intact so bundlers that
+// replace `process.env.NODE_ENV` via static define/replace (without providing
+// a `process` global) still select production mode, while unbundled runtimes
+// without `process` catch the missing global and default to checked mode.
+let nodeEnv;
+try {
+  nodeEnv = process.env.NODE_ENV;
+} catch {
+  nodeEnv = undefined;
+}
+export const PRODUCTION = nodeEnv === 'production';

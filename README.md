@@ -18,6 +18,12 @@ implementations of the serialize family, wire compatible with the
 values produce the same bytes in every one, so a stream written by one reads
 in any other.
 
+If you would rather not write serialize functions by hand,
+[Schema](https://github.com/mas-bandwidth/schema) generates them for
+JavaScript and many other languages from one definition of your data. The
+packet code it generates for JavaScript reads and writes through this
+library's streams.
+
 If this library helps you, **[please support it](https://www.patreon.com/MasBandwidth/membership)**
 
 ## Getting it
@@ -56,26 +62,39 @@ measures. [USAGE.md](USAGE.md) teaches every operation by example.
 
 - **Raw bits**: `serializeBits` (1–32), `serializeBits64` (1–64, BigInt),
   `serializeAlign`.
+- **The end**: `serializeEnd` — a packet reader calls it after the last
+  field of the packet's top-level object; it refuses a whole byte left over
+  (`trailing_data`) and a set bit in the final byte's padding
+  (`nonzero_padding`). Writes and measures emit nothing.
 - **Ranged integers**: `serializeInt`, `serializeInt64`,
   `serializeInt128` — offset from min in exactly the bit length of the
   range, unsigned-domain arithmetic so ranges wider than 2^63/2^127 are
-  exact, zero bits for a degenerate range.
+  exact, zero bits for a degenerate range. 64- and 128-bit values are
+  BigInt end to end, never a Number.
 - **Unsigned helpers and bool**: `serializeUint8` / `16` / `32` (Number),
   `serializeUint64` / `serializeUint128` (BigInt), `serializeBool`.
-- **Floats**: `serializeFloat` and `serializeDouble`, bit transparent both
-  ways — every pattern legal, NaN payloads ride a software
-  narrowing/widening that never sets the quiet bit;
-  `serializeCompressedFloat`, quantizing in float32 with the standard's
-  two roundings on each side.
+- **Floats**: `serializeFloat` and `serializeDouble`, finite values only —
+  NaN and the infinities are refused on read (`non_finite_float`), tested
+  on the raw bits, and thrown by the checked writer; negative zero and the
+  subnormals travel bit exact. `serializeCompressedFloat` quantizes in
+  float32 with the standard's two roundings on each side and refuses a
+  non-finite decode; `compressedFloatParams` and
+  `serializeCompressedFloatPrecomputed` pay its derivation once.
 - **Bytes and strings**: `serializeBytes` (aligned bulk copy, count
-  agreed, not transmitted); `serializeString` (UTF-8 on the wire, payload
-  validated on read in every mode); `serializeWideString` (one 32-bit group per
-  UTF-16 code unit, no alignment anywhere — the one place the wide path
-  deliberately differs from its narrow counterpart).
+  agreed, not transmitted; an optional `offset, length` span copies part of
+  an array with no view allocated, a language necessity under
+  IMPLEMENTING.md U15: JavaScript cannot point into the middle of a
+  buffer); `serializeString` (UTF-8 on the wire; a read
+  refuses a zero byte as `embedded_nul` before it refuses malformed UTF-8
+  as `invalid_utf8`, through a fatal decoder that never substitutes U+FFFD
+  or strips a byte order mark; U+0000 and lone surrogates are write misuse,
+  which the checked writer throws); `copyString` (`serialize_copy_string`,
+  U15: the longest whole-character prefix whose UTF-8 fits `destSize - 1`).
 - **The relative integer**: `serializeIntRelative` — the flag ladder for
   strictly increasing sequences over the non-negative int32 domain, 0 to
   2^31 - 1, one bit for a difference of 1, no wrapping. Every tier's
-  reconstruction is checked against the domain on read.
+  reconstruction is checked against the domain on read, and the absolute
+  tier refuses a difference a bounded tier carries (`non_canonical`).
 - **Fixed point**: `serializeFixed` — Q formats at 8/16/32/64/128-bit
   storage, the raw scaled integer as an exact ranged offset, byte
   identical to `serializeInt64` wherever storage fits 64 bits, zero bits
@@ -88,13 +107,20 @@ measures. [USAGE.md](USAGE.md) teaches every operation by example.
 
 ESM, zero dependencies, no build step, Node 20+.
 
+Every refusal has a reason from the standard's closed list — `past_end`,
+`value_out_of_range`, `nonzero_padding`, `trailing_data`,
+`non_finite_float`, `invalid_utf8`, `embedded_nul`, `non_canonical`, and
+`rejected` for the caller's own refusal (`stream.reject()`, or a nested
+object whose function returns `false`) — the values of `SerializeError`,
+and `stream.error` holds the first one.
+
 ## Conformance
 
 [STANDARD.md](STANDARD.md) — vendored verbatim from
 [mas-bandwidth/serialize](https://github.com/mas-bandwidth/serialize) and
-diffed against upstream by CI on every push — is the authority; where it is
-silent, the C++ implementation breaks the tie. It implements **format
-version 1.1**.
+diffed against upstream by CI on every push — is the authority. This
+library implements **format version 2.0**, standard revision 2.1: the wire carries only integers
+and bytes, and every value has exactly one encoding.
 
 [`conformance/`](conformance) is vendored and diffed the same way: it is
 the family's shared corpus, covering every operation the standard defines.
@@ -102,18 +128,28 @@ the family's shared corpus, covering every operation the standard defines.
 files and runs every vector in it on both legs — an accepted vector must
 yield its value and consume its stated bits, a `writer = canonical` vector
 must re-emit its whole stream byte for byte, a `measure_at_least` vector
-must price at or above its floor, and a refused vector must refuse, leave
-the caller's scalar destination untouched and leave the stream terminal. A
+must price at or above its floor, a `writer_input` vector must emit its
+bytes from the stated float32, and a refused vector must refuse for its
+stated reason, leave the caller's scalar destination untouched and leave
+the stream terminal. A
 vector whose operation, parameter or step spelling the runner cannot drive
 fails the run rather than being skipped. Nothing there is regenerated from
 this port's own codec.
+
+[`conformance-controls/`](conformance-controls) is vendored the same way,
+and `test/conformance-controls.test.js` proves the runner responds: a
+vector whose operation has no runner must be red, and for each of eighteen
+refusal rules a copy of the library with that one rule deleted must fail
+exactly the vectors the rule's `.expected` list names, no more and no
+fewer.
 
 [`interop/`](interop) takes it further: the CI `interop` job builds the C++
 reference and runs it head to head with this port. Both halves write the
 same boundary message — every operation the standard defines, at its
 boundary values — and the files must be byte identical; each then decodes
 the other's bytes and re-encodes them exactly; both must refuse every
-truncation of the other's stream; and both run the corpus. The wire
+truncation of the other's stream, and the stream with one byte more; and
+both run the corpus. The wire
 exchange is pinned to a released tag of the reference, so "compatible with
 C++" means the same thing here as in every other port; the corpus is driven
 by the reference at the commit the corpus itself is vendored from. The
@@ -121,67 +157,119 @@ release candidate in this repository exchanges bytes with the reference on
 every push, so wire compatibility is measured rather than asserted.
 
 Around the corpus the suite pins the family's golden vectors byte for
-byte, all minted from the C++ implementation's own output: the
-112-byte golden wire message covering every operation class in one
-stream, the discriminating compressed-float vectors (bit patterns, not
-tolerances), the string and wide-string pins, every relative-integer
-tier, and the fixed point shapes at every group count. Around the pins
-sit the doctrine batteries: trailing-bit indifference, past-end poison,
-a sabotage sweep proving every consumed bit of the golden stream is load
-bearing (so the battery itself can fail), refusal proofs both ways for
+byte: the 106-byte golden message STANDARD.md prints, covering every
+operation class in one stream and ending with its end, the
+discriminating compressed-float vectors (bit patterns, not tolerances),
+the string pins, every relative-integer tier, and the fixed point shapes
+at every group count. Around the pins sit the doctrine batteries: field
+reads indifferent to the bits after them and the end refusing them,
+past-end poison, a sabotage sweep proving every bit of the golden stream
+is load bearing (so the battery itself can fail), refusal proofs both
+ways for
 every operation, and a fixed-seed property sweep of randomized op
 programs holding write == read and measure >= write across the whole
 surface.
 
 ## Design
 
-This is a **hand-port to native JavaScript** — no wasm. Errors are values —
-bool-returning serialize methods plus a sticky latched stream error — and
-hostile input never throws.
+This is a **hand-port to native JavaScript** — no wasm. A read's refusals
+are values — bool-returning serialize methods plus a sticky latched stream
+error — and hostile input never throws. Write misuse is a throw, never a
+latch (IMPLEMENTING.md U9): a write or measure stream records no reason.
 
-The check model is the family standard's (STANDARD.md, "Writes assume
-trusted data"): **the caller is responsible for well-formed writes**, with
+The check model is the family standard's (STANDARD.md, "Writers are
+trusted; readers are not"): **the caller is responsible for well-formed
+writes**, with
 writer contracts asserted in a **checked build** — the standard's term
 for a build with assertions enabled — and compiled to zero in release.
 JavaScript has no compiler to strip code, so the write path forks **once,
 at module load**, on `NODE_ENV` — the JS `#ifdef`:
 
-- **Checked** (the default): caller misuse throws, invalid values latch —
-  the always-on form of the family's checked-build assertions. Develop and
-  test here.
+- **Checked** (the default): write misuse throws, one mechanism on every
+  operation — a bad declaration, a value of the wrong type, a value the
+  declaration cannot carry (out of range, wider than its bits, not finite,
+  text that is not well-formed, an operation that does not fit the room
+  left) — the always-on form of the family's checked-build assertions,
+  and this port's trap (U9). Develop and test here.
 - **Production** (`NODE_ENV=production`): the caller is trusted, exactly as
   a C/C++ release build trusts it. Per-operation caller validation is gone
   from `WriteStream`, `MeasureStream` and `BitWriter`; every write keeps
-  the sticky-error gate and the buffer-end check, whose false latches
-  `Overflow` — a message that does not fit is a runtime condition, not a
-  caller bug. Misuse produces garbage on the wire (which conforming readers
-  refuse), never memory unsafety: JavaScript's own bounds semantics
-  backstop the trusted path.
+  the room check, which keeps the writer inside its buffer, and it throws
+  there too. Output after any other write misuse is unspecified (U3, U9),
+  never a documented behaviour, and never memory unsafety: JavaScript's
+  own bounds semantics backstop the trusted path.
 
 The selection is frozen — the environment is read once, whole classes are
 chosen at export time, changing `NODE_ENV` after load has no effect — and
 the wire is byte identical in both modes: the golden pins and the property
 sweep are re-run under the production variants. Reads validate everything
 in **every** mode: the wire is a trust boundary, `ReadStream` has no
-variants, and the read-side content refusals bind in production too.
+variants, and the read-side content refusals bind in production too. A
+read never throws, on hostile bytes or on caller misuse: a bad declaration
+refuses as `value_out_of_range` before any bits move.
+
+The family's uniform rules (IMPLEMENTING.md U1 to U16) hold here, each
+proved in `test/uniform-rules.test.js` and
+`test/uniform-rules-checked.test.js`: write buffers are a multiple of 8
+bytes; a write checks room for the whole operation before writing any of
+it; a writer's buffer is defined only after `flush()`; `end` on a write or
+measure returns true; `reset()` re-initialises every stream and clears a
+reader's latch; write misuse throws and never latches; every stream has a public `fail(reason)`, and `refusalName(error)`
+gives the family spelling, `'none'` for no refusal.
 
 ## Testing
 
 ```
-npm test                  # dev leg: the checked variants, every suite
+npm test                  # dev leg: the checked variants, every unit suite
 npm run test:production   # production leg: wire, trust boundary and
                           # caller-trust contract under the production variants
+npm run test:functional   # functional tier: the negative controls, the
+                          # package consumer and production operation parity
+npm run lint              # ESLint at a pinned release through npx, zero warnings
 ```
 
-`npm test` is nothing more than `node --test` — the runner's default matcher
-picks up every `*.test.js` under `test/`. (A bare directory argument stopped
-being accepted by Node 22's runner, so the invocation stays argument-free.)
+`npm test` runs `node --test` with the functional tier switched off — the
+runner's default matcher picks up every `*.test.js` under `test/`. (A bare
+directory argument stopped being accepted by Node 22's runner, so the
+invocation stays argument-free.) The functional tier's tests are named
+`functional: …` and run only under `npm run test:functional`, which sets
+`SERIALIZE_TEST_FUNCTIONAL=1`. It holds the negative controls
+(`test/conformance-controls.test.js`): each copies `src/` with one refusal
+rule deleted and requires the corpus to fail exactly the vectors
+`conformance-controls/<rule>.expected` names; a control whose needle no
+longer matches the library fails rather than passing silently.
 The production leg runs `production-tests.mjs`, which spawns the same runner
 with `NODE_ENV=production` pinned over every test file that asserts no
 dev-only caller validation, plus `test/production/` — where each dev assert
-is proven **absent**: calls that throw or latch in dev pass through in
-production, and overflow still latches. CI runs both legs on every OS and
-Node version.
+is proven **absent**: calls that throw in dev pass through in production,
+and a write that does not fit still throws. CI runs both legs and the
+functional tier on every OS and Node version, and lint as its own failing
+check.
+
+### Fuzzing
+
+`fuzz/` holds a coverage-guided fuzz harness on [Jazzer.js](https://github.com/CodeIntelligenceTesting/jazzer.js),
+the two passes of the reference's `fuzz.cpp`. Jazzer.js is pinned in
+`fuzz/package.json` and its own lockfile, so the library package itself
+keeps zero dependencies.
+
+```
+cd fuzz && npm ci
+npx jazzer read.fuzz.js corpus/read --sync -- -max_total_time=60
+npx jazzer roundtrip.fuzz.js corpus/roundtrip --sync -- -max_total_time=60
+```
+
+`read.fuzz.js` feeds arbitrary bytes through every read primitive: each read
+returns true with a value inside its contract, or false with a reason from
+the closed list, its destination untouched and every later call an echo;
+nothing throws, and the same bytes read through a view over a larger buffer
+give identical results. `roundtrip.fuzz.js` writes values generated from the
+input, measures and reads them back: any asymmetry, or a measure below the
+bits written, is a finding. `SERIALIZE_FUZZ_SABOTAGE=int-relative-tier`
+fuzzes a copy of `src/` with a planted writer asymmetry instead, the
+negative control. CI runs both targets for 60 s and requires the negative
+control to be caught on every push; `nightly-fuzz.yml` runs them for an hour
+a day on a cached corpus, the round trip under both write-path variants.
 
 Benchmarking for the serialize family lives in [mas-bandwidth/schema](https://github.com/mas-bandwidth/schema)'s data-driven bench, which measures the generated codecs across every language on one corpus.
 

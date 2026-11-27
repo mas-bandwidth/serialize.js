@@ -12,9 +12,9 @@ import {
   WriteStream,
   ReadStream,
   MeasureStream,
-  SerializeError,
   bitsRequired,
 } from '../src/index.js';
+import { misuse } from './misuse.js';
 
 // Writes value over [min,max], reads it back over the same range, and
 // checks both directions cost exactly bitsRequired bits.
@@ -166,20 +166,20 @@ test('pinned wire bytes: full-range int32 is the unsigned offset from -2^31', ()
   assert.equal(y.value, 0);
 });
 
-test('an invalid range is caller misuse and throws on every stream', () => {
+test('an invalid range is caller misuse: it throws on write and measure, and refuses on read', () => {
   const writer = new WriteStream(new Uint8Array(8));
   const reader = new ReadStream(new Uint8Array(8));
   const measure = new MeasureStream();
   for (const stream of [writer, reader, measure]) {
     // min above max
-    assert.throws(() => stream.serializeInt({ value: 0 }, 5, 4), RangeError);
+    misuse(stream, () => stream.serializeInt({ value: 0 }, 5, 4), RangeError);
     // bounds outside the int32 domain
-    assert.throws(() => stream.serializeInt({ value: 0 }, 0, 2147483648), RangeError);
-    assert.throws(() => stream.serializeInt({ value: 0 }, -2147483649, 0), RangeError);
-    assert.throws(() => stream.serializeInt({ value: 0 }, 0.5, 10), RangeError);
-    assert.throws(() => stream.serializeInt({ value: 0 }, 0, NaN), RangeError);
+    misuse(stream, () => stream.serializeInt({ value: 0 }, 0, 2147483648), RangeError);
+    misuse(stream, () => stream.serializeInt({ value: 0 }, -2147483649, 0), RangeError);
+    misuse(stream, () => stream.serializeInt({ value: 0 }, 0.5, 10), RangeError);
+    misuse(stream, () => stream.serializeInt({ value: 0 }, 0, NaN), RangeError);
     // misuse throws even though nothing latched: the streams stay healthy
-    assert.equal(stream.ok, true);
+    assert.equal(stream.ok, !stream.isReading);
     assert.equal(stream.bitsProcessed(), 0);
   }
 });
@@ -191,4 +191,15 @@ test('a non-number value on write or measure is caller misuse and throws', () =>
   assert.throws(() => writer.serializeInt({ value: '3' }, 0, 7), TypeError);
   const measure = new MeasureStream();
   assert.throws(() => measure.serializeInt({ value: null }, 0, 7), TypeError);
+});
+
+test('degenerate zero integer reads use positive zero', () => {
+  for (const [min, max] of [[-0, -0], [-0, +0], [+0, -0]]) {
+    const reader = new ReadStream(new Uint8Array(0));
+    const ref = { value: 123 };
+    assert.equal(reader.serializeInt(ref, min, max), true);
+    assert.equal(Object.is(ref.value, +0), true);
+    assert.equal(reader.bitsProcessed(), 0);
+    assert.equal(reader.ok, true);
+  }
 });

@@ -14,7 +14,7 @@ import {
   SerializeError,
 } from '../src/index.js';
 
-test('write overflow latches as a value, boundary fill accepted', () => {
+test('a write that does not fit throws and latches nothing (U9), boundary fill accepted', () => {
   // accept neighbor first: fill an 8-byte buffer to exactly 64 bits
   const exact = new WriteStream(new Uint8Array(8));
   assert.equal(exact.serializeBits({ value: 0xffffffff }, 32), true);
@@ -22,28 +22,29 @@ test('write overflow latches as a value, boundary fill accepted', () => {
   assert.equal(exact.ok, true);
   assert.equal(exact.bitsAvailable(), 0);
 
-  // one more bit does not fit: false and Overflow, not a throw
-  assert.equal(exact.serializeBits({ value: 1 }, 1), false);
-  assert.equal(exact.error, SerializeError.Overflow);
-  assert.equal(exact.ok, false);
+  // one more bit does not fit: write misuse, a throw, never a latch (U9)
+  assert.throws(() => exact.serializeBits({ value: 1 }, 1), RangeError);
+  assert.equal(exact.error, SerializeError.None);
+  assert.equal(exact.ok, true);
   assert.equal(exact.bitsProcessed(), 64);
 });
 
-test('a latched write error is sticky: later calls no-op', () => {
+test('write misuse never latches: after a throw, a write that fits is written exactly (U9)', () => {
   const writer = new WriteStream(new Uint8Array(8));
   writer.serializeBits({ value: 0 }, 32);
-  writer.serializeBits({ value: 0 }, 32);
-  assert.equal(writer.serializeBits({ value: 1 }, 1), false); // latches
+  writer.serializeBits({ value: 0 }, 24);
+  assert.throws(() => writer.serializeBits({ value: 1 }, 9), RangeError);
 
-  // plenty of conceptual room for these -- but the stream has failed, so
-  // every later call returns false and writes nothing
-  assert.equal(writer.serializeBits({ value: 0x42 }, 8), false);
-  assert.equal(writer.serializeAlign(), false);
+  // nothing failed the stream: the room left is still written
+  assert.equal(writer.serializeBits({ value: 0x42 }, 8), true);
+  assert.equal(writer.serializeAlign(), true);
   assert.equal(writer.bitsProcessed(), 64);
-  assert.equal(writer.error, SerializeError.Overflow);
+  assert.equal(writer.error, SerializeError.None);
+  writer.flush();
+  assert.equal(writer.data()[7], 0x42);
 });
 
-test('read past the end latches Overflow and leaves the ref unmodified', () => {
+test('read past the end latches PastEnd and leaves the ref unmodified', () => {
   // accept neighbor: a 1-byte packet read to exactly its end
   const reader = new ReadStream(new Uint8Array([0xab]));
   const ref = { value: 12345 };
@@ -56,7 +57,7 @@ test('read past the end latches Overflow and leaves the ref unmodified', () => {
   ref.value = 12345;
   assert.equal(reader.serializeBits(ref, 1), false);
   assert.equal(ref.value, 12345);
-  assert.equal(reader.error, SerializeError.Overflow);
+  assert.equal(reader.error, SerializeError.PastEnd);
   assert.equal(reader.bitsProcessed(), 8);
 
   // sticky: an in-range-looking call after the latch also refuses
@@ -89,7 +90,7 @@ test('a truncated packet refuses mid-message, its full neighbor accepts', () => 
     result = readSequence(reader, refs);
   });
   assert.equal(result, false);
-  assert.equal(reader.error, SerializeError.Overflow);
+  assert.equal(reader.error, SerializeError.PastEnd);
   assert.equal(refs.a.value, 21); // read before the truncation point
   assert.equal(refs.b.value, undefined); // never assigned
   assert.equal(refs.d.value, undefined); // short-circuited after the latch
@@ -99,19 +100,19 @@ test('a truncated packet refuses mid-message, its full neighbor accepts', () => 
   assert.equal(acceptRefs.b.value, 0xdeadbeef);
 });
 
-test('nonzero align padding latches Align, and the first error wins', () => {
+test('nonzero align padding latches NonzeroPadding, and the first error wins', () => {
   // known sequence D doctored: 01 AB with a padding bit set -> 81 AB
   const doctored = new Uint8Array([0x81, 0xab]);
   const reader = new ReadStream(doctored);
   const ref = {};
   assert.equal(reader.serializeBits(ref, 1), true);
   assert.equal(reader.serializeAlign(), false);
-  assert.equal(reader.error, SerializeError.Align);
+  assert.equal(reader.error, SerializeError.NonzeroPadding);
 
   // the stream has failed: a read that would ALSO overflow does not
   // overwrite the first error
   assert.equal(reader.serializeBits(ref, 32), false);
-  assert.equal(reader.error, SerializeError.Align);
+  assert.equal(reader.error, SerializeError.NonzeroPadding);
 
   // accept neighbor: clean padding reads through
   const clean = new ReadStream(new Uint8Array([0x01, 0xab]));
@@ -167,14 +168,14 @@ test('every read failure is terminal: the next valid read fails and writes nothi
   const cases = [
     {
       what: 'before any consumption',
-      expect: SerializeError.Overflow,
+      expect: SerializeError.PastEnd,
       // empty data: the first read cannot start
       data: [],
       fail: (s) => s.serializeBits({}, 1),
     },
     {
       what: 'after partial consumption',
-      expect: SerializeError.Overflow,
+      expect: SerializeError.PastEnd,
       // one byte read, then a 32-bit field that runs past the end
       data: [0xab, 0xcd],
       fail: (s) => s.serializeBits({}, 8) && s.serializeBits({}, 32),
@@ -188,14 +189,14 @@ test('every read failure is terminal: the next valid read fails and writes nothi
     },
     {
       what: 'on alignment',
-      expect: SerializeError.Align,
+      expect: SerializeError.NonzeroPadding,
       // a set padding bit after a 1-bit field
       data: [0x81, 0xab, 0xcd, 0xef],
       fail: (s) => s.serializeBits({}, 1) && s.serializeAlign(),
     },
     {
       what: 'on a malformed string',
-      expect: SerializeError.InvalidString,
+      expect: SerializeError.InvalidUtf8,
       // length 2 over bufferSize 8 (3 bits), aligned, then a lone 0xC3
       // continuation-less lead byte and a stray 0x28: invalid UTF-8
       data: [0x02, 0xc3, 0x28, 0xab, 0xcd, 0xef],
@@ -232,19 +233,19 @@ test('every read failure is terminal: the next valid read fails and writes nothi
   }
 });
 
-test('reset clears a latched error on every stream', () => {
+test('reset re-initialises a writer and clears a reader\'s latched error', () => {
   const writer = new WriteStream(new Uint8Array(8));
   writer.serializeBits({ value: 0 }, 32);
   writer.serializeBits({ value: 0 }, 32);
-  writer.serializeBits({ value: 0 }, 1); // latches Overflow
-  assert.equal(writer.ok, false);
+  assert.throws(() => writer.serializeBits({ value: 0 }, 1), RangeError);
+  assert.equal(writer.ok, true);
   writer.reset(new Uint8Array(8));
   assert.equal(writer.ok, true);
   assert.equal(writer.serializeBits({ value: 7 }, 3), true);
 
   const reader = new ReadStream(new Uint8Array([0x81]));
   reader.serializeBits({}, 1);
-  reader.serializeAlign(); // latches Align
+  reader.serializeAlign(); // latches NonzeroPadding
   assert.equal(reader.ok, false);
   reader.reset(new Uint8Array([0x01]));
   assert.equal(reader.ok, true);
@@ -257,4 +258,57 @@ test('reset clears a latched error on every stream', () => {
   measure.reset();
   assert.equal(measure.ok, true);
   assert.equal(measure.bitsProcessed(), 0);
+});
+
+test('a failed read stream refuses a nested object on entry, an empty one included', () => {
+  // accept neighbor: a healthy empty object at the exact end of the stream
+  // runs, reads nothing, and the end still accepts
+  const healthy = new ReadStream(new Uint8Array([0x5a]));
+  const byte = { value: 0 };
+  assert.equal(healthy.serializeBits(byte, 8), true);
+  let called = false;
+  assert.equal(healthy.serializeObject(() => (called = true)), true);
+  assert.equal(called, true);
+  assert.equal(healthy.ok, true);
+  assert.equal(healthy.serializeEnd(), true);
+
+  // refused: after a past-end refusal the empty object is never called,
+  // consumes nothing and leaves the first reason standing
+  const reader = new ReadStream(new Uint8Array([0xff]));
+  assert.equal(reader.serializeBits({ value: 0 }, 16), false);
+  const bits = reader.bitsProcessed();
+  called = false;
+  assert.equal(reader.serializeObject(() => (called = true)), false);
+  assert.equal(called, false);
+  assert.equal(reader.bitsProcessed(), bits);
+  assert.equal(reader.error, SerializeError.PastEnd);
+});
+
+test('a nested object that swallows a refusal still refuses the whole', () => {
+  // accept neighbor: the same object over an in-range byte
+  const accepted = new ReadStream(new Uint8Array([0x0a]));
+  const ok = { value: -77 };
+  assert.equal(accepted.serializeObject((s) => (s.serializeInt(ok, 0, 10), true)), true);
+  assert.equal(ok.value, 10);
+
+  // refused: the int is out of range, the callback returns true anyway
+  const reader = new ReadStream(new Uint8Array([0x0b]));
+  const value = { value: -77 };
+  assert.equal(reader.serializeObject((s) => (s.serializeInt(value, 0, 10), true)), false);
+  assert.equal(value.value, -77);
+  assert.equal(reader.error, SerializeError.ValueOutOfRange);
+  assert.equal(reader.serializeObject(() => true), false);
+  assert.equal(reader.error, SerializeError.ValueOutOfRange);
+});
+
+test('a nested object adds no bits and its refusal is the whole refusal, on every stream', () => {
+  const writer = new WriteStream(new Uint8Array(8));
+  assert.equal(writer.serializeObject((s) => s.serializeBits({ value: 0xab }, 8)), true);
+  assert.equal(writer.bitsProcessed(), 8);
+  assert.equal(writer.serializeObject(() => false), false);
+
+  const measure = new MeasureStream();
+  assert.equal(measure.serializeObject((s) => s.serializeBits({ value: 0xab }, 8)), true);
+  assert.equal(measure.bitsProcessed(), 8);
+  assert.equal(measure.serializeObject(() => false), false);
 });

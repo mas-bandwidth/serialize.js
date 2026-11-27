@@ -4,7 +4,7 @@
 // reproduces exactly. Three properties hold for every program:
 //
 //   write == read   every value written round trips exactly (Object.is,
-//                   so -0 survives and bit-transparent floats compare),
+//                   so -0 survives and bit-exact floats compare),
 //                   and the reader consumes exactly the bits the writer
 //                   produced;
 //   measure >= write   the measure stream's conservative bound covers the
@@ -63,26 +63,25 @@ class XorShift32 {
 
 const VIEW = new DataView(new ArrayBuffer(8));
 
-// A random non-NaN float32 as a Number. NaN patterns are skipped: the
-// wire carries them bit-transparently, but two NaN Numbers cannot be
-// distinguished by value, so the sweep would compare blind.
+// A random FINITE float32 as a Number: the format carries finite values
+// only, so NaN and infinity patterns are drawn again.
 function randomFloat32(rng) {
   for (;;) {
     VIEW.setUint32(0, rng.next(), true);
     const value = VIEW.getFloat32(0, true);
-    if (!Number.isNaN(value)) {
+    if (Number.isFinite(value)) {
       return value;
     }
   }
 }
 
-// A random non-NaN float64 as a Number.
+// A random FINITE float64 as a Number.
 function randomFloat64(rng) {
   for (;;) {
     VIEW.setUint32(0, rng.next(), true);
     VIEW.setUint32(4, rng.next(), true);
     const value = VIEW.getFloat64(0, true);
-    if (!Number.isNaN(value)) {
+    if (Number.isFinite(value)) {
       return value;
     }
   }
@@ -129,7 +128,9 @@ const FIXED_CONFIGS = [
 ];
 
 const STRING_ALPHABET = '!#$%&()*+,-.0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz~';
-const WSTRING_PALETTE = ['a', 'Z', '7', 'м', 'и', 'р', '€', 'é', '\u{1f600}', '\u{1f680}'];
+// Real text: one to four UTF-8 bytes per character, CJK, Korean, Arabic, a
+// combining mark, a byte order mark and an astral emoji.
+const TEXT_PALETTE = ['a', 'Z', '7', 'м', 'é', 'e\u0301', '€', '碁', '석', 'ب', '\uFEFF', '\u{1f600}', '\u{20000}'];
 
 // Each op: label for diagnostics, the expected value, and a run function
 // applied identically to all three streams. holder is the {value} ref on
@@ -234,9 +235,9 @@ function randomOp(rng) {
       const length = rng.below(11);
       let value = '';
       for (let i = 0; i < length; i++) {
-        value += WSTRING_PALETTE[rng.below(WSTRING_PALETTE.length)];
+        value += TEXT_PALETTE[rng.below(TEXT_PALETTE.length)];
       }
-      return { label: `wstring "${value}"`, value, run: (s, h) => s.serializeWideString(h, 64) };
+      return { label: `text "${value}"`, value, run: (s, h) => s.serializeString(h, 64) };
     }
     default: {
       if ((rng.next() & 1) === 1) {

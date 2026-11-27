@@ -1,11 +1,12 @@
 // The production write path: what NODE_ENV=production keeps, and what it
-// removes (see src/mode.js and STANDARD.md, "Writes assume trusted data").
+// removes (see src/mode.js and STANDARD.md, "Writers are trusted; readers
+// are not").
 //
 // This file IS the production-mode leg's spine and only runs there: under
 // the default dev sweep every test here skips, because each one asserts the
-// ABSENCE of a dev assert -- an invalid-parameter call that throws or
-// latches in dev passes through in production, the caller-trust contract,
-// exactly as a C/C++ release build trusts its caller. The dev half of every
+// ABSENCE of a dev assert -- an invalid-parameter call that throws in dev
+// (write misuse never latches) passes through in production, the
+// caller-trust contract, exactly as a C/C++ release build trusts its caller. The dev half of every
 // proof already lives in the misuse and refusal suites (streams.test.js,
 // serialize-*-refusals.test.js), which the dev leg runs.
 //
@@ -44,45 +45,43 @@ spine('the mode is frozen at load: this leg sees the production variants', gate,
   assert.equal(process.env.NODE_ENV, 'production');
 });
 
-spine('overflow still latches in production: sticky, wire intact, reset clears', gate, () => {
+spine('production keeps the room check: a write that does not fit throws, writes nothing and latches nothing', gate, () => {
+  // IMPLEMENTING.md U9: an operation that does not fit the room left is
+  // write misuse. Production may compile checks out, but this port keeps the
+  // room check (it is what keeps the writer inside its buffer), and it takes
+  // the trap's form there too: a throw, never a latch, never a false.
   const buffer = new Uint8Array(8);
   const stream = new WriteStream(buffer);
 
   assert.equal(stream.serializeUint32(ref(1)), true);
-  assert.equal(stream.serializeUint32(ref(2)), true);
+  assert.equal(stream.serializeUint16(ref(2)), true);
 
-  // the third word does not fit: the buffer-end refusal is the retained
-  // hard check, and it is a latched value, never a throw
-  assert.equal(stream.serializeUint32(ref(3)), false);
-  assert.equal(stream.error, SerializeError.Overflow);
-  assert.equal(stream.ok, false);
+  assert.throws(() => stream.serializeUint32(ref(3)), RangeError);
+  assert.equal(stream.error, SerializeError.None);
+  assert.equal(stream.ok, true);
+  assert.equal(stream.bitsProcessed(), 48);
 
-  // sticky: every later call fails without touching the stream
-  assert.equal(stream.serializeBool(ref(true)), false);
+  // nothing latched: what still fits is written
+  assert.equal(stream.serializeUint16(ref(4)), true);
   assert.equal(stream.bitsProcessed(), 64);
-  assert.equal(stream.error, SerializeError.Overflow);
 
-  // the accepted words are intact on the wire
   stream.flush();
   const readStream = new ReadStream(stream.data());
   const out = ref(0);
   assert.equal(readStream.serializeUint32(out), true);
   assert.equal(out.value, 1);
-  assert.equal(readStream.serializeUint32(out), true);
+  assert.equal(readStream.serializeUint16(out), true);
   assert.equal(out.value, 2);
-
-  // reset clears the latch
-  stream.reset(buffer);
-  assert.equal(stream.ok, true);
-  assert.equal(stream.error, SerializeError.None);
+  assert.equal(readStream.serializeUint16(out), true);
+  assert.equal(out.value, 4);
 });
 
 spine('wide writes are still checked as one total width up front', gate, () => {
   const stream = new WriteStream(new Uint8Array(8));
   assert.equal(stream.serializeUint32(ref(7)), true);
-  // 128 bits cannot fit the remaining 32: refused up front, NOTHING written
-  assert.equal(stream.serializeUint128(ref(1n)), false);
-  assert.equal(stream.error, SerializeError.Overflow);
+  // 128 bits cannot fit the remaining 32: a throw up front, NOTHING written
+  assert.throws(() => stream.serializeUint128(ref(1n)), RangeError);
+  assert.equal(stream.error, SerializeError.None);
   assert.equal(stream.bitsProcessed(), 32);
 });
 
@@ -106,8 +105,8 @@ spine('an invalid bits count that throws in dev passes through in production', g
   assert.equal(measure.bitsProcessed(), 0);
 });
 
-spine('an out-of-range ranged write that latches in dev passes through in production', gate, () => {
-  // dev: serializeInt latches ValueOutOfRange and writes nothing
+spine('an out-of-range ranged write that throws in dev passes through in production', gate, () => {
+  // dev: serializeInt throws RangeError, latches nothing and writes nothing
   // (serialize-int-refusals.test.js proves it). production: the value is
   // the caller's contract -- the masked offset goes out, deterministically
   // (JavaScript wire arithmetic: 300 & 0xff = 44), and the reader decodes
@@ -135,28 +134,46 @@ spine('a wrong-typed value that throws in dev passes through in production', gat
   assert.equal(stream.bitsProcessed(), 32);
 });
 
-spine('the wstring well-formedness scan is gone: the writer trusts, the reader refuses', gate, () => {
-  // dev: a lone surrogate latches InvalidString on write -- the checked
-  // form of the family's checked-build assertion over the standard's named type case,
-  // the O(n) scan no release path carries
-  // (serialize-wstring-refusals.test.js proves it). production: the writer
-  // trusts the caller and the ill-formed unit reaches the wire -- where a
-  // CONFORMING READER refuses it, because ruling #8's read-side content
-  // refusals bind in every mode.
-  const stream = new WriteStream(new Uint8Array(8));
-  assert.equal(stream.serializeWideString(ref('\uD800'), 4), true);
+spine('the string well-formedness scans are gone: the writer trusts, the reader refuses', gate, () => {
+  // dev: a U+0000 or a lone surrogate throws RangeError on write and
+  // latches nothing -- the checked form of the family's checked-build
+  // assertion, the O(n) scans no release path carries (serialize-string.test.js proves
+  // them). production: the writer trusts the caller, a NUL reaches the
+  // wire -- where a CONFORMING READER refuses it, because the read-side
+  // content refusals bind in every mode -- and TextEncoder launders a lone
+  // surrogate to U+FFFD.
+  const stream = new WriteStream(new Uint8Array(16));
+  assert.equal(stream.serializeString(ref('a\0'), 4), true);
+  assert.equal(stream.serializeString(ref('\uD800'), 4), true);
   assert.equal(stream.ok, true);
   stream.flush();
 
   const readStream = new ReadStream(stream.data());
   const out = ref('');
-  assert.equal(readStream.serializeWideString(out, 4), false);
-  assert.equal(readStream.error, SerializeError.InvalidString);
+  assert.equal(readStream.serializeString(out, 4), false);
+  assert.equal(readStream.error, SerializeError.EmbeddedNul);
   assert.equal(out.value, '');
 });
 
+spine('the finite-float check is gone on write: the writer trusts, the reader refuses', gate, () => {
+  // dev: NaN or an infinity throws RangeError on write and latches nothing
+  // (serialize-float.test.js).
+  // production: the pattern reaches the wire, and every reader refuses it
+  const stream = new WriteStream(new Uint8Array(16));
+  assert.equal(stream.serializeFloat(ref(Infinity)), true);
+  assert.equal(stream.serializeDouble(ref(NaN)), true);
+  assert.equal(stream.ok, true);
+  stream.flush();
+
+  const readStream = new ReadStream(stream.data());
+  const out = ref(42);
+  assert.equal(readStream.serializeFloat(out), false);
+  assert.equal(readStream.error, SerializeError.NonFiniteFloat);
+  assert.equal(out.value, 42);
+});
+
 spine('a production measure cannot fail', gate, () => {
-  // dev: an out-of-range value latches ValueOutOfRange on the measure too
+  // dev: an out-of-range value throws RangeError on the measure too
   // (a message that cannot be written cannot be measured). production: the
   // measure is pure bit arithmetic, the C++ release shape -- it prices the
   // declaration and cannot fail.
@@ -177,7 +194,7 @@ spine('the production bitpacker keeps exactly one hard check: tryWriteBits at th
   assert.equal(writer.bitsWritten(), 0);
 
   // the retained hard check: a past-end tryWriteBits refuses as a value,
-  // writing nothing -- the false the stream layer latches Overflow from
+  // writing nothing -- the false the stream layer throws on (U9)
   assert.equal(writer.tryWriteBits(0xffffffff, 32), true);
   assert.equal(writer.tryWriteBits(0xffffffff, 32), true);
   assert.equal(writer.tryWriteBits(1, 1), false);

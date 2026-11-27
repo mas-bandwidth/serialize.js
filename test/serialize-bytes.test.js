@@ -88,7 +88,7 @@ test('bytes round-trip at every starting bit offset', () => {
 
 test('doctored align padding before the bytes refused, clean neighbor accepted', () => {
   // clean wire from the unaligned pin: 01 EF BE 0F. Doctor a padding bit
-  // (bits 1..7 of byte 0): the align refuses and latches Align.
+  // (bits 1..7 of byte 0): the align refuses and latches NonzeroPadding.
   for (let p = 1; p <= 7; p++) {
     const doctored = Uint8Array.from([0x01 | (1 << p), 0xef, 0xbe, 0x0f]);
     const reader = new ReadStream(doctored);
@@ -96,7 +96,7 @@ test('doctored align padding before the bytes refused, clean neighbor accepted',
     const data = Uint8Array.from([0x77, 0x77]);
     assert.equal(reader.serializeBits(head, 1), true);
     assert.equal(reader.serializeBytes(data), false, `padding bit ${p} refused`);
-    assert.equal(reader.error, SerializeError.Align);
+    assert.equal(reader.error, SerializeError.NonzeroPadding);
     assert.deepEqual(Array.from(data), [0x77, 0x77]); // untouched on refusal
   }
   // accept neighbor: the clean wire reads through
@@ -108,7 +108,7 @@ test('doctored align padding before the bytes refused, clean neighbor accepted',
   assert.deepEqual(Array.from(data), [0xef, 0xbe]);
 });
 
-test('truncated data refused as Overflow, exact-fit neighbor accepted', () => {
+test('truncated data refused as PastEnd, exact-fit neighbor accepted', () => {
   // three bytes on the wire: asking for four must refuse, asking for three
   // must accept -- the boundary proven from both sides
   const wire = Uint8Array.from([0x11, 0x22, 0x33]);
@@ -116,7 +116,7 @@ test('truncated data refused as Overflow, exact-fit neighbor accepted', () => {
   const refused = new ReadStream(wire);
   const four = Uint8Array.from([0xaa, 0xbb, 0xcc, 0xdd]);
   assert.equal(refused.serializeBytes(four), false);
-  assert.equal(refused.error, SerializeError.Overflow);
+  assert.equal(refused.error, SerializeError.PastEnd);
   assert.deepEqual(Array.from(four), [0xaa, 0xbb, 0xcc, 0xdd]); // untouched
 
   const accepted = new ReadStream(wire);
@@ -126,10 +126,10 @@ test('truncated data refused as Overflow, exact-fit neighbor accepted', () => {
   assert.equal(accepted.ok, true);
 });
 
-test('write past the end of the buffer latches Overflow, exact fit accepted', () => {
+test('write past the end of the buffer throws (U9) and writes nothing, exact fit accepted', () => {
   const refused = new WriteStream(new Uint8Array(8));
-  assert.equal(refused.serializeBytes(new Uint8Array(9)), false);
-  assert.equal(refused.error, SerializeError.Overflow);
+  assert.throws(() => refused.serializeBytes(new Uint8Array(9)), RangeError);
+  assert.equal(refused.error, SerializeError.None);
 
   const accepted = new WriteStream(new Uint8Array(8));
   assert.equal(accepted.serializeBytes(new Uint8Array(8)), true);
@@ -138,29 +138,33 @@ test('write past the end of the buffer latches Overflow, exact fit accepted', ()
   assert.equal(accepted.bytesProcessed(), 8);
 });
 
-test('a latched stream refuses serializeBytes without touching anything', () => {
+test('a write that does not fit throws and latches nothing; a latched reader refuses serializeBytes', () => {
   const writer = new WriteStream(new Uint8Array(8));
-  assert.equal(writer.serializeBytes(new Uint8Array(9)), false); // latch Overflow
-  assert.equal(writer.serializeBytes(new Uint8Array(1)), false); // still refused
-  assert.equal(writer.error, SerializeError.Overflow);
+  assert.throws(() => writer.serializeBytes(new Uint8Array(9)), RangeError);
+  assert.equal(writer.serializeBytes(new Uint8Array(1)), true); // no latch (U9)
+  assert.equal(writer.error, SerializeError.None);
 
   const reader = new ReadStream(Uint8Array.from([0x01]));
   const big = new Uint8Array(2);
-  assert.equal(reader.serializeBytes(big), false); // latch Overflow
+  assert.equal(reader.serializeBytes(big), false); // latch PastEnd
   const one = Uint8Array.from([0x99]);
   assert.equal(reader.serializeBytes(one), false); // still refused
   assert.deepEqual(Array.from(one), [0x99]);
 });
 
-test('data must be a Uint8Array on every stream: misuse throws', () => {
+test('data must be a Uint8Array on every stream: misuse throws on write and measure, refuses on read (U7)', () => {
   const writer = new WriteStream(new Uint8Array(8));
-  const reader = new ReadStream(Uint8Array.from([0x00]));
   const measure = new MeasureStream();
   for (const bad of [null, undefined, [1, 2], 'bytes', new Uint16Array(2)]) {
     assert.throws(() => writer.serializeBytes(bad), TypeError);
-    assert.throws(() => reader.serializeBytes(bad), TypeError);
     assert.throws(() => measure.serializeBytes(bad), TypeError);
+    const reader = new ReadStream(Uint8Array.from([0x00]));
+    assert.equal(reader.serializeBytes(bad), false);
+    assert.equal(reader.error, SerializeError.ValueOutOfRange);
   }
+  // no destination with a positive count is misuse; with count 0 it is not (U7)
+  assert.throws(() => writer.serializeBytes(null, 0, 2), TypeError);
+  assert.throws(() => measure.serializeBytes(null, 0, 2), TypeError);
 });
 
 test('measure charges the worst case align plus the bytes', () => {
@@ -189,4 +193,19 @@ test('the measure bound covers the actual write at every starting offset', () =>
     const span = writer.bitsProcessed() - before;
     assert.ok(span <= bound, `offset ${offset}: span ${span} within bound ${bound}`);
   }
+});
+
+test('the span must lie inside data on the write and measure streams: misuse throws', () => {
+  const writer = new WriteStream(new Uint8Array(8));
+  const measure = new MeasureStream();
+  const data = new Uint8Array(4);
+  for (const [offset, length] of [[-1, 1], [0, -1], [1.5, 1], [0, 1.5], [3, 2], [5, 0], [0, 5], ['0', 1], [null, 1]]) {
+    assert.throws(() => writer.serializeBytes(data, offset, length), RangeError, `offset ${offset}, length ${length}`);
+    assert.throws(() => measure.serializeBytes(data, offset, length), RangeError, `offset ${offset}, length ${length}`);
+  }
+  // misuse wrote nothing and latched nothing
+  assert.equal(writer.ok, true);
+  assert.equal(writer.bitsProcessed(), 0);
+  assert.equal(measure.bitsProcessed(), 0);
+  assert.equal(writer.serializeBytes(data, 4, 0), true);
 });

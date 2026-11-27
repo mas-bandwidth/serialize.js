@@ -1,0 +1,8 @@
+{
+  "name": "serialize-fuzz",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@jazzer.js/core": "4.0.0"
+  }
+}

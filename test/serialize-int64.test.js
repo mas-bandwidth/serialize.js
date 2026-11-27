@@ -14,6 +14,7 @@ import {
   MeasureStream,
   bitsRequired64,
 } from '../src/index.js';
+import { misuse } from './misuse.js';
 
 const INT64_MIN = -(2n ** 63n);
 const INT64_MAX = 2n ** 63n - 1n;
@@ -192,26 +193,26 @@ test('where the range fits 32 bits the wire is identical to serializeInt', () =>
   }
 });
 
-test('an invalid range is caller misuse and throws on every stream', () => {
+test('an invalid range is caller misuse: it throws on write and measure, and refuses on read', () => {
   const writer = new WriteStream(new Uint8Array(16));
   const reader = new ReadStream(new Uint8Array(16));
   const measure = new MeasureStream();
   for (const stream of [writer, reader, measure]) {
     // min above max
-    assert.throws(() => stream.serializeInt64({ value: 0n }, 5n, 4n), RangeError);
+    misuse(stream, () => stream.serializeInt64({ value: 0n }, 5n, 4n), RangeError);
     // bounds outside the int64 domain
-    assert.throws(
+    misuse(stream, 
       () => stream.serializeInt64({ value: 0n }, 0n, 2n ** 63n),
       RangeError,
     );
-    assert.throws(
+    misuse(stream, 
       () => stream.serializeInt64({ value: 0n }, -(2n ** 63n) - 1n, 0n),
       RangeError,
     );
     // Number bounds: the 64-bit domain is BigInt
-    assert.throws(() => stream.serializeInt64({ value: 0n }, 0, 100), RangeError);
+    misuse(stream, () => stream.serializeInt64({ value: 0n }, 0, 100), RangeError);
     // misuse throws even though nothing latched: the streams stay healthy
-    assert.equal(stream.ok, true);
+    assert.equal(stream.ok, !stream.isReading);
     assert.equal(stream.bitsProcessed(), 0);
   }
 });

@@ -83,12 +83,12 @@ test('a full-coverage range has no headroom: every pattern decodes: [-4,3]', () 
   }
 });
 
-test('truncated data refused as Overflow, exact fit accepted', () => {
+test('truncated data refused as PastEnd, exact fit accepted', () => {
   // [0,7] needs 3 bits: empty data refuses...
   const empty = new ReadStream(new Uint8Array(0));
   const ref = { value: 999 };
   assert.equal(empty.serializeInt(ref, 0, 7), false);
-  assert.equal(empty.error, SerializeError.Overflow);
+  assert.equal(empty.error, SerializeError.PastEnd);
   assert.equal(ref.value, 999);
 
   // ...one byte accepts
@@ -101,7 +101,7 @@ test('truncated data refused as Overflow, exact fit accepted', () => {
   const refuses = new ReadStream(packet);
   refuses.serializeBits({}, 6);
   assert.equal(refuses.serializeInt({}, 0, 7), false); // 6 + 3 > 8
-  assert.equal(refuses.error, SerializeError.Overflow);
+  assert.equal(refuses.error, SerializeError.PastEnd);
 
   // its neighbor: a 2-bit read fits exactly
   const accepts = new ReadStream(packet);
@@ -111,7 +111,7 @@ test('truncated data refused as Overflow, exact fit accepted', () => {
   assert.equal(accepts.ok, true);
 });
 
-test('a write past the end latches Overflow, the exact fit succeeds', () => {
+test('a write past the end throws (U9) and writes nothing, the exact fit succeeds', () => {
   // 61 + 3 = 64 bits: exact fit succeeds
   const fits = new WriteStream(new Uint8Array(8));
   fits.serializeBits({ value: 0 }, 32);
@@ -120,12 +120,12 @@ test('a write past the end latches Overflow, the exact fit succeeds', () => {
   assert.equal(fits.ok, true);
   assert.equal(fits.bitsProcessed(), 64);
 
-  // 62 + 3 > 64: the write refuses and the stream latches
+  // 62 + 3 > 64: write misuse, a throw, and nothing latches (U9)
   const overflows = new WriteStream(new Uint8Array(8));
   overflows.serializeBits({ value: 0 }, 32);
   overflows.serializeBits({ value: 0 }, 30);
-  assert.equal(overflows.serializeInt({ value: 3 }, 0, 7), false);
-  assert.equal(overflows.error, SerializeError.Overflow);
+  assert.throws(() => overflows.serializeInt({ value: 3 }, 0, 7), RangeError);
+  assert.equal(overflows.error, SerializeError.None);
   assert.equal(overflows.bitsProcessed(), 62); // nothing was written
 });
 
@@ -142,14 +142,14 @@ test('write-side range checks latch, never throw, and write nothing', () => {
   for (const [value, min, max] of cases) {
     const label = `${value} in [${min},${max}]`;
     const writer = new WriteStream(new Uint8Array(8));
-    assert.equal(writer.serializeInt({ value }, min, max), false, `write ${label}`);
-    assert.equal(writer.error, SerializeError.ValueOutOfRange, `latch for ${label}`);
+    assert.throws(() => writer.serializeInt({ value }, min, max), RangeError, `write ${label}`);
+    assert.equal(writer.ok, true);
     assert.equal(writer.bitsProcessed(), 0, `nothing written for ${label}`);
 
     // the measure acts like a write: same refusal (the Go port's stance)
     const measure = new MeasureStream();
-    assert.equal(measure.serializeInt({ value }, min, max), false, `measure ${label}`);
-    assert.equal(measure.error, SerializeError.ValueOutOfRange);
+    assert.throws(() => measure.serializeInt({ value }, min, max), RangeError, `measure ${label}`);
+    assert.equal(measure.ok, true);
     assert.equal(measure.bitsProcessed(), 0);
   }
 

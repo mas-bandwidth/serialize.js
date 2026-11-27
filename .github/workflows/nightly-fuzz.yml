@@ -1,0 +1,76 @@
+name: Nightly Fuzz
+
+# The extended fuzz, the reference's nightly-fuzz.yml on Jazzer.js: the same
+# two targets as CI's 60 second smoke (fuzz/read.fuzz.js and
+# fuzz/roundtrip.fuzz.js), for an hour each, the round trip under both
+# write-path variants (src/mode.js forks on NODE_ENV at module load; the read
+# path has no variants). Each leg keeps its own corpus.
+
+on:
+  schedule:
+    - cron: '0 8 * * *'   # every day at 08:00 UTC
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Fuzz duration in seconds'
+        default: '3600'
+        required: false
+
+jobs:
+  fuzz:
+    name: fuzz (Jazzer.js, extended) ${{ matrix.target }} / ${{ matrix.mode }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: read, mode: development }
+          - { target: roundtrip, mode: development }
+          - { target: roundtrip, mode: production }
+    defaults:
+      run:
+        working-directory: fuzz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # the corpus is cached across runs so fuzzing is cumulative: each night
+      # starts from the most recent corpus and saves the evolved one
+      - name: Restore corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ matrix.target }}-${{ matrix.mode }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-${{ matrix.mode }}-
+
+      - name: Install the pinned Jazzer.js
+        run: npm ci
+
+      - name: Fuzz
+        env:
+          NODE_ENV: ${{ matrix.mode }}
+        run: |
+          mkdir -p corpus
+          npx --no-install jazzer ${{ matrix.target }}.fuzz.js corpus --sync --timeout=10000 -- -max_total_time=${{ github.event.inputs.duration || '3600' }} -print_final_stats=1
+
+      - name: Save corpus
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ matrix.target }}-${{ matrix.mode }}-${{ github.run_id }}
+
+      - name: Upload crash reproducers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes-${{ matrix.target }}-${{ matrix.mode }}
+          path: |
+            fuzz/crash-*
+            fuzz/oom-*
+            fuzz/timeout-*
+          if-no-files-found: ignore

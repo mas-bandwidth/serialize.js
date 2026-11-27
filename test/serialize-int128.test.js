@@ -15,6 +15,7 @@ import {
   MeasureStream,
   bitsRequired128,
 } from '../src/index.js';
+import { misuse } from './misuse.js';
 
 const INT128_MIN = -(2n ** 127n);
 const INT128_MAX = 2n ** 127n - 1n;
@@ -171,25 +172,25 @@ test('the golden pin: three groups over +/- 2^70, bytes from the standard', () =
   assert.equal(ref.value, value);
 });
 
-test('an invalid range is caller misuse and throws on every stream', () => {
+test('an invalid range is caller misuse: it throws on write and measure, and refuses on read', () => {
   const writer = new WriteStream(new Uint8Array(24));
   const reader = new ReadStream(new Uint8Array(24));
   const measure = new MeasureStream();
   for (const stream of [writer, reader, measure]) {
     // min above max
-    assert.throws(() => stream.serializeInt128({ value: 0n }, 5n, 4n), RangeError);
+    misuse(stream, () => stream.serializeInt128({ value: 0n }, 5n, 4n), RangeError);
     // bounds outside the int128 domain
-    assert.throws(
+    misuse(stream, 
       () => stream.serializeInt128({ value: 0n }, 0n, 2n ** 127n),
       RangeError,
     );
-    assert.throws(
+    misuse(stream, 
       () => stream.serializeInt128({ value: 0n }, -(2n ** 127n) - 1n, 0n),
       RangeError,
     );
     // Number bounds: the 128-bit domain is BigInt
-    assert.throws(() => stream.serializeInt128({ value: 0n }, 0, 100), RangeError);
-    assert.equal(stream.ok, true);
+    misuse(stream, () => stream.serializeInt128({ value: 0n }, 0, 100), RangeError);
+    assert.equal(stream.ok, !stream.isReading);
     assert.equal(stream.bitsProcessed(), 0);
   }
 });

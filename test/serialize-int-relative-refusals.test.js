@@ -13,6 +13,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { WriteStream, ReadStream, MeasureStream, SerializeError } from '../src/index.js';
+import { misuse } from './misuse.js';
 
 // Hand-builds a stream holding the absolute tier: six zero flags, then
 // current as 32 raw bits -- the doctored form of the reference's own
@@ -35,12 +36,38 @@ test('the absolute tier refuses current at or below previous', () => {
     assert.equal(ref.value, -1, 'a refused read leaves the ref unmodified');
   }
 
-  // the accept boundary: 101 via the absolute tier is over-wide but legal
-  // on the wire -- the reader checks ordering, not tier minimality
-  const reader = new ReadStream(absoluteTierBytes(101));
+  // the accept boundary: previous + 69915, the first difference past the
+  // last bounded tier, is the smallest current the absolute tier carries
+  const reader = new ReadStream(absoluteTierBytes(100 + 69915));
   const ref = {};
   assert.equal(reader.serializeIntRelative(100, ref), true);
-  assert.equal(ref.value, 101);
+  assert.equal(ref.value, 100 + 69915);
+});
+
+test('the absolute tier is canonical: a difference a bounded tier carries is non_canonical', () => {
+  // the writer takes the first tier the difference fits, so an absolute
+  // tier carrying 1 to 69914 above previous is a second encoding
+  for (const difference of [1, 2, 6, 7, 280, 4377, 69913, 69914]) {
+    const reader = new ReadStream(absoluteTierBytes(100 + difference));
+    const ref = { value: -1 };
+    assert.equal(reader.serializeIntRelative(100, ref), false, `refuse difference ${difference}`);
+    assert.equal(reader.error, SerializeError.NonCanonical);
+    assert.equal(ref.value, -1, 'a refused read leaves the ref unmodified');
+  }
+  // the domain and ordering rule comes first: a current past the domain is
+  // value_out_of_range whatever its difference, computed without wrapping
+  const top = 0x7fffffff;
+  const pastDomain = new ReadStream(absoluteTierBytes(0x80000000));
+  assert.equal(pastDomain.serializeIntRelative(top, {}), false);
+  assert.equal(pastDomain.error, SerializeError.ValueOutOfRange, 'a difference of one past the domain');
+  const equal = new ReadStream(absoluteTierBytes(100));
+  assert.equal(equal.serializeIntRelative(100, {}), false);
+  assert.equal(equal.error, SerializeError.ValueOutOfRange, 'not increasing');
+  // the accept neighbour at the domain top: 69915 below it, from there
+  const accepted = new ReadStream(absoluteTierBytes(top));
+  const ref = {};
+  assert.equal(accepted.serializeIntRelative(top - 69915, ref), true);
+  assert.equal(ref.value, top);
 });
 
 test('the absolute tier refuses a group above the domain, at the boundary', () => {
@@ -112,12 +139,12 @@ test('truncated data refuses cleanly at every stage of the ladder', () => {
   // payload does not
   const flagsOnly = new ReadStream(new Uint8Array([0x00]));
   assert.equal(flagsOnly.serializeIntRelative(100, {}), false);
-  assert.equal(flagsOnly.error, SerializeError.Overflow);
+  assert.equal(flagsOnly.error, SerializeError.PastEnd);
 
   // empty data: the very first flag bit already refuses
   const empty = new ReadStream(new Uint8Array(0));
   assert.equal(empty.serializeIntRelative(100, {}), false);
-  assert.equal(empty.error, SerializeError.Overflow);
+  assert.equal(empty.error, SerializeError.PastEnd);
 });
 
 test('writes and measures refuse ordering violations as latched errors', () => {
@@ -129,8 +156,8 @@ test('writes and measures refuse ordering violations as latched errors', () => {
     // first refusal is 2^31, one above the domain maximum
     for (const current of [100, 99, 0, -1, 1.5, NaN, 0x80000000, 0x100000000]) {
       const stream = makeStream();
-      assert.equal(stream.serializeIntRelative(100, { value: current }), false, `refuse ${current}`);
-      assert.equal(stream.error, SerializeError.ValueOutOfRange);
+      assert.throws(() => stream.serializeIntRelative(100, { value: current }), RangeError, `refuse ${current}`);
+      assert.equal(stream.ok, true);
       assert.equal(stream.bitsProcessed(), 0, 'a refused relative write costs nothing');
     }
 
@@ -147,12 +174,12 @@ test('a refused absolute-tier write puts nothing on the wire', () => {
   const writer = new WriteStream(new Uint8Array(8));
   assert.equal(writer.serializeBits({ value: 0 }, 32), true);
   assert.equal(writer.serializeBits({ value: 0 }, 8), true);
-  assert.equal(writer.serializeIntRelative(100, { value: 100000 }), false);
-  assert.equal(writer.error, SerializeError.Overflow);
+  assert.throws(() => writer.serializeIntRelative(100, { value: 100000 }), RangeError);
+  assert.equal(writer.error, SerializeError.None);
   assert.equal(writer.bitsProcessed(), 40, 'nothing written on refusal');
 });
 
-test('a previous outside the domain is caller misuse and throws on every stream', () => {
+test('a previous outside the domain is caller misuse: it throws on write and measure, and refuses on read', () => {
   // previous is the caller's own sequence state and never arrives off the
   // wire, so a previous outside the domain 0 to 2^31 - 1 is caller error
   // everywhere -- a 2^31 exactly as a negative one (STANDARD.md, adopted
@@ -162,10 +189,10 @@ test('a previous outside the domain is caller misuse and throws on every stream'
   const measure = new MeasureStream();
   for (const stream of [writer, reader, measure]) {
     for (const previous of [-1, 1.5, NaN, 0x80000000, 0x100000000, '100', 100n]) {
-      assert.throws(() => stream.serializeIntRelative(previous, { value: 200 }), RangeError);
+      misuse(stream, () => stream.serializeIntRelative(previous, { value: 200 }), RangeError);
     }
     // misuse throws even though nothing latched: the streams stay healthy
-    assert.equal(stream.ok, true);
+    assert.equal(stream.ok, !stream.isReading);
     assert.equal(stream.bitsProcessed(), 0);
   }
 
@@ -185,15 +212,16 @@ test('a non-number current on write or measure is caller misuse and throws', () 
   assert.throws(() => measure.serializeIntRelative(100, { value: null }), TypeError);
 });
 
-test('a latched stream refuses relative serializes without touching state', () => {
+test('a full write stream throws on relative serializes and latches nothing; a latched reader refuses', () => {
   const writer = new WriteStream(new Uint8Array(8));
-  assert.equal(writer.serializeInt({ value: 9 }, 0, 7), false); // latch ValueOutOfRange
-  assert.equal(writer.serializeIntRelative(100, { value: 101 }), false);
-  assert.equal(writer.error, SerializeError.ValueOutOfRange);
-  assert.equal(writer.bitsProcessed(), 0);
+  assert.equal(writer.serializeUint64({ value: 0n }), true);
+  assert.throws(() => writer.serializeBool({ value: true }), RangeError);
+  assert.throws(() => writer.serializeIntRelative(100, { value: 101 }), RangeError);
+  assert.equal(writer.error, SerializeError.None);
+  assert.equal(writer.bitsProcessed(), 64);
 
   const reader = new ReadStream(new Uint8Array(0));
-  assert.equal(reader.serializeBits({}, 1), false); // latch Overflow
+  assert.equal(reader.serializeBits({}, 1), false); // latch PastEnd
   const ref = { value: -1 };
   assert.equal(reader.serializeIntRelative(100, ref), false);
   assert.equal(ref.value, -1);

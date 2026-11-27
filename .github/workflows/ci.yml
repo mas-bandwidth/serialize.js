@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, 'sprint/*' ]
+  # every pull request, whatever its base: sprint landings target sprint/<stream> branches, not main
   pull_request:
-    branches: [ main ]
   workflow_dispatch:
 
 concurrency:
@@ -26,18 +26,84 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - name: "Test (dev: checked write path)"
-        run: node --test
+        run: npm test
       # The write path forks at module load on NODE_ENV (src/mode.js): the
       # dev leg above runs the CHECKED variants, this leg re-proves the wire,
       # the read trust boundary and the caller-trust contract under the
       # PRODUCTION variants. The runner pins NODE_ENV=production in the child
       # itself, so the leg cannot silently run in dev mode on any OS.
       - name: Test (production write path)
-        run: node production-tests.mjs
+        run: npm run test:production
+      - name: Test (functional subprocesses and package consumer)
+        run: npm run test:functional
 
-  # STANDARD.md and conformance/ here are VERBATIM VENDORED COPIES of the
-  # specification and the shared conformance corpus in
-  # mas-bandwidth/serialize. A duplicated normative document is the same
+  # Lint is a failing check, warnings included. ESLint is not a dependency of
+  # the package: the one pinned release runs through npx (package.json's
+  # lint script), and eslint.config.js imports nothing.
+  lint:
+    name: lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: ESLint, zero warnings
+        run: npm run lint
+
+  # The fuzz smoke: the reference's 60 second libFuzzer job, here on Jazzer.js
+  # (coverage-guided, libFuzzer in-process). fuzz/ carries its own package.json
+  # and lockfile, so the library package stays dependency-free; npm ci installs
+  # exactly the pinned Jazzer.js. Two targets, the two passes of the reference's
+  # fuzz.cpp: a hostile read of arbitrary bytes, and a differential write ->
+  # measure -> read round trip. Then the reversed witness: the round trip run
+  # over a copy of src/ with a planted writer asymmetry must be CAUGHT within
+  # the same 60 second budget, or the fuzzer is proving nothing.
+  fuzz:
+    name: fuzz (Jazzer.js)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: fuzz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install the pinned Jazzer.js
+        run: npm ci
+      - name: Fuzz the hostile read
+        run: npx --no-install jazzer read.fuzz.js --sync --timeout=10000 -- -max_total_time=60 -print_final_stats=1
+      - name: Fuzz the round trip
+        run: npx --no-install jazzer roundtrip.fuzz.js --sync --timeout=10000 -- -max_total_time=60 -print_final_stats=1
+      - name: "Negative control: a planted asymmetry is caught within the smoke budget"
+        run: |
+          set +e
+          SERIALIZE_FUZZ_SABOTAGE=int-relative-tier npx --no-install jazzer roundtrip.fuzz.js --sync --timeout=10000 -- -max_total_time=60 -artifact_prefix=sabotage- -print_final_stats=1 > sabotage.log 2>&1
+          status=$?
+          set -e
+          tail -n 40 sabotage.log
+          if [ "$status" -eq 0 ]; then
+            echo "the planted asymmetry was NOT caught in 60 s"
+            exit 1
+          fi
+          grep -q "fuzz check failed: int relative" sabotage.log
+          ls sabotage-crash-*
+          echo "caught: the fuzzer exited $status on the planted asymmetry"
+      - name: Upload crash reproducers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: |
+            fuzz/crash-*
+            fuzz/oom-*
+            fuzz/timeout-*
+          if-no-files-found: ignore
+
+  # STANDARD.md, conformance/ and conformance-controls/ here are VERBATIM
+  # VENDORED COPIES of the specification, the shared conformance corpus and
+  # the negative controls' .expected lists in mas-bandwidth/serialize. A duplicated normative document is the same
   # failure as a duplicated constant, except it drifts silently, and the
   # corpus is normative the same way: STANDARD.md makes it the family's one
   # conformance instrument. This job mirrors serialize.c's: fetch upstream,
@@ -45,7 +111,7 @@ jobs:
   # against. The corpus diff is recursive, so a vector file added upstream
   # and not vendored here is red, not silent coverage loss.
   standard:
-    name: STANDARD.md and conformance/ match upstream
+    name: STANDARD.md, conformance/ and conformance-controls/ match upstream
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -55,6 +121,7 @@ jobs:
           echo "upstream: mas-bandwidth/serialize@$(git -C /tmp/upstream rev-parse HEAD)"
           diff -u /tmp/upstream/STANDARD.md STANDARD.md
           diff -ru /tmp/upstream/conformance conformance
+          diff -ru /tmp/upstream/conformance-controls conformance-controls
 
   # The port exists to be wire compatible; everything else is detail. This job is
   # the only place that claim is MEASURED against the reference itself: the exact
@@ -67,8 +134,10 @@ jobs:
   # where implementations disagree. Both halves write it and the files must be
   # byte identical; each half then decodes the other's file, checks every value
   # and re-encodes it byte for byte. Then the hostile half: every proper prefix of
-  # the other's stream is a truncated stream and both must refuse it, and both run
-  # the shared conformance corpus, where the refusal vectors are the point.
+  # the other's stream is a truncated stream and both must refuse it, the stream
+  # with one byte more is trailing data after the end and both must refuse that
+  # too, and both run the shared conformance corpus, where the refusal vectors
+  # are the point.
   #
   # THE FAMILY PIN -- ONE POLICY, ONE VERSION. The C++ checkout is pinned to a
   # RELEASED tag of mas-bandwidth/serialize, never main, and to the SAME tag in
@@ -89,7 +158,7 @@ jobs:
     name: interop with the C++ reference
     runs-on: ubuntu-24.04
     env:
-      SERIALIZE_TAG: v1.16.2
+      SERIALIZE_TAG: v2.1.4
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -104,8 +173,11 @@ jobs:
       # reader older than the corpus cannot drive vectors whose operations it has
       # no code for. STANDARD.md requires that to be red rather than skipped, so
       # it is checked here rather than assumed.
-      - name: The vendored corpus is the pinned release's corpus
-        run: diff -ru /tmp/cpp-serialize/conformance conformance
+      - name: The vendored corpus and controls are the pinned release's
+        run: |
+          diff -u /tmp/cpp-serialize/STANDARD.md STANDARD.md
+          diff -ru /tmp/cpp-serialize/conformance conformance
+          diff -ru /tmp/cpp-serialize/conformance-controls conformance-controls
 
       # Asserts stay ON (no -DNDEBUG): they are the C++ half of "API misuse
       # panics", and the degenerate ranges the message carries must pass with the
@@ -138,7 +210,7 @@ jobs:
           node interop/interop.mjs read /tmp/cpp.bin
           /tmp/cpp_interop read /tmp/js.bin
 
-      - name: Both halves refuse every truncation of the other's stream
+      - name: Both halves refuse every truncation of the other's stream, and a byte more
         run: |
           node interop/interop.mjs refuse /tmp/cpp.bin
           /tmp/cpp_interop refuse /tmp/js.bin
