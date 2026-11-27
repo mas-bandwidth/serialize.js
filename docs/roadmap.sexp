@@ -1,36 +1,124 @@
-; The serialize.js roadmap: the data ROADMAP.md is generated from.
-; Data, never evaluated. Edit this file, then regenerate ROADMAP.md from it with the
-; roadmap generator.
-; Never edit ROADMAP.md by hand. Created 2026-10-14 when this repository's open GitHub issues and
-; unfinished pull requests were moved into it.
-(roadmap "v1"
- :title "serialize.js roadmap"
- :text "Planned work for serialize.js. The items below were open GitHub issues and pull requests, moved here on 2026-10-14 when roadmaps became the standard for future work. Each item names its issue or pull request; the branches of moved pull requests are kept to resume from. Landed work is in git."
-
- :groups
- (
-  (group "github-issues" :title "Moved from GitHub issues on 2026-10-14"
-   :text "Open GitHub issues of mas-bandwidth/serialize.js, recorded here on 2026-10-14 when roadmaps became the standard for future work. Each item names its issue; the issue is closed with a pointer here.")
-  (group "v2.1-open" :title "Left open at serialize.js 2.1.2"
-   :text "At 2.1.2 (2026-10-28) the port keeps the uniform rules of IMPLEMENTING.md (reference v2.1.1): write misuse, an operation that does not fit the room left included, throws and never latches (U9), copyString is serialize_copy_string (U15), and the bytes span is a documented language necessity (U15); each is proved in test/uniform-rules.test.js and test/uniform-rules-checked.test.js. Landed work is in git, so its items are gone from here. What stays open is below.")
- )
-
- :items
- (
-  (item "issue-22" :group "github-issues" :area "serialize.js"
-   :title "measure a capacity-reading BitReader: offer the 8-byte slack contract from ArrayBuffer spare capacity, as the Go port does with cap()"
-   :text "The BitReader in src/bitpacker.js takes the zero-slack option: it requires no allocation past the data and pays for that with reset-time work plus a compare in the window load. The standard admits that shape only as the slower correct option, so the faster one should at least be measured before the choice stands on cost."
-   :date "2026-10-14"
-   :origin "mas-bandwidth/serialize.js issue #22, opened 2026-09-13 by rowan-claude; moved here 2026-10-14"
-   :kept (:github-issue "22" :labels ""))
-  (item "read-buffer-measure" :group "v2.1-open" :area "serialize.js"
-   :title "measure the zero-slack reader's per-load compare against the 8-byte slack contract"
-   :text "The zero-slack BitReader pays reset-time window assembly and a compare per window load, which IMPLEMENTING.md's buffer contract calls the slower correct option (speed rule). Same as issue-22, and the same question is open in the Java port. Since 2.1.1 the read-buffer docs (CLAUDE.md, USAGE.md, the BitReader comment) state the contract the reader actually has and that it is unmeasured; the measurement is still owed. Timing runs only on a dedicated machine, with nothing else running. Done when: the slack contract is measured against the zero-slack reader on that machine, and the faster one ships with its contract documented."
-   :date "2026-10-27"
-   :origin "cross-port review of the read-buffer contract, 2026-10-27; docs half closed in 2.1.1")
-  (item "u7-null-ref" :group "v2.1-open" :area "serialize.js"
-   :title "U7: a read handed no ref holder (undefined or null) throws a TypeError from the language"
-   :text "Every read assigns ref.value, so a caller that passes undefined or null as the holder gets a TypeError from the runtime, not a value_out_of_range refusal. Refusing it costs a check on every read on the hot path, which the speed rule says must be measured first. Done when: the per-read check is measured on a dedicated machine and either lands with a unit test, or the reference rules a missing holder a language-level error outside U7."
-   :date "2026-10-27"
-   :origin "2.1.1 review of the uniform rules (U7)")
- ))
+; serialize.js roadmap: the data ROADMAP.md is generated from (nova-roadmap, a nova-tools release binary;
+; make roadmap renders, make roadmap-check fails on drift). Read as data, never evaluated.
+; A cell is done only when its task is :done with :evidence, a test or a commit;
+; :tested-revision is the main commit whose CI passed with that evidence.
+(:schema 1
+ :root "goal"
+ :page (:roadmaps ("bitpacker" "operations" "safety" "compat" "platform"))
+ :nodes
+ ((:id "goal" :type :work-set :children ("bitpacker" "operations" "safety" "compat" "platform"))
+  (:id "bitpacker" :type :roadmap :title "Bit packing"
+   :rows (("writer" "BitWriter: any width 1-32 at any bit offset, trailing bits zeroed")
+          ("reader" "BitReader: any width at any offset, refuses past the end")
+          ("any-length" "reads any data length with no slack past the data")
+          ("bulk-bytes" "bulk byte copy, identical to per-byte bits")
+          ("reuse" "reset for allocation-free reuse")
+          ("slack-reader" "a faster BitReader using the 8-byte slack from spare ArrayBuffer capacity, measured"))
+   :columns (("done" "done"))
+   :cells (("writer" "done" "bitpacker/writer")
+           ("reader" "done" "bitpacker/reader")
+           ("any-length" "done" "bitpacker/any-length")
+           ("bulk-bytes" "done" "bitpacker/bulk-bytes")
+           ("reuse" "done" "bitpacker/reuse")
+           ("slack-reader" "done" "bitpacker/slack-reader")))
+  (:id "bitpacker/writer" :type :task :title "BitWriter: any width 1-32 at any bit offset, trailing bits zeroed" :state :done :evidence ("test/bitwriter.test.js: known sequence E: mixed widths at odd offsets" "test/bitwriter.test.js: unaligned flush shapes: trailing bits are zero by construction" "test/writer-tail-span.test.js: tail span: every bit count from 0 to 384") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "bitpacker/reader" :type :task :title "BitReader: any width at any offset, refuses past the end" :state :done :evidence ("test/bitreader.test.js: every width 1..32 at every bit offset 0..7 round-trips" "test/bitreader.test.js: past-end refusal proven both ways at the exact boundary") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "bitpacker/any-length" :type :task :title "reads any data length with no slack past the data" :state :done :evidence ("test/bitreader.test.js: short buffers: every length 0..7 lives entirely in the tail window" "test/bitreader.test.js: subarray at a nonzero byte offset reads identically") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "bitpacker/bulk-bytes" :type :task :title "bulk byte copy, identical to per-byte bits" :state :done :evidence ("test/bitpacker-bytes.test.js: writeBytes matches per-byte writeBits at every aligned offset and length" "test/bitpacker-bytes.test.js: writeBytes across many words exercises the bulk path") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "bitpacker/reuse" :type :task :title "reset for allocation-free reuse" :state :done :evidence ("test/bitwriter.test.js: reset clears state and allows reuse" "test/streams.test.js: reset clears the streams for allocation-free reuse") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "bitpacker/slack-reader" :type :task :title "a faster BitReader using the 8-byte slack from spare ArrayBuffer capacity, measured" :state :todo
+   :note "src/bitpacker.js takes the zero-slack option, which pays reset-time window assembly and a compare per window load; the slack-contract reader (as the Go port reads cap()) should be measured before the choice stands on cost. Since 2.1.1 the read-buffer docs state the contract the reader actually has and that it is unmeasured. Timing runs only on a dedicated machine, with nothing else running. Done when the faster one ships with its contract documented."
+   :github-issue "22"
+   :old-item ("issue-22" "read-buffer-measure"))
+  (:id "operations" :type :roadmap :title "Operations"
+   :rows (("three-streams" "one serialize function for write, read and measure")
+          ("bits" "raw bits (1-32, 1-64) and align")
+          ("int" "ranged integers: 32, 64 and 128 bit")
+          ("uint-bool" "unsigned helpers (8 to 128 bit) and bool")
+          ("float" "float and double, bit transparent")
+          ("compressed-float" "compressed float")
+          ("bytes" "bytes")
+          ("string" "UTF-8 strings")
+          ("int-relative" "relative integer for increasing sequences")
+          ("fixed" "fixed point (Q formats, 8 to 128 bit storage)")
+          ("bits-required" "range pricing: bitsRequired 32, 64 and 128")
+          ("measure" "measure never under-prices a write"))
+   :columns (("done" "done"))
+   :cells (("three-streams" "done" "operations/three-streams")
+           ("bits" "done" "operations/bits")
+           ("int" "done" "operations/int")
+           ("uint-bool" "done" "operations/uint-bool")
+           ("float" "done" "operations/float")
+           ("compressed-float" "done" "operations/compressed-float")
+           ("bytes" "done" "operations/bytes")
+           ("string" "done" "operations/string")
+           ("int-relative" "done" "operations/int-relative")
+           ("fixed" "done" "operations/fixed")
+           ("bits-required" "done" "operations/bits-required")
+           ("measure" "done" "operations/measure")))
+  (:id "operations/three-streams" :type :task :title "one serialize function for write, read and measure" :state :done :evidence ("test/streams.test.js: the flags tell a serialize function which way data flows" "test/streams.test.js: write/read/measure triangle on a small sequence") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "operations/bits" :type :task :title "raw bits (1-32, 1-64) and align" :state :done :evidence ("test/serialize-bits64.test.js: boundary values round trip at the group-structure edges" "test/align.test.js: writeAlign pads to the byte boundary from every offset") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "operations/int" :type :task :title "ranged integers: 32, 64 and 128 bit" :state :done :evidence ("test/serialize-int.test.js: boundary values round trip at every range shape" "test/serialize-int64.test.js: the full int64 range is exact: wider than 2^63 in the unsigned domain" "test/serialize-int128.test.js: the full int128 range is exact: wider than 2^127 in the unsigned domain") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "operations/uint-bool" :type :task :title "unsigned helpers (8 to 128 bit) and bool" :state :done :evidence ("test/uint-helpers.test.js: write/read/measure triangle across the integer surface" "test/serialize-uint128.test.js: the golden pin: 16 bytes in little-endian order, low half first") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "operations/float" :type :task :title "float and double, bit transparent" :state :done :evidence ("test/serialize-float.test.js: double round trips every finite value exactly: the number IS a float64" "test/serialize-float.test.js: every finite edge pattern writes, reads and re-encodes bit exact") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "operations/compressed-float" :type :task :title "compressed float" :state :done :evidence ("test/serialize-compressed-float.test.js: the nonzero-min conformance trio writes exactly the pinned bytes" "test/serialize-compressed-float.test.js: the reader decodes with two float32 roundings: integer 384 pinned by bits") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "operations/bytes" :type :task :title "bytes" :state :done :evidence ("test/serialize-bytes.test.js: bytes round-trip at every starting bit offset") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "operations/string" :type :task :title "UTF-8 strings" :state :done :evidence ("test/serialize-string.test.js: multi-code-point round trip at every starting bit offset") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "operations/int-relative" :type :task :title "relative integer for increasing sequences" :state :done :evidence ("test/serialize-int-relative.test.js: every tier round trips at its exact bit cost" "test/serialize-int-relative.test.js: sequence use: consecutive values cost one bit each") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "operations/fixed" :type :task :title "fixed point (Q formats, 8 to 128 bit storage)" :state :done :evidence ("test/serialize-fixed.test.js: the narrow matrix: every Q format of 32 bits or fewer round trips exactly" "test/serialize-fixed.test.js: the wide matrix: 128-bit storage in up to four groups") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "operations/bits-required" :type :task :title "range pricing: bitsRequired 32, 64 and 128" :state :done :evidence ("test/bits-required.test.js: bitsRequired matches serialize.h across range shapes" "test/bits-required-wide.test.js: bitsRequired128 at every group boundary") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "operations/measure" :type :task :title "measure never under-prices a write" :state :done :evidence ("test/measure.test.js: measure >= bits written at every starting offset 0..7" "test/golden-wire.test.js: measure bounds the write at every one of the 8 starting offsets") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "safety" :type :roadmap :title "Errors and hostile input"
+   :rows (("errors-as-values" "errors as values: a sticky latched stream error")
+          ("never-throws" "hostile input never throws")
+          ("refusals" "every operation refuses malformed data, proven both ways")
+          ("checked-build" "checked build: caller misuse throws")
+          ("production" "production mode (NODE_ENV=production) trusts the caller, same wire")
+          ("u7-null-ref" "a read handed no ref holder (undefined or null) refuses, not a TypeError"))
+   :columns (("done" "done"))
+   :cells (("errors-as-values" "done" "safety/errors-as-values")
+           ("never-throws" "done" "safety/never-throws")
+           ("refusals" "done" "safety/refusals")
+           ("checked-build" "done" "safety/checked-build")
+           ("production" "done" "safety/production")
+           ("u7-null-ref" "done" "safety/u7-null-ref")))
+  (:id "safety/errors-as-values" :type :task :title "errors as values: a sticky latched stream error" :state :done :evidence ("test/stream-errors.test.js: read past the end latches PastEnd and leaves the ref unmodified" "test/stream-errors.test.js: every read failure is terminal: the next valid read fails and writes nothing") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "safety/never-throws" :type :task :title "hostile input never throws" :state :done :evidence ("test/stream-errors.test.js: hostile input never throws: every 1-byte doctoring of a valid packet" "test/golden-wire.test.js: the sabotage sweep: flipping any bit defeats the battery, and no flip ever throws") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "safety/refusals" :type :task :title "every operation refuses malformed data, proven both ways" :state :done :evidence ("test/serialize-int-refusals.test.js: headroom smuggling refused, boundary neighbor accepted: [0,6]" "test/serialize-string-refusals.test.js: overlong encodings refused at both widths, the smallest legal sequences accepted" "test/serialize-fixed-refusals.test.js: reads refuse one raw step past the top of the range, on every lane") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "safety/checked-build" :type :task :title "checked build: caller misuse throws" :state :done :evidence ("test/streams.test.js: an invalid bits count is caller misuse: it throws on write and measure, and refuses on read" "test/serialize-int.test.js: an invalid range is caller misuse: it throws on write and measure, and refuses on read") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "safety/production" :type :task :title "production mode (NODE_ENV=production) trusts the caller, same wire" :state :done :evidence ("test/production/production-write-path.test.js: an invalid bits count that throws in dev passes through in production" "test/production/production-write-path.test.js: overflow still latches in production: sticky, wire intact, reset clears" ".github/workflows/ci.yml: test job, Test (production write path)") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "safety/u7-null-ref" :type :task :title "a read handed no ref holder (undefined or null) refuses, not a TypeError" :state :todo
+   :note "Every read assigns ref.value, so a missing holder gets a TypeError from the runtime, not a value_out_of_range refusal. Refusing it costs a check on every read on the hot path, which the speed rule says must be measured first. Done when the per-read check is measured on a dedicated machine and either lands with a unit test, or the reference rules a missing holder a language-level error outside U7."
+   :old-item "u7-null-ref")
+  (:id "compat" :type :roadmap :title "Wire compatibility"
+   :rows (("standard" "STANDARD.md format version 2.0, kept in sync with upstream")
+          ("corpus" "the shared conformance corpus, every vector")
+          ("golden-wire" "the golden wire message, byte identical to the reference")
+          ("cpp-interop" "live interop with the C++ reference, both directions")
+          ("trailing-bits" "trailing bits and past-end bytes: fields ignore them, the end refuses trailing data"))
+   :columns (("done" "done"))
+   :cells (("standard" "done" "compat/standard")
+           ("corpus" "done" "compat/corpus")
+           ("golden-wire" "done" "compat/golden-wire")
+           ("cpp-interop" "done" "compat/cpp-interop")
+           ("trailing-bits" "done" "compat/trailing-bits")))
+  (:id "compat/standard" :type :task :title "STANDARD.md format version 2.0, kept in sync with upstream" :state :done :evidence (".github/workflows/ci.yml: standard job (STANDARD.md and conformance/ match upstream)") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "compat/corpus" :type :task :title "the shared conformance corpus, every vector" :state :done :evidence ("test/conformance.test.js: the corpus is present and every file parses into records" ".github/workflows/ci.yml: interop job, Both halves run the shared conformance corpus") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "compat/golden-wire" :type :task :title "the golden wire message, byte identical to the reference" :state :done :evidence ("test/golden-wire.test.js: write side: serializing the golden values produces exactly the golden bytes" "test/golden-wire.test.js: read side: the golden bytes decode to the expected values, on every platform, forever") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "compat/cpp-interop" :type :task :title "live interop with the C++ reference, both directions" :state :done :evidence (".github/workflows/ci.yml: interop job (pinned C++ release; write, read and refuse both ways)" "commit f42b65f (A live interop job: this port exchanges bytes with the pinned C++ reference, #16)") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "compat/trailing-bits" :type :task :title "trailing bits and past-end bytes: fields ignore them, the end refuses trailing data" :state :done :evidence ("test/golden-wire.test.js: trailing bits: a doctored golden stream decodes every field, and its end refuses" "test/golden-wire.test.js: past-end poison: bytes past the stream end are never interpreted") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "platform" :type :roadmap :title "Platforms and packaging"
+   :rows (("node" "Node 20 and 22 on Linux, macOS and Windows")
+          ("esm" "pure ESM, zero dependencies, no build step")
+          ("property-sweep" "fixed-seed property sweep across the whole surface")
+          ("npm" "published on npm under a scoped name"))
+   :columns (("done" "done"))
+   :cells (("node" "done" "platform/node")
+           ("esm" "done" "platform/esm")
+           ("property-sweep" "done" "platform/property-sweep")
+           ("npm" "done" "platform/npm")))
+  (:id "platform/node" :type :task :title "Node 20 and 22 on Linux, macOS and Windows" :state :done :evidence (".github/workflows/ci.yml: test job, matrix node 20/22 on ubuntu-24.04, macos-15, windows-2025, green on ff765a1") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "platform/esm" :type :task :title "pure ESM, zero dependencies, no build step" :state :done :evidence ("test/smoke.test.js: package entry point loads") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "platform/property-sweep" :type :task :title "fixed-seed property sweep across the whole surface" :state :done :evidence ("test/property-sweep.test.js: random op programs: write == read exactly, measure >= write, nothing throws") :tested-revision "ff765a1a89a89dc3f6e818e553baabf189241b4e")
+  (:id "platform/npm" :type :task :title "published on npm under a scoped name" :state :todo
+   :note "README: the package is not yet published and the npm name is undecided (the bare name serialize belongs to an unrelated package).")))
